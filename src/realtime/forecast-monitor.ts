@@ -8,19 +8,22 @@ import { DataStore } from './data-store.js';
 import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { ForecastSnapshot } from './types.js';
 import { logger } from '../logger.js';
+import { config } from '../config.js';
 
 export class ForecastMonitor {
     private weatherService: WeatherService;
     private store: DataStore;
-    private pollIntervalMs: number = 300000; // 5 min default
+    private pollIntervalMs: number;
     private isRunning: boolean = false;
     private pollTimeout: NodeJS.Timeout | null = null;
     private cityCache: Map<string, { data: WeatherData, timestamp: Date }> = new Map();
 
-    constructor(store: DataStore, pollIntervalMs: number = 300000) {
+    constructor(store: DataStore, pollIntervalMs?: number) {
         this.store = store;
         this.weatherService = new WeatherService();
-        this.pollIntervalMs = pollIntervalMs;
+        // Use config default (30s) for speed arbitrage, or allow override
+        this.pollIntervalMs = pollIntervalMs ?? config.forecastPollIntervalMs;
+        logger.info(`ForecastMonitor initialized with ${this.pollIntervalMs / 1000}s polling interval`);
     }
 
     /**

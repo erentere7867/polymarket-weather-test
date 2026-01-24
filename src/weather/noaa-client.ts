@@ -226,25 +226,67 @@ export class NOAAClient {
 
     /**
      * Get expected snowfall for a date range (inches)
+     * Uses intensity-based estimation from forecast text and conditions
      */
     async getExpectedSnowfall(coords: Coordinates, startDate: Date, endDate: Date): Promise<number> {
         const weather = await this.getHourlyForecast(coords);
 
-        // NOAA doesn't give exact snowfall in hourly, so we estimate from forecasts
-        // Look for snow-related keywords and precipitation probability
-        let snowHours = 0;
+        let totalSnowfall = 0;
 
         for (const hour of weather.hourly) {
             if (hour.timestamp >= startDate && hour.timestamp <= endDate) {
-                if (hour.precipitationType === 'snow' && hour.probabilityOfPrecipitation > 50) {
-                    snowHours++;
+                if (hour.precipitationType === 'snow' && hour.probabilityOfPrecipitation > 30) {
+                    // Estimate snowfall rate based on forecast intensity keywords and conditions
+                    const snowRate = this.estimateSnowRate(hour.shortForecast || '', hour.temperatureF, hour.probabilityOfPrecipitation);
+
+                    // Weight by probability (e.g., 60% chance = 0.6 multiplier)
+                    const probabilityWeight = hour.probabilityOfPrecipitation / 100;
+                    totalSnowfall += snowRate * probabilityWeight;
                 }
             }
         }
 
-        // Rough estimate: 0.5 inches per hour of likely snow
-        return snowHours * 0.5;
+        return Math.round(totalSnowfall * 10) / 10; // Round to 1 decimal
     }
+
+    /**
+     * Estimate hourly snow rate (inches/hour) based on forecast text and conditions
+     */
+    private estimateSnowRate(forecast: string, tempF: number, probability: number): number {
+        const lower = forecast.toLowerCase();
+
+        // Base rate depends on intensity keywords
+        let baseRate: number;
+
+        if (lower.includes('heavy snow') || lower.includes('blizzard') || lower.includes('significant snow')) {
+            baseRate = 1.5; // Heavy: 1-2+ inches/hour
+        } else if (lower.includes('moderate snow')) {
+            baseRate = 0.75; // Moderate: 0.5-1 inch/hour
+        } else if (lower.includes('light snow') || lower.includes('snow flurries') || lower.includes('flurries')) {
+            baseRate = 0.2; // Light: 0.1-0.3 inches/hour
+        } else if (lower.includes('snow showers')) {
+            baseRate = 0.4; // Showers: intermittent, variable
+        } else if (lower.includes('snow')) {
+            // Generic "snow" - use moderate-light estimate
+            baseRate = 0.5;
+        } else {
+            baseRate = 0.3; // Default conservative estimate
+        }
+
+        // Adjust based on temperature (colder = fluffier snow = more accumulation)
+        // Snow-to-liquid ratio: ~10:1 at 30°F, ~15:1 at 20°F, ~20:1 at 10°F
+        let tempMultiplier = 1.0;
+        if (tempF < 15) {
+            tempMultiplier = 1.5; // Very cold = fluffy snow, higher accumulation
+        } else if (tempF < 25) {
+            tempMultiplier = 1.2; // Cold = good accumulation
+        } else if (tempF > 30) {
+            tempMultiplier = 0.7; // Near freezing = wet snow, less accumulation
+        }
+
+        return baseRate * tempMultiplier;
+    }
+
 
     private fahrenheitToCelsius(f: number): number {
         return Math.round(((f - 32) * 5 / 9) * 10) / 10;
