@@ -49,22 +49,38 @@ export class WeatherScanner {
     async scanForWeatherMarkets(): Promise<ParsedWeatherMarket[]> {
         logger.info('Scanning Polymarket for weather markets...');
 
-        const allEvents = await this.gammaClient.getActiveEvents(200);
+        // Fetch weather-specific tags: "Climate & Weather" (1474) and "Climate" (87)
+        const weatherTagId = '1474';
+        const climateTagId = '87';
+
+        // Run fetches in parallel
+        const [tagEvents1, tagEvents2] = await Promise.all([
+            this.gammaClient.getEventsByTag(weatherTagId, 100),
+            this.gammaClient.getEventsByTag(climateTagId, 100) // Fallback/Additional
+        ]);
+
+        // Merge and deduplicate by ID
+        const allEventsMap = new Map<string, PolymarketEvent>();
+        [...tagEvents1, ...tagEvents2].forEach(e => allEventsMap.set(e.id, e));
+
+        const allEvents = Array.from(allEventsMap.values());
+        logger.info(`Fetched ${allEvents.length} unique events from weather tags`);
+
         const weatherMarkets: ParsedWeatherMarket[] = [];
 
         for (const event of allEvents) {
             for (const market of event.markets) {
-                if (this.isWeatherMarket(market, event)) {
-                    const parsed = this.parseWeatherMarket(market, event);
-                    if (parsed) {
-                        weatherMarkets.push(parsed);
-                    }
+                // We still check isWeatherMarket just in case, but rely less on keywords since tags are specific
+                const parsed = this.parseWeatherMarket(market, event);
+                if (parsed) {
+                    weatherMarkets.push(parsed);
                 }
             }
         }
 
-        logger.info(`Found ${weatherMarkets.length} weather markets`);
-        return weatherMarkets;
+        const validMarkets = this.filterActionableMarkets(weatherMarkets);
+        logger.info(`Found ${validMarkets.length} valid weather markets (from ${weatherMarkets.length} candidates)`);
+        return validMarkets;
     }
 
     /**
@@ -289,19 +305,31 @@ export class WeatherScanner {
     filterActionableMarkets(markets: ParsedWeatherMarket[]): ParsedWeatherMarket[] {
         return markets.filter(m => {
             // Must have a known city
-            if (!m.city) return false;
+            if (!m.city) {
+                logger.debug(`Rejecting ${m.market.question}: No city found`);
+                return false;
+            }
 
             // Must be a supported metric type
-            if (m.metricType === 'unknown') return false;
+            if (m.metricType === 'unknown') {
+                logger.debug(`Rejecting ${m.market.question}: Unknown metric`);
+                return false;
+            }
 
             // Must have valid prices
-            if (m.yesPrice <= 0 && m.noPrice <= 0) return false;
+            if (m.yesPrice <= 0 && m.noPrice <= 0) {
+                logger.debug(`Rejecting ${m.market.question}: No liquidity (Price 0)`);
+                return false;
+            }
 
             // Must have target date within forecast range (7 days)
             if (m.targetDate) {
                 const now = new Date();
                 const daysUntil = (m.targetDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
-                if (daysUntil < 0 || daysUntil > 7) return false;
+                if (daysUntil < -2 || daysUntil > 14) { // Relaxed window: -2 to +14 days
+                    logger.debug(`Rejecting ${m.market.question}: Date out of range (${daysUntil.toFixed(1)} days)`);
+                    return false;
+                }
             }
 
             return true;
