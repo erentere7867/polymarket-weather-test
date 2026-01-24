@@ -15,6 +15,8 @@ import { DataStore } from '../realtime/data-store.js';
 import { PriceTracker } from '../realtime/price-tracker.js';
 import { ForecastMonitor } from '../realtime/forecast-monitor.js';
 import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
+import { ExitOptimizer } from '../strategy/exit-optimizer.js';
+import { MarketModel } from '../probability/market-model.js';
 
 export class SimulationRunner {
     private store: DataStore;
@@ -23,6 +25,8 @@ export class SimulationRunner {
     private strategy: SpeedArbitrageStrategy;
     private simulator: PortfolioSimulator;
     private scanner: WeatherScanner;
+    private exitOptimizer: ExitOptimizer;
+    private marketModel: MarketModel;
 
     private isRunning: boolean = false;
     private cycles: number = 0;
@@ -34,6 +38,8 @@ export class SimulationRunner {
         this.priceTracker = new PriceTracker(this.store);
         this.forecastMonitor = new ForecastMonitor(this.store);
         this.strategy = new SpeedArbitrageStrategy(this.store);
+        this.marketModel = new MarketModel(this.store);
+        this.exitOptimizer = new ExitOptimizer(this.marketModel);
 
         // Initialize Simulator
         this.simulator = new PortfolioSimulator(startingCapital);
@@ -58,17 +64,15 @@ export class SimulationRunner {
             return;
         }
 
-        // 2. Register markets and start tracking
+        // Register markets and start tracking
         for (const market of markets) {
             this.store.addMarket(market);
             this.priceTracker.trackMarket(market.market.id);
         }
 
-        // 3. Connect WebSocket
+        // 2. Connect to Real-Time Data
         await this.priceTracker.connect();
-
-        // 4. Start Forecast Monitor (Initial fetch)
-        // We force an immediate poll by starting it
+        await this.priceTracker.startPolling(this.scanner, 60000); // Fallback: poll every 1 min
         this.forecastMonitor.start();
 
         // Wait a bit for initial data to populate
@@ -98,49 +102,62 @@ export class SimulationRunner {
         this.updatePortfolioPrices();
 
         // 2. Detect Opportunities
-        const edges = this.strategy.detectOpportunities();
-        if (edges.length > 0) {
-            logger.info(`🔎 Found ${edges.length} opportunities`);
+        const signals = this.strategy.detectOpportunities();
+        if (signals.length > 0) {
+            logger.info(`🔎 Found ${signals.length} opportunities`);
         }
 
         // 3. Execute Trades (Simulated)
-        for (const edge of edges) {
-            // Map CalculatedEdge to TradingOpportunity format for Simulator
-            // This is a bit of a bridge between v2 Edge and v1 Simulator
-            // In a full refactor, Simulator would accept CalculatedEdge
+        for (const signal of signals) {
 
-            const state = this.store.getMarketState(edge.marketId);
+            const state = this.store.getMarketState(signal.marketId);
             if (!state) continue;
 
-            // Calculate position size based on Kelly
-            const portfolioValue = this.simulator.getAllPositions().reduce((sum, p) => sum + (p.shares * p.currentPrice), this.simulator.getCashBalance());
-            const size = Math.min(
-                config.maxPositionSize * 1000, // Scale up for simulation (e.g. $10k instead of $10)
-                portfolioValue * edge.KellyFraction
-            );
+            const size = signal.size;
 
             if (size < 10) continue; // Too small
 
             // Check if we already have a position
             // Ideally the strategy handles this, but for now strict check
-            const existingPos = this.simulator.getAllPositions().find(p => p.marketId === edge.marketId && p.side === edge.side);
+            const existingPos = this.simulator.getAllPositions().find(p => p.marketId === signal.marketId && p.side === signal.side);
             if (existingPos) continue;
 
             // Execute
             this.simulator.openPosition({
                 market: state.market,
-                forecastProbability: 0, // Not used in v2 sim directly mostly
+                forecastProbability: 0,
                 marketProbability: 0,
-                edge: edge.adjustedEdge,
-                action: edge.side === 'yes' ? 'buy_yes' : 'buy_no',
-                confidence: edge.confidence,
-                reason: edge.reason,
-                weatherDataSource: 'noaa' // Placeholder
+                edge: signal.estimatedEdge,
+                action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
+                confidence: signal.confidence,
+                reason: signal.reason,
+                weatherDataSource: 'noaa'
             }, size);
         }
 
-        // 4. Check Take Profit / Stop Loss
-        this.simulator.checkClosures();
+        // 4. Check Take Profit / Stop Loss (Smart Exit)
+        const openPositions = this.simulator.getOpenPositions();
+        for (const pos of openPositions) {
+            const state = this.store.getMarketState(pos.marketId);
+            const forecastProb = state?.lastForecast?.probability || 0.5;
+
+            const pnlPercent = (pos.currentPrice - pos.entryPrice) / pos.entryPrice;
+
+            const exitSignal = this.exitOptimizer.checkExit({
+                marketId: pos.marketId,
+                side: pos.side,
+                entryPrice: pos.entryPrice,
+                currentPrice: pos.currentPrice,
+                size: pos.shares,
+                entryTime: pos.entryTime,
+                pnl: pos.unrealizedPnL,
+                pnlPercent
+            }, forecastProb);
+
+            if (exitSignal.shouldExit) {
+                this.simulator.closePosition(pos.id, pos.currentPrice, exitSignal.reason);
+            }
+        }
 
         // 5. Print Stats every 5 cycles
         if (this.cycles % 5 === 0) {

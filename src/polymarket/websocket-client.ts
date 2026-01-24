@@ -127,7 +127,7 @@ export class PolymarketWebSocket {
             this.ws.send(JSON.stringify({
                 type: 'unsubscribe',
                 channel: 'market',
-                assets_ids: [tokenId],
+                token_ids: [tokenId],
             }));
         }
     }
@@ -137,11 +137,12 @@ export class PolymarketWebSocket {
      */
     private sendSubscription(tokenId: string): void {
         if (this.ws && this.isConnected) {
-            this.ws.send(JSON.stringify({
+            const payload = {
                 type: 'subscribe',
                 channel: 'market',
-                token_ids: [tokenId], // Changed to token_ids
-            }));
+                token_ids: [tokenId], // Reverted to token_ids
+            };
+            this.ws.send(JSON.stringify(payload));
             logger.debug(`Subscribed to token: ${tokenId.substring(0, 20)}...`);
         }
     }

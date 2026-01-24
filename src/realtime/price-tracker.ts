@@ -6,6 +6,7 @@
 import { PolymarketWebSocket } from '../polymarket/websocket-client.js';
 import { DataStore } from './data-store.js';
 import { logger } from '../logger.js';
+import { WeatherScanner } from '../polymarket/weather-scanner.js';
 
 export class PriceTracker {
     private ws: PolymarketWebSocket;
@@ -60,5 +61,33 @@ export class PriceTracker {
      */
     disconnect(): void {
         this.ws.disconnect();
+    }
+
+    /**
+     * Start polling prices via REST API (Fallback)
+     */
+    async startPolling(scanner: WeatherScanner, intervalMs: number = 60000): Promise<void> {
+        logger.info('Starting PriceTracker polling fallback...');
+
+        const poll = async () => {
+            try {
+                // logger.debug('Polling prices via REST...');
+                const markets = await scanner.scanForWeatherMarkets();
+                const now = new Date();
+
+                for (const market of markets) {
+                    this.store.updatePrice(market.yesTokenId, market.yesPrice, now);
+                    this.store.updatePrice(market.noTokenId, market.noPrice, now);
+                }
+            } catch (error) {
+                logger.error('Price polling failed', { error: (error as Error).message });
+            }
+        };
+
+        // Initial poll
+        await poll();
+
+        // Loop
+        setInterval(poll, intervalMs);
     }
 }
