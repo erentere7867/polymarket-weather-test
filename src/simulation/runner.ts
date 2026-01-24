@@ -64,15 +64,13 @@ export class SimulationRunner {
             return;
         }
 
-        // Register markets and start tracking
+        // Register markets
         for (const market of markets) {
             this.store.addMarket(market);
-            this.priceTracker.trackMarket(market.market.id);
         }
 
-        // 2. Connect to Real-Time Data
-        await this.priceTracker.connect();
-        await this.priceTracker.startPolling(this.scanner, 60000); // Fallback: poll every 1 min
+        // 2. Connect to Real-Time Data (Polling)
+        await this.priceTracker.start(this.scanner, 3000); // 3s polling
         this.forecastMonitor.start();
 
         // Wait a bit for initial data to populate
@@ -195,8 +193,7 @@ export class SimulationRunner {
 
     stop(): void {
         logger.info('Stopping simulation...');
-        this.isRunning = false;
-        this.priceTracker.disconnect();
+        // this.priceTracker.disconnect(); // Removed in v2 optimization
         this.forecastMonitor.stop();
         this.simulator.printSummary();
     }
