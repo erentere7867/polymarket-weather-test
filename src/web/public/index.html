@@ -167,7 +167,7 @@
                 const portData = await portRes.json();
 
                 document.getElementById('total-equity').innerText = formatCurrency(portData.totalValue);
-                document.getElementById('cash-balance').innerText = formatCurrency(portData.cash);
+                document.getElementById('cash-balance').innerText = formatCurrency(portData.currentCash);
 
                 const pnl = portData.unrealizedPnL + portData.realizedPnL; // Simplified
                 const pnlEl = document.getElementById('total-pnl');
