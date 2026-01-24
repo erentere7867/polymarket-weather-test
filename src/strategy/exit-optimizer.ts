@@ -28,7 +28,7 @@ export class ExitOptimizer {
     private marketModel: MarketModel;
 
     // Configuration
-    private takeProfitThreshold: number = 0.20; // 20%
+    private takeProfitThreshold: number = 0.05; // 5% - aggressive micro-profits
     private stopLossThreshold: number = -0.10;  // -10%
     private timeLimitMs: number = 24 * 60 * 60 * 1000; // 24 hours max hold
 
