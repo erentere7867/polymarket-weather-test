@@ -37,6 +37,15 @@ export class ExitOptimizer {
     }
 
     /**
+     * Update configuration thresholds
+     */
+    updateConfig(takeProfit: number, stopLoss: number): void {
+        this.takeProfitThreshold = takeProfit;
+        this.stopLossThreshold = stopLoss;
+        logger.info(`ExitOptimizer config updated: TP=${(takeProfit * 100).toFixed(1)}%, SL=${(stopLoss * 100).toFixed(1)}%`);
+    }
+
+    /**
      * Check if a position should be exited
      */
     checkExit(position: Position, forecastProbability: number): ExitSignal {

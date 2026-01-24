@@ -209,6 +209,17 @@ export class SimulationRunner {
         return this.isRunning;
     }
 
+    updateSettings(settings: { takeProfit: number; stopLoss: number }): void {
+        // Convert percentage (e.g. 5) to fraction (0.05) if needed, but assuming input is fraction or %?
+        // Let's assume input is raw number from UI (e.g. 5 for 5%) -> div 100
+        // OR input is already fraction.
+        // Let's standardize: UI sends PERCENTAGE (5, 10). We convert to fraction here.
+        // Wait, standard is fraction in optimizer. I'll document input as fraction.
+
+        this.exitOptimizer.updateConfig(settings.takeProfit, settings.stopLoss);
+        logger.info('Simulation settings updated');
+    }
+
     stop(): void {
         logger.info('Stopping simulation...');
         // this.priceTracker.disconnect(); // Removed in v2 optimization

@@ -64,10 +64,27 @@
                 <p id="cycle-count" class="text-sm mt-2 text-blue-400">Cycle #0</p>
             </div>
 
-            <!-- Open Pos Card -->
-            <div class="glass p-6 rounded-xl">
-                <p class="text-slate-500 text-xs uppercase tracking-wider">Open Positions</p>
-                <h2 id="open-positions-count" class="text-2xl font-bold mt-1">0</h2>
+        </div>
+
+        <!-- Settings Card -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4">Strategy Settings</h3>
+            <div class="flex flex-wrap gap-6 items-end">
+                <div>
+                    <label class="block text-slate-400 text-xs uppercase tracking-wider mb-2">Take Profit (%)</label>
+                    <input type="number" id="tp-input" value="5" step="0.5"
+                        class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-emerald-400 w-32 focus:outline-none focus:border-emerald-500 transition-colors">
+                </div>
+                <div>
+                    <label class="block text-slate-400 text-xs uppercase tracking-wider mb-2">Stop Loss (%)</label>
+                    <input type="number" id="sl-input" value="-10" step="0.5"
+                        class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-rose-400 w-32 focus:outline-none focus:border-rose-500 transition-colors">
+                </div>
+                <button onclick="saveSettings()"
+                    class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded font-medium transition-colors flex items-center space-x-2">
+                    <span>Save Configuration</span>
+                </button>
+                <div id="save-msg" class="text-sm opacity-0 transition-opacity"></div>
             </div>
         </div>
 
@@ -261,6 +278,40 @@
         // Poll every 3 seconds
         fetchStats();
         setInterval(fetchStats, 3000);
+        async function saveSettings() {
+            const tpInput = document.getElementById('tp-input');
+            const slInput = document.getElementById('sl-input');
+            const msgEl = document.getElementById('save-msg');
+
+            const takeProfit = parseFloat(tpInput.value);
+            const stopLoss = parseFloat(slInput.value);
+
+            try {
+                const res = await fetch(`${API_BASE}/settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ takeProfit, stopLoss })
+                });
+
+                if (res.ok) {
+                    msgEl.innerText = '✅ Settings Saved!';
+                    msgEl.className = 'text-sm text-emerald-400 opacity-100 transition-opacity';
+                } else {
+                    const data = await res.json();
+                    msgEl.innerText = '❌ Error: ' + (data.error || 'Failed');
+                    msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
+                }
+
+                setTimeout(() => {
+                    msgEl.className = 'text-sm opacity-0 transition-opacity';
+                }, 3000);
+
+            } catch (err) {
+                console.error('Save error:', err);
+                msgEl.innerText = '❌ Network Error';
+                msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
+            }
+        }
     </script>
 </body>
 

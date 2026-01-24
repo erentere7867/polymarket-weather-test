@@ -81,7 +81,25 @@ app.get('/api/positions/closed', (req, res) => {
     res.json(closedPositions.reverse());
 });
 
-// 5. Opportunities (Signals)
+// 5. Settings Update
+app.post('/api/settings', (req, res) => {
+    const { takeProfit, stopLoss } = req.body;
+
+    if (typeof takeProfit !== 'number' || typeof stopLoss !== 'number') {
+        return res.status(400).json({ error: 'Invalid settings format. Expected numbers for takeProfit and stopLoss (percentages).' });
+    }
+
+    // Convert from percentage (5) to fraction (0.05)
+    // The UI sends 5 for 5%, -10 for -10%
+    runner.updateSettings({
+        takeProfit: takeProfit / 100,
+        stopLoss: stopLoss / 100
+    });
+
+    res.json({ success: true, message: 'Settings updated' });
+});
+
+// 6. Opportunities (Signals)
 // Accessing latest signals might require storing them in DataStore or Strategy.
 // For now, we return empty list or just valid markets
 app.get('/api/opportunities', (req, res) => {
