@@ -1,0 +1,178 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speed Arbitrage Bot | Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #0f172a; /* Slate 900 */
+            color: #e2e8f0; /* Slate 200 */
+        }
+        .glass {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+    </style>
+</head>
+<body class="p-6">
+    <div class="max-w-7xl mx-auto space-y-6">
+        <!-- Header -->
+        <header class="flex justify-between items-center glass p-6 rounded-xl">
+            <div>
+                <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">
+                    Polymarket Speed Bot
+                </h1>
+                <p class="text-slate-400 text-sm">v2.0.0 • Speed Arbitrage Engine</p>
+            </div>
+            <div class="flex items-center space-x-4">
+                <div class="text-right">
+                    <p class="text-xs text-slate-500">STATUS</p>
+                    <p id="status-text" class="text-emerald-400 font-mono font-bold">ONLINE</p>
+                </div>
+                <div class="h-3 w-3 rounded-full bg-emerald-500 animate-pulse"></div>
+            </div>
+        </header>
+
+        <!-- Stats Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <!-- PnL Card -->
+            <div class="glass p-6 rounded-xl">
+                <p class="text-slate-500 text-xs uppercase tracking-wider">Total Equity</p>
+                <h2 id="total-equity" class="text-2xl font-bold mt-1">$0.00</h2>
+                <p id="total-pnl" class="text-sm mt-2 text-emerald-400">+$0.00 (0.00%)</p>
+            </div>
+            
+            <!-- Cash Card -->
+            <div class="glass p-6 rounded-xl">
+                <p class="text-slate-500 text-xs uppercase tracking-wider">Available Cash</p>
+                <h2 id="cash-balance" class="text-2xl font-bold mt-1">$0.00</h2>
+            </div>
+            
+            <!-- Cycles Card -->
+            <div class="glass p-6 rounded-xl">
+                <p class="text-slate-500 text-xs uppercase tracking-wider">Uptime / Cycles</p>
+                <h2 id="uptime" class="text-2xl font-bold mt-1">0s</h2>
+                <p id="cycle-count" class="text-sm mt-2 text-blue-400">Cycle #0</p>
+            </div>
+            
+            <!-- Open Pos Card -->
+            <div class="glass p-6 rounded-xl">
+                <p class="text-slate-500 text-xs uppercase tracking-wider">Open Positions</p>
+                <h2 id="open-positions-count" class="text-2xl font-bold mt-1">0</h2>
+            </div>
+        </div>
+
+        <!-- Active Positions Table -->
+        <div class="glass rounded-xl overflow-hidden">
+            <div class="p-6 border-b border-white/10 flex justify-between items-center">
+                <h3 class="text-xl font-bold">Active Trades</h3>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-slate-400">
+                    <thead class="bg-slate-800/50 text-xs uppercase">
+                        <tr>
+                            <th class="p-4">Market</th>
+                            <th class="p-4">Pos</th>
+                            <th class="p-4">Entry</th>
+                            <th class="p-4">Current</th>
+                            <th class="p-4">Size</th>
+                            <th class="p-4">PnL</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-table" class="divide-y divide-white/5">
+                        <!-- Rows injected by JS -->
+                        <tr>
+                            <td colspan="6" class="p-8 text-center text-slate-600 italic">No active positions... yet.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Logic -->
+    <script>
+        const API_BASE = '/api';
+
+        async function fetchStats() {
+            try {
+                // 1. Status
+                const statusRes = await fetch(`${API_BASE}/status`);
+                const statusData = await statusRes.json();
+                
+                document.getElementById('cycle-count').innerText = `Cycle #${statusData.cycles}`;
+                document.getElementById('uptime').innerText = formatTime(statusData.uptime);
+                
+                // 2. Portfolio
+                const portRes = await fetch(`${API_BASE}/portfolio`);
+                const portData = await portRes.json();
+
+                document.getElementById('total-equity').innerText = formatCurrency(portData.totalValue);
+                document.getElementById('cash-balance').innerText = formatCurrency(portData.cash);
+                
+                const pnl = portData.unrealizedPnL + portData.realizedPnL; // Simplified
+                const pnlEl = document.getElementById('total-pnl');
+                pnlEl.innerText = `${pnl >= 0 ? '+' : ''}${formatCurrency(pnl)}`;
+                pnlEl.className = `text-sm mt-2 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+
+                // 3. Positions
+                const posRes = await fetch(`${API_BASE}/positions/active`);
+                const positions = await posRes.json();
+                
+                document.getElementById('open-positions-count').innerText = positions.length;
+                renderPositions(positions);
+
+            } catch (err) {
+                console.error('Fetch error:', err);
+                document.getElementById('status-text').innerText = 'OFFLINE';
+                document.getElementById('status-text').className = 'text-rose-500 font-bold font-mono';
+            }
+        }
+
+        function renderPositions(positions) {
+            const tbody = document.getElementById('positions-table');
+            if (positions.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-slate-600 italic">No active positions... yet.</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = positions.map(p => `
+                <tr class="hover:bg-white/5 transition-colors">
+                    <td class="p-4 font-medium text-white truncate max-w-xs" title="${p.marketTitle}">${p.marketTitle}</td>
+                    <td class="p-4"><span class="px-2 py-1 rounded text-xs font-bold ${p.side === 'yes' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}">${p.side.toUpperCase()}</span></td>
+                    <td class="p-4">${formatPrice(p.entryPrice)}</td>
+                    <td class="p-4 text-white">${formatPrice(p.currentPrice)}</td>
+                    <td class="p-4">${p.shares}</td>
+                    <td class="p-4 font-mono font-bold ${p.pnlPercent >= 0 ? 'text-emerald-400' : 'text-rose-400'}">
+                        ${p.pnlPercent >= 0 ? '+' : ''}${p.pnlPercent.toFixed(2)}%
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function formatCurrency(num) {
+            return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
+        }
+
+        function formatPrice(num) {
+            return '$' + num.toFixed(3); // Polymarket cents
+        }
+
+        function formatTime(seconds) {
+            if (seconds < 60) return Math.floor(seconds) + 's';
+            const mins = Math.floor(seconds / 60);
+            const hrs = Math.floor(mins / 60);
+            if (hrs > 0) return `${hrs}h ${mins % 60}m`;
+            return `${mins}m ${seconds % 60}s`;
+        }
+
+        // Poll every 3 seconds
+        fetchStats();
+        setInterval(fetchStats, 3000);
+    </script>
+</body>
+</html>

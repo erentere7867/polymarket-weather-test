@@ -191,6 +191,23 @@ export class SimulationRunner {
         this.simulator.updatePrices(updatedMarkets);
     }
 
+    // API Accessors
+    getSimulator(): PortfolioSimulator {
+        return this.simulator;
+    }
+
+    getStore(): DataStore {
+        return this.store;
+    }
+
+    getCycles(): number {
+        return this.cycles;
+    }
+
+    isSimulationRunning(): boolean {
+        return this.isRunning;
+    }
+
     stop(): void {
         logger.info('Stopping simulation...');
         // this.priceTracker.disconnect(); // Removed in v2 optimization

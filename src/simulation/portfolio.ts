@@ -482,6 +482,13 @@ export class PortfolioSimulator {
             tradeHistory: this.tradeHistory,
         };
     }
+
+    /**
+     * Get portfolio stats (alias for API)
+     */
+    getPortfolio(): PortfolioStats {
+        return this.getStats();
+    }
     /**
      * Get all positions (alias for consistency)
      */

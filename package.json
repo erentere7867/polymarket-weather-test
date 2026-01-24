@@ -11,17 +11,23 @@
     "scan": "npx tsx src/test/scan-weather-markets.ts",
     "analyze": "npx tsx src/test/analyze-opportunities.ts",
     "test:weather": "npx tsx src/test/fetch-weather.ts",
-    "simulate": "npx tsx src/run-simulation.ts"
+    "simulate": "npx tsx src/run-simulation.ts",
+    "headless": "npx tsx src/headless.ts",
+    "start:server": "npx tsx src/web/server.ts"
   },
   "dependencies": {
     "@polymarket/clob-client": "^4.0.0",
     "axios": "^1.6.0",
+    "cors": "^2.8.6",
     "dotenv": "^16.3.0",
     "ethers": "^5.8.0",
+    "express": "^5.2.1",
     "winston": "^3.11.0",
     "ws": "^8.14.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^20.10.0",
     "@types/ws": "^8.5.0",
     "ts-node": "^10.9.0",
