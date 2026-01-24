@@ -46,6 +46,16 @@ export class ExitOptimizer {
     }
 
     /**
+     * Get current configuration
+     */
+    getConfig(): { takeProfit: number; stopLoss: number } {
+        return {
+            takeProfit: this.takeProfitThreshold,
+            stopLoss: this.stopLossThreshold
+        };
+    }
+
+    /**
      * Check if a position should be exited
      */
     checkExit(position: Position, forecastProbability: number): ExitSignal {

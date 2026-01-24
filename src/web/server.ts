@@ -99,6 +99,15 @@ app.post('/api/settings', (req, res) => {
     res.json({ success: true, message: 'Settings updated' });
 });
 
+app.get('/api/settings', (req, res) => {
+    const settings = runner.getSettings();
+    // Return as percentages for UI
+    res.json({
+        takeProfit: settings.takeProfit * 100,
+        stopLoss: settings.stopLoss * 100
+    });
+});
+
 // 6. Opportunities (Signals)
 // Accessing latest signals might require storing them in DataStore or Strategy.
 // For now, we return empty list or just valid markets

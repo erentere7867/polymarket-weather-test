@@ -220,6 +220,10 @@ export class SimulationRunner {
         logger.info('Simulation settings updated');
     }
 
+    getSettings(): { takeProfit: number; stopLoss: number } {
+        return this.exitOptimizer.getConfig();
+    }
+
     stop(): void {
         logger.info('Stopping simulation...');
         // this.priceTracker.disconnect(); // Removed in v2 optimization

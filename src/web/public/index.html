@@ -286,7 +286,23 @@
 
         // Poll every 3 seconds
         fetchStats();
+        fetchSettings();
         setInterval(fetchStats, 3000);
+
+        async function fetchSettings() {
+            try {
+                const res = await fetch(`${API_BASE}/settings`);
+                const data = await res.json();
+                
+                if (res.ok) {
+                    document.getElementById('tp-input').value = data.takeProfit;
+                    document.getElementById('sl-input').value = data.stopLoss;
+                }
+            } catch (err) {
+                console.error('Failed to fetch settings:', err);
+            }
+        }
+
         async function saveSettings() {
             const tpInput = document.getElementById('tp-input');
             const slInput = document.getElementById('sl-input');
