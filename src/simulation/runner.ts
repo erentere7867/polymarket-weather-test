@@ -129,7 +129,8 @@ export class SimulationRunner {
                 action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
                 confidence: signal.confidence,
                 reason: signal.reason,
-                weatherDataSource: 'noaa'
+                weatherDataSource: 'noaa',
+                isGuaranteed: signal.isGuaranteed || false
             }, size);
         }
 

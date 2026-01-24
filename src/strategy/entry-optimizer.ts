@@ -5,6 +5,7 @@
 
 import { CalculatedEdge } from '../probability/edge-calculator.js';
 import { MarketModel } from '../probability/market-model.js';
+import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 export interface EntrySignal {
@@ -17,6 +18,7 @@ export interface EntrySignal {
     reason: string;
     confidence: number;
     estimatedEdge: number;
+    isGuaranteed: boolean; // Whether this is a guaranteed outcome trade
 }
 
 export class EntryOptimizer {
@@ -34,49 +36,40 @@ export class EntryOptimizer {
     optimizeEntry(edge: CalculatedEdge): EntrySignal {
         // 1. Determine base size using Kelly Fraction
         // Kelly provides % of bankroll. Here we use it to scale max position.
-        // e.g. If Kelly=0.1 (10%), and maxPosition=$50, we assume maxPosition is our "Unit".
-        // Or strictly: Size = Bankroll * Kelly.
-        // We'll stick to a simpler model: Size = MaxPosition * KellyFraction * Confidence
+        // For guaranteed outcomes, use higher position multiplier
 
-        let targetSize = this.maxPositionSize * edge.KellyFraction * edge.confidence;
+        let effectiveMaxPosition = this.maxPositionSize;
+        if (edge.isGuaranteed) {
+            // Use configurable multiplier for guaranteed outcomes (default 2x)
+            effectiveMaxPosition = this.maxPositionSize * config.guaranteedPositionMultiplier;
+            logger.info(`🎯 GUARANTEED trade: Using ${config.guaranteedPositionMultiplier}x position size ($${effectiveMaxPosition.toFixed(2)})`);
+        }
+
+        let targetSize = effectiveMaxPosition * edge.KellyFraction * edge.confidence;
 
         // Clamp properties
         targetSize = Math.max(5, targetSize); // Min $5
-        targetSize = Math.min(this.maxPositionSize, targetSize); // Cap at max
+        targetSize = Math.min(effectiveMaxPosition, targetSize); // Cap at effective max
 
         // 2. Determine Order Type & Urgency
-        // High Urgency -> Market Order (Speed Arbitrage)
-        // Low Urgency -> Limit Order (Value Betting)
-
-        const lag = this.marketModel.estimateReactionLag(edge.marketId);
-        const velocity = this.marketModel.getPriceVelocity(edge.marketId, edge.side);
-
-        // If price is moving AGAINST us fast, we need to hurry (HIGH urgency)
-        // If price is static, we can try to limit.
+        // For guaranteed outcomes: ALWAYS HIGH urgency + MARKET order
+        // We need to capture the opportunity before market catches up
 
         let urgency: 'LOW' | 'MEDIUM' | 'HIGH' = 'MEDIUM';
         let orderType: 'MARKET' | 'LIMIT' = 'LIMIT';
         let priceLimit: number | undefined = undefined;
 
-        // "Speed Arbitrage" Logic:
-        // If we found a big edge (>15%) and it's fresh, hit it hard.
-        if (edge.adjustedEdge > 0.15) {
+        if (edge.isGuaranteed) {
+            // Guaranteed outcomes need maximum speed
+            urgency = 'HIGH';
+            orderType = 'MARKET';
+            logger.info(`🎯 GUARANTEED: Using MARKET order with HIGH urgency for speed arbitrage`);
+        } else if (edge.adjustedEdge > 0.15) {
+            // Big edge (>15%) - hit it fast
             urgency = 'HIGH';
             orderType = 'MARKET';
         } else {
-            // For smaller edges, try to get a better fill
-            orderType = 'LIMIT';
-            // Set limit slightly better than current market to capture spread?
-            // Or just current market price to ensure fill but avoid slippage?
-            // Simple: Limit at current price + slippage tolerance
-            priceLimit = edge.side === 'yes'
-                ? (1 - edge.rawEdge) + 0.02 // Wrong math. Use market price.
-                : undefined;
-
-            // Actually, simplest v2 approach:
-            // Always LIMIT at current ask to avoid paying spread if possible?
-            // No, "Speed Arbitrage" implies taking liquidity.
-            // We default to MARKET because we want speed.
+            // Smaller edges - still use MARKET for speed arbitrage strategy
             orderType = 'MARKET';
         }
 
@@ -89,7 +82,8 @@ export class EntryOptimizer {
             urgency,
             reason: `${edge.reason} | Kelly: ${edge.KellyFraction.toFixed(2)}`,
             confidence: edge.confidence,
-            estimatedEdge: edge.adjustedEdge
+            estimatedEdge: edge.adjustedEdge,
+            isGuaranteed: edge.isGuaranteed
         };
     }
 }

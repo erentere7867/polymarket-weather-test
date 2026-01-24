@@ -15,6 +15,7 @@ export interface CalculatedEdge {
     confidence: number;   // 0-1
     KellyFraction: number; // Recommended position size %
     reason: string;
+    isGuaranteed: boolean; // Whether this is a near-certain outcome
 }
 
 export class EdgeCalculator {
@@ -56,12 +57,23 @@ export class EdgeCalculator {
         }
 
         // 2. Adjust for Slippage & Costs
-        // Assume standardized $100 entry for estimation
-        const estimatedSlippage = this.marketModel.estimateSlippage(market.market.id, 100);
-        const adjustedEdge = rawEdge - estimatedSlippage;
+        // For guaranteed outcomes, skip slippage adjustment (we want speed)
+        const isGuaranteed = forecastProbability >= 0.99 || forecastProbability <= 0.01;
+        let adjustedEdge: number;
+
+        if (isGuaranteed) {
+            // For guaranteed outcomes, use raw edge (speed matters more than slippage)
+            adjustedEdge = rawEdge;
+        } else {
+            // Assume standardized $100 entry for estimation
+            const estimatedSlippage = this.marketModel.estimateSlippage(market.market.id, 100);
+            adjustedEdge = rawEdge - estimatedSlippage;
+        }
 
         // 3. Risk gating
-        if (adjustedEdge < this.minEdgeThreshold) {
+        // For guaranteed outcomes, use lower threshold (5%)
+        const effectiveThreshold = isGuaranteed ? 0.05 : this.minEdgeThreshold;
+        if (adjustedEdge < effectiveThreshold) {
             return null;
         }
 
@@ -101,9 +113,10 @@ export class EdgeCalculator {
             side,
             rawEdge,
             adjustedEdge,
-            confidence: Math.abs(adjustedEdge), // Proxy for confidence
-            KellyFraction: finalKelly,
-            reason: `Forecast ${(probWin * 100).toFixed(1)}% vs Price ${(price * 100).toFixed(1)}%`
+            confidence: isGuaranteed ? 1.0 : Math.abs(adjustedEdge), // Max confidence for guaranteed
+            KellyFraction: isGuaranteed ? safetyMultiplier : finalKelly, // Higher Kelly for guaranteed
+            reason: `Forecast ${(probWin * 100).toFixed(1)}% vs Price ${(price * 100).toFixed(1)}%${isGuaranteed ? ' (GUARANTEED)' : ''}`,
+            isGuaranteed
         };
     }
 }

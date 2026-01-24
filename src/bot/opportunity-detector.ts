@@ -87,31 +87,65 @@ export class OpportunityDetector {
             // Market implied probability (YES price = probability of YES outcome)
             const marketProbability = market.yesPrice;
 
+            // Check for guaranteed outcome (forecast far beyond threshold)
+            const guaranteedResult = this.isGuaranteedOutcome(
+                forecastValue,
+                market.threshold,
+                market.metricType,
+                market.comparisonType
+            );
+
+            // If guaranteed, override probability to 1.0 or 0.0
+            let finalProbability = forecastProbability;
+            let isGuaranteed = false;
+            let certaintySigma: number | undefined;
+
+            if (guaranteedResult) {
+                isGuaranteed = true;
+                certaintySigma = guaranteedResult.sigma;
+                finalProbability = guaranteedResult.probability;
+                confidence = 1.0; // Maximum confidence for guaranteed outcomes
+                logger.info(`🎯 GUARANTEED OUTCOME detected for ${market.city}`, {
+                    forecastValue,
+                    threshold: market.threshold,
+                    sigma: certaintySigma.toFixed(2),
+                    guaranteedProbability: finalProbability,
+                    marketProbability: marketProbability.toFixed(3),
+                });
+            }
+
             // Edge calculation: positive = market underprices YES, negative = market overprices YES
-            const edge = forecastProbability - marketProbability;
+            const edge = finalProbability - marketProbability;
             const absEdge = Math.abs(edge);
 
             // Determine action based on edge
             let action: TradingOpportunity['action'] = 'none';
             let reason = '';
 
-            if (absEdge >= config.minEdgeThreshold) {
+            // For guaranteed outcomes, always trade if there's meaningful edge
+            const effectiveThreshold = isGuaranteed ? 0.05 : config.minEdgeThreshold;
+
+            if (absEdge >= effectiveThreshold) {
                 if (edge > 0) {
                     // Forecast says higher probability than market -> buy YES
                     action = 'buy_yes';
-                    reason = `Forecast (${(forecastProbability * 100).toFixed(1)}%) higher than market (${(marketProbability * 100).toFixed(1)}%)`;
+                    reason = isGuaranteed
+                        ? `🎯 GUARANTEED: Forecast ${forecastValue}${forecastValueUnit} vs threshold ${market.threshold}${forecastValueUnit} (${certaintySigma?.toFixed(1)}σ)`
+                        : `Forecast (${(finalProbability * 100).toFixed(1)}%) higher than market (${(marketProbability * 100).toFixed(1)}%)`;
                 } else {
                     // Forecast says lower probability than market -> buy NO
                     action = 'buy_no';
-                    reason = `Forecast (${(forecastProbability * 100).toFixed(1)}%) lower than market (${(marketProbability * 100).toFixed(1)}%)`;
+                    reason = isGuaranteed
+                        ? `🎯 GUARANTEED: Forecast ${forecastValue}${forecastValueUnit} vs threshold ${market.threshold}${forecastValueUnit} (${certaintySigma?.toFixed(1)}σ)`
+                        : `Forecast (${(finalProbability * 100).toFixed(1)}%) lower than market (${(marketProbability * 100).toFixed(1)}%)`;
                 }
             } else {
-                reason = `Edge ${(absEdge * 100).toFixed(1)}% below threshold ${(config.minEdgeThreshold * 100).toFixed(0)}%`;
+                reason = `Edge ${(absEdge * 100).toFixed(1)}% below threshold ${(effectiveThreshold * 100).toFixed(0)}%`;
             }
 
             return {
                 market,
-                forecastProbability,
+                forecastProbability: finalProbability,
                 marketProbability,
                 edge,
                 action,
@@ -120,6 +154,8 @@ export class OpportunityDetector {
                 weatherDataSource,
                 forecastValue,
                 forecastValueUnit,
+                isGuaranteed,
+                certaintySigma,
             };
         } catch (error) {
             logger.error(`Failed to analyze market: ${market.market.question}`, {
@@ -373,9 +409,77 @@ export class OpportunityDetector {
             }
         }
 
-        // Sort by edge (highest first)
-        opportunities.sort((a, b) => Math.abs(b.edge) - Math.abs(a.edge));
+        // Sort: guaranteed first, then by edge (highest first)
+        opportunities.sort((a, b) => {
+            // Guaranteed opportunities always come first
+            if (a.isGuaranteed && !b.isGuaranteed) return -1;
+            if (!a.isGuaranteed && b.isGuaranteed) return 1;
+            // If both same category, sort by edge
+            return Math.abs(b.edge) - Math.abs(a.edge);
+        });
 
         return opportunities;
+    }
+
+    /**
+     * Check if forecast indicates a guaranteed outcome
+     * Returns null if not guaranteed, otherwise returns the guaranteed probability and sigma
+     */
+    private isGuaranteedOutcome(
+        forecastValue: number | undefined,
+        threshold: number | undefined,
+        metricType: string,
+        comparisonType: string | undefined
+    ): { probability: number; sigma: number } | null {
+        if (forecastValue === undefined || threshold === undefined) {
+            return null;
+        }
+
+        // Get uncertainty for this metric type
+        let uncertainty: number;
+        switch (metricType) {
+            case 'temperature_high':
+            case 'temperature_low':
+            case 'temperature_threshold':
+                uncertainty = 3; // °F
+                break;
+            case 'snowfall':
+                uncertainty = 2; // inches
+                break;
+            case 'precipitation':
+                uncertainty = 10; // percentage points
+                break;
+            default:
+                uncertainty = 5; // Generic fallback
+        }
+
+        // Calculate how many standard deviations the forecast is from threshold
+        const diff = forecastValue - threshold;
+        const sigma = Math.abs(diff) / uncertainty;
+
+        // Check if beyond certainty threshold (configurable, default 3 std devs)
+        if (sigma < config.certaintySigmaThreshold) {
+            return null;
+        }
+
+        // Determine guaranteed probability based on comparison type
+        let probability: number;
+
+        if (comparisonType === 'above') {
+            // Market asks: "Will X be above threshold?"
+            // If forecast >> threshold: guaranteed YES (1.0)
+            // If forecast << threshold: guaranteed NO (0.0)
+            probability = diff > 0 ? 1.0 : 0.0;
+        } else if (comparisonType === 'below') {
+            // Market asks: "Will X be below threshold?"
+            // If forecast << threshold: guaranteed YES (1.0)
+            // If forecast >> threshold: guaranteed NO (0.0)
+            probability = diff < 0 ? 1.0 : 0.0;
+        } else {
+            // Unknown comparison type, can't determine
+            return null;
+        }
+
+        return { probability, sigma };
     }
 }

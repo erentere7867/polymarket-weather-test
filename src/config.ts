@@ -30,6 +30,10 @@ export interface Config {
     minEdgeThreshold: number;
     pollIntervalMs: number;
     logLevel: string;
+
+    // Guaranteed outcome detection
+    certaintySigmaThreshold: number;      // Std deviations for certainty (default: 3.0)
+    guaranteedPositionMultiplier: number; // Position size multiplier for guaranteed trades
 }
 
 function getEnvVarOptional(name: string, defaultValue: string): string {
@@ -72,6 +76,10 @@ export const config: Config = {
     minEdgeThreshold: getEnvVarNumber('MIN_EDGE_THRESHOLD', 0.10),
     pollIntervalMs: getEnvVarNumber('POLL_INTERVAL_MS', 300000), // 5 minutes
     logLevel: getEnvVarOptional('LOG_LEVEL', 'info'),
+
+    // Guaranteed outcome detection
+    certaintySigmaThreshold: getEnvVarNumber('CERTAINTY_SIGMA_THRESHOLD', 3.0), // 3 std devs = 99.87% certain
+    guaranteedPositionMultiplier: getEnvVarNumber('GUARANTEED_POSITION_MULTIPLIER', 2.0), // 2x position for guaranteed
 };
 
 /**

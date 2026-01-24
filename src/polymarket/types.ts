@@ -101,6 +101,10 @@ export interface TradingOpportunity {
     weatherDataSource: 'noaa' | 'openweather';
     forecastValue?: number;
     forecastValueUnit?: string;
+
+    // Guaranteed outcome detection
+    isGuaranteed: boolean;      // Whether this is a near-certain outcome
+    certaintySigma?: number;    // How many std devs from threshold
 }
 
 /**
