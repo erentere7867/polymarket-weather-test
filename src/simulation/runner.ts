@@ -1,277 +1,186 @@
 /**
- * Simulation Runner
- * Runs the bot in full simulation mode with a virtual portfolio
+ * Real-Time Simulation Runner v2
+ * Orchestrates the full Speed Arbitrage engine with real-time data
  */
 
+import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { GammaClient } from '../polymarket/gamma-client.js';
-import { OpportunityDetector } from '../bot/opportunity-detector.js';
 import { PortfolioSimulator } from './portfolio.js';
-import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { TradingOpportunity, ParsedWeatherMarket } from '../polymarket/types.js';
+import { config } from '../config.js';
 
-interface SimulationConfig {
-    startingCapital: number;
-    maxPositionSize: number;
-    minEdgeThreshold: number;
-    takeProfitPercent: number;
-    stopLossPercent: number;
-    pollIntervalMs: number;
-    simulatePriceChanges: boolean;
-    priceVolatility: number;
-}
+// v2 Engine Components
+import { DataStore } from '../realtime/data-store.js';
+import { PriceTracker } from '../realtime/price-tracker.js';
+import { ForecastMonitor } from '../realtime/forecast-monitor.js';
+import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
 
 export class SimulationRunner {
+    private store: DataStore;
+    private priceTracker: PriceTracker;
+    private forecastMonitor: ForecastMonitor;
+    private strategy: SpeedArbitrageStrategy;
+    private simulator: PortfolioSimulator;
     private scanner: WeatherScanner;
-    private gammaClient: GammaClient;
-    private detector: OpportunityDetector;
-    private portfolio: PortfolioSimulator;
-    private config: SimulationConfig;
+
     private isRunning: boolean = false;
-    private cycleCount: number = 0;
-    private startTime: Date;
+    private cycles: number = 0;
+    private maxCycles: number;
 
-    constructor(simulationConfig?: Partial<SimulationConfig>) {
-        this.config = {
-            startingCapital: 1000000,
-            maxPositionSize: 50000,
-            minEdgeThreshold: config.minEdgeThreshold,
-            takeProfitPercent: 0.30,  // 30% profit
-            stopLossPercent: 0.20,    // 20% loss
-            pollIntervalMs: 30000,    // 30 seconds for simulation
-            simulatePriceChanges: true,
-            priceVolatility: 0.05,    // 5% max price movement per cycle
-            ...simulationConfig,
-        };
+    constructor(startingCapital: number = 1000000, maxCycles: number = 20) {
+        // Initialize v2 Engine
+        this.store = new DataStore();
+        this.priceTracker = new PriceTracker(this.store);
+        this.forecastMonitor = new ForecastMonitor(this.store);
+        this.strategy = new SpeedArbitrageStrategy(this.store);
 
+        // Initialize Simulator
+        this.simulator = new PortfolioSimulator(startingCapital);
+
+        // Scanner
         this.scanner = new WeatherScanner();
-        this.gammaClient = new GammaClient();
-        this.detector = new OpportunityDetector();
-        this.portfolio = new PortfolioSimulator(this.config.startingCapital);
-        this.startTime = new Date();
+
+        this.maxCycles = maxCycles;
     }
 
-    /**
-     * Run the simulation
-     */
-    async run(cycles: number = -1): Promise<void> {
+    async start(): Promise<void> {
+        logger.info('🚀 Starting Speed Arbitrage Simulation v2...');
         this.isRunning = true;
 
-        console.log('\n' + '═'.repeat(70));
-        console.log('       POLYMARKET WEATHER ARBITRAGE BOT - SIMULATION MODE');
-        console.log('═'.repeat(70));
-        console.log(`\n   Starting Capital:     $${this.config.startingCapital.toLocaleString()}`);
-        console.log(`   Max Position Size:    $${this.config.maxPositionSize.toLocaleString()}`);
-        console.log(`   Min Edge Threshold:   ${(this.config.minEdgeThreshold * 100).toFixed(0)}%`);
-        console.log(`   Take Profit:          ${(this.config.takeProfitPercent * 100).toFixed(0)}%`);
-        console.log(`   Stop Loss:            ${(this.config.stopLossPercent * 100).toFixed(0)}%`);
-        console.log(`   Poll Interval:        ${this.config.pollIntervalMs / 1000}s`);
-        console.log('\n' + '─'.repeat(70));
+        // 1. Initial Market Scan
+        logger.info('Scanning for weather markets...');
+        const markets = await this.scanner.scanForWeatherMarkets();
+        logger.info(`Found ${markets.length} weather markets`);
 
-        while (this.isRunning && (cycles === -1 || this.cycleCount < cycles)) {
-            try {
-                await this.runCycle();
-                this.cycleCount++;
-
-                // Print portfolio summary every 5 cycles
-                if (this.cycleCount % 5 === 0) {
-                    this.portfolio.printSummary();
-                }
-
-                if (this.isRunning && (cycles === -1 || this.cycleCount < cycles)) {
-                    await this.delay(this.config.pollIntervalMs);
-                }
-            } catch (error) {
-                logger.error('Simulation cycle failed', { error: (error as Error).message });
-                await this.delay(5000);
-            }
+        if (markets.length === 0) {
+            logger.warn('No active weather markets found. Simulation cannot run effectively.');
+            return;
         }
 
-        // Final summary
-        console.log('\n' + '═'.repeat(70));
-        console.log('                    SIMULATION COMPLETE');
-        console.log('═'.repeat(70));
-        this.portfolio.printSummary();
-        this.printTradeHistory();
+        // 2. Register markets and start tracking
+        for (const market of markets) {
+            this.store.addMarket(market);
+            this.priceTracker.trackMarket(market.market.id);
+        }
+
+        // 3. Connect WebSocket
+        await this.priceTracker.connect();
+
+        // 4. Start Forecast Monitor (Initial fetch)
+        // We force an immediate poll by starting it
+        this.forecastMonitor.start();
+
+        // Wait a bit for initial data to populate
+        logger.info('Waiting 5s for initial data...');
+        await new Promise(r => setTimeout(r, 5000));
+
+        // 5. Main Loop
+        // We run the loop faster (e.g. 5s) to simulate "Real-Time" without spamming logs
+        const loopInterval = 5000;
+
+        while (this.isRunning && this.cycles < this.maxCycles) {
+            this.cycles++;
+            await this.runCycle();
+
+            // Wait for next cycle
+            await new Promise(r => setTimeout(r, loopInterval));
+        }
+
+        this.stop();
     }
 
-    /**
-     * Run a single simulation cycle
-     */
     private async runCycle(): Promise<void> {
-        const cycleStart = new Date();
-        console.log(`\n[Cycle ${this.cycleCount + 1}] ${cycleStart.toLocaleTimeString()} - Scanning markets...`);
+        const time = new Date().toLocaleTimeString();
+        // logger.info(`[Cycle ${this.cycles}] ${time} - Analyzing...`);
 
-        // Step 1: Scan for weather markets
-        const allMarkets = await this.scanner.scanForWeatherMarkets();
-        const actionableMarkets = this.scanner.filterActionableMarkets(allMarkets);
+        // 1. Update Portfolio Prices
+        this.updatePortfolioPrices();
 
-        console.log(`   Found ${allMarkets.length} weather markets, ${actionableMarkets.length} actionable`);
-
-        // Step 2: Simulate price changes for existing positions
-        if (this.config.simulatePriceChanges) {
-            this.simulatePriceChanges();
+        // 2. Detect Opportunities
+        const edges = this.strategy.detectOpportunities();
+        if (edges.length > 0) {
+            logger.info(`🔎 Found ${edges.length} opportunities`);
         }
 
-        // Step 3: Auto-close positions (take profit / stop loss)
-        const closedPositions = this.portfolio.autoClosePositions(
-            this.config.takeProfitPercent,
-            -this.config.stopLossPercent
-        );
-        if (closedPositions.length > 0) {
-            console.log(`   Auto-closed ${closedPositions.length} position(s)`);
+        // 3. Execute Trades (Simulated)
+        for (const edge of edges) {
+            // Map CalculatedEdge to TradingOpportunity format for Simulator
+            // This is a bit of a bridge between v2 Edge and v1 Simulator
+            // In a full refactor, Simulator would accept CalculatedEdge
+
+            const state = this.store.getMarketState(edge.marketId);
+            if (!state) continue;
+
+            // Calculate position size based on Kelly
+            const portfolioValue = this.simulator.getAllPositions().reduce((sum, p) => sum + (p.shares * p.currentPrice), this.simulator.getCashBalance());
+            const size = Math.min(
+                config.maxPositionSize * 1000, // Scale up for simulation (e.g. $10k instead of $10)
+                portfolioValue * edge.KellyFraction
+            );
+
+            if (size < 10) continue; // Too small
+
+            // Check if we already have a position
+            // Ideally the strategy handles this, but for now strict check
+            const existingPos = this.simulator.getAllPositions().find(p => p.marketId === edge.marketId && p.side === edge.side);
+            if (existingPos) continue;
+
+            // Execute
+            this.simulator.openPosition({
+                market: state.market,
+                forecastProbability: 0, // Not used in v2 sim directly mostly
+                marketProbability: 0,
+                edge: edge.adjustedEdge,
+                action: edge.side === 'yes' ? 'buy_yes' : 'buy_no',
+                confidence: edge.confidence,
+                reason: edge.reason,
+                weatherDataSource: 'noaa' // Placeholder
+            }, size);
         }
 
-        // Step 4: Analyze markets for opportunities
-        if (actionableMarkets.length > 0) {
-            const opportunities = await this.detector.analyzeMarkets(actionableMarkets);
-            console.log(`   Found ${opportunities.length} trading opportunities`);
+        // 4. Check Take Profit / Stop Loss
+        this.simulator.checkClosures();
 
-            // Step 5: Open new positions
-            for (const opportunity of opportunities) {
-                if (Math.abs(opportunity.edge) >= this.config.minEdgeThreshold) {
-                    this.portfolio.openPosition(opportunity, this.config.maxPositionSize);
-                }
-            }
-        }
-
-        // Step 6: Simulate more opportunities with fake weather markets if none found
-        if (actionableMarkets.length === 0) {
-            await this.simulateFakeOpportunities();
-        }
-
-        // Print quick stats
-        const stats = this.portfolio.getStats();
-        const pnlStr = stats.totalPnL >= 0 ? `+$${stats.totalPnL.toFixed(2)}` : `-$${Math.abs(stats.totalPnL).toFixed(2)}`;
-        console.log(`   Portfolio: $${stats.totalValue.toLocaleString()} | P&L: ${pnlStr} | Positions: ${stats.openPositions}`);
-    }
-
-    /**
-     * Simulate price changes for open positions (for testing)
-     */
-    private simulatePriceChanges(): void {
-        for (const position of this.portfolio.getOpenPositions()) {
-            // Random walk with slight mean reversion toward forecast probability
-            const currentPrice = position.currentPrice;
-            const randomChange = (Math.random() - 0.5) * this.config.priceVolatility;
-
-            // Add some drift based on how close we are to target date
-            let drift = 0;
-            if (position.targetDate) {
-                const hoursRemaining = (position.targetDate.getTime() - Date.now()) / (1000 * 60 * 60);
-                if (hoursRemaining < 24 && hoursRemaining > 0) {
-                    // As we approach expiry, move toward extremes
-                    drift = currentPrice > 0.5 ? 0.02 : -0.02;
-                }
-            }
-
-            const newPrice = Math.max(0.01, Math.min(0.99, currentPrice + randomChange + drift));
-            this.portfolio.updatePriceByToken(position.tokenId, newPrice);
+        // 5. Print Stats every 5 cycles
+        if (this.cycles % 5 === 0) {
+            this.simulator.printSummary();
         }
     }
 
-    /**
-     * Generate fake opportunities when no real ones exist (for simulation)
-     */
-    private async simulateFakeOpportunities(): Promise<void> {
-        // Create some simulated weather markets for testing
-        const fakeCities = ['New York City', 'Chicago', 'Los Angeles', 'Miami', 'Seattle'];
-        const fakeMetrics = ['temperature_high', 'snowfall', 'precipitation'];
+    private updatePortfolioPrices(): void {
+        const markets = this.store.getAllMarkets();
 
-        for (let i = 0; i < 2; i++) {
-            const city = fakeCities[Math.floor(Math.random() * fakeCities.length)];
-            const metric = fakeMetrics[Math.floor(Math.random() * fakeMetrics.length)];
-            const yesPrice = 0.3 + Math.random() * 0.4; // Between 0.3 and 0.7
-            const forecastProb = Math.random();
-            const edge = forecastProb - yesPrice;
+        // Create a map of current prices for the simulator
+        // Simulator expects "Market objects" with updated prices
+        // But simulator.updatePrices() is not implemented to take a map in v1.
+        // Let's look at how simulator updates prices.
+        // It has `updatePrices(scannedMarkets: ParsedWeatherMarket[])`
 
-            if (Math.abs(edge) < this.config.minEdgeThreshold) {
-                continue; // Skip if no edge
-            }
+        // We need to create "Updated Markets" with current prices from DataStore
+        const updatedMarkets: ParsedWeatherMarket[] = markets.map(m => {
+            const state = this.store.getMarketState(m.market.id);
+            if (!state) return m;
 
-            const fakeMarket: ParsedWeatherMarket = {
-                market: {
-                    id: `sim_${Date.now()}_${i}`,
-                    conditionId: 'sim',
-                    slug: 'sim-market',
-                    question: `[SIMULATED] Will ${city} ${metric === 'temperature_high' ? 'high temperature exceed 50°F' : metric === 'snowfall' ? 'get snow' : 'have rain'}?`,
-                    outcomes: ['Yes', 'No'],
-                    outcomePrices: [yesPrice.toString(), (1 - yesPrice).toString()],
-                    clobTokenIds: [`sim_yes_${Date.now()}`, `sim_no_${Date.now()}`],
-                    active: true,
-                    closed: false,
-                },
-                eventTitle: `[SIMULATED] ${city} Weather`,
-                city,
-                metricType: metric as any,
-                threshold: 50,
-                thresholdUnit: 'F',
-                comparisonType: 'above',
-                targetDate: new Date(Date.now() + 24 * 60 * 60 * 1000), // Tomorrow
-                yesPrice,
-                noPrice: 1 - yesPrice,
-                yesTokenId: `sim_yes_${Date.now()}_${i}`,
-                noTokenId: `sim_no_${Date.now()}_${i}`,
+            // Get latest prices from history
+            const lastYes = state.priceHistory.yes.history[state.priceHistory.yes.history.length - 1];
+            const lastNo = state.priceHistory.no.history[state.priceHistory.no.history.length - 1];
+
+            return {
+                ...m,
+                yesPrice: lastYes ? lastYes.price : m.yesPrice,
+                noPrice: lastNo ? lastNo.price : m.noPrice
             };
+        });
 
-            const fakeOpportunity: TradingOpportunity = {
-                market: fakeMarket,
-                forecastProbability: forecastProb,
-                marketProbability: yesPrice,
-                edge,
-                action: edge > 0 ? 'buy_yes' : 'buy_no',
-                confidence: 0.6 + Math.random() * 0.3,
-                reason: `[SIMULATED] Forecast ${(forecastProb * 100).toFixed(0)}% vs Market ${(yesPrice * 100).toFixed(0)}%`,
-                weatherDataSource: 'noaa',
-                forecastValue: 55 + Math.random() * 20,
-                forecastValueUnit: '°F',
-            };
-
-            // Open the position
-            this.portfolio.openPosition(fakeOpportunity, this.config.maxPositionSize);
-        }
+        this.simulator.updatePrices(updatedMarkets);
     }
 
-    /**
-     * Stop the simulation
-     */
     stop(): void {
+        logger.info('Stopping simulation...');
         this.isRunning = false;
-    }
-
-    /**
-     * Get portfolio simulator
-     */
-    getPortfolio(): PortfolioSimulator {
-        return this.portfolio;
-    }
-
-    /**
-     * Print trade history
-     */
-    private printTradeHistory(): void {
-        const trades = this.portfolio.getTradeHistory();
-        if (trades.length === 0) return;
-
-        console.log('\n📜 TRADE HISTORY (Last 20)');
-        console.log('─'.repeat(70));
-
-        const recentTrades = trades.slice(-20);
-        for (const trade of recentTrades) {
-            const emoji = trade.action === 'buy' ? '🟢' : '🔴';
-            const pnlStr = trade.pnl !== undefined
-                ? (trade.pnl >= 0 ? ` +$${trade.pnl.toFixed(2)}` : ` -$${Math.abs(trade.pnl).toFixed(2)}`)
-                : '';
-            console.log(`${emoji} ${trade.timestamp.toLocaleTimeString()} | ${trade.action.toUpperCase()} ${trade.shares} ${trade.side.toUpperCase()} @ $${trade.price.toFixed(3)}${pnlStr}`);
-            console.log(`   ${trade.marketQuestion.substring(0, 60)}`);
-        }
-    }
-
-    /**
-     * Delay helper
-     */
-    private delay(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms));
+        this.priceTracker.disconnect();
+        this.forecastMonitor.stop();
+        this.simulator.printSummary();
     }
 }

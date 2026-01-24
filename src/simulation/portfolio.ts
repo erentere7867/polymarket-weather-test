@@ -113,14 +113,27 @@ export class PortfolioSimulator {
         }
 
         const isBuyYes = opportunity.action === 'buy_yes';
-        const price = isBuyYes ? opportunity.market.yesPrice : opportunity.market.noPrice;
+        const basePrice = isBuyYes ? opportunity.market.yesPrice : opportunity.market.noPrice;
 
-        if (price <= 0 || price >= 1) {
+        if (basePrice <= 0 || basePrice >= 1) {
             return null;
         }
 
-        const shares = Math.floor(positionValue / price);
-        const actualCost = shares * price;
+        // SIMULATED EXECUTION
+        // 1. Add Slippage (based on position size)
+        // Small trade ($100) -> 0.1% slippage
+        // Large trade ($10k) -> 1-5% slippage depending on liquidity
+        // Model: Impact = k * sqrt(Size)
+        const liquidityFactor = 200000; // Simulated liquidity depth
+        const priceImpact = (positionValue / liquidityFactor) * 0.1;
+        const executionPrice = Math.min(0.99, Math.max(0.01, basePrice + (isBuyYes ? priceImpact : -priceImpact)));
+
+        // 2. Add Fees (Polymarket CTF = 0% usually, but let's be conservative or add gas equivalent)
+        const feeRate = 0.00; // 0% fees on Polymarket currently for taker
+        const fees = positionValue * feeRate;
+
+        const shares = Math.floor((positionValue - fees) / executionPrice);
+        const actualCost = shares * executionPrice;
 
         const position: SimulatedPosition = {
             id: `pos_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -129,13 +142,13 @@ export class PortfolioSimulator {
             tokenId: isBuyYes ? opportunity.market.yesTokenId : opportunity.market.noTokenId,
             side: isBuyYes ? 'yes' : 'no',
             shares,
-            entryPrice: price,
-            currentPrice: price,
+            entryPrice: executionPrice, // Actual filled price
+            currentPrice: executionPrice,
             entryTime: new Date(),
             targetDate: opportunity.market.targetDate,
             city: opportunity.market.city || undefined,
             metricType: opportunity.market.metricType,
-            unrealizedPnL: 0,
+            unrealizedPnL: -Math.abs(actualCost - (shares * basePrice)), // Immediate loss due to slippage
             status: 'open',
         };
 
@@ -151,12 +164,12 @@ export class PortfolioSimulator {
             marketQuestion: opportunity.market.market.question,
             side: position.side,
             shares,
-            price,
+            price: executionPrice,
             value: actualCost,
             reason: opportunity.reason,
         });
 
-        logger.info(`📈 Opened position: ${position.side.toUpperCase()} ${shares} shares @ $${price.toFixed(3)}`, {
+        logger.info(`📈 Opened position: ${position.side.toUpperCase()} ${shares} shares @ $${executionPrice.toFixed(3)}`, {
             market: opportunity.market.market.question.substring(0, 50),
             cost: `$${actualCost.toFixed(2)}`,
             edge: `${(edge * 100).toFixed(1)}%`,
@@ -468,5 +481,35 @@ export class PortfolioSimulator {
             closedPositions: this.closedPositions,
             tradeHistory: this.tradeHistory,
         };
+    }
+    /**
+     * Get all positions (alias for consistency)
+     */
+    getAllPositions(): SimulatedPosition[] {
+        return Array.from(this.positions.values());
+    }
+
+    /**
+     * Get cash balance
+     */
+    getCashBalance(): number {
+        return this.cash;
+    }
+
+    /**
+     * Check for closures (alias for autoClosePositions)
+     */
+    checkClosures(): void {
+        this.autoClosePositions();
+    }
+
+    /**
+     * Update prices from market data
+     */
+    updatePrices(markets: ParsedWeatherMarket[]): void {
+        for (const market of markets) {
+            this.updatePriceByToken(market.yesTokenId, market.yesPrice);
+            this.updatePriceByToken(market.noTokenId, market.noPrice);
+        }
     }
 }

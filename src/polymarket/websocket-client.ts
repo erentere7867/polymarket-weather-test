@@ -140,7 +140,7 @@ export class PolymarketWebSocket {
             this.ws.send(JSON.stringify({
                 type: 'subscribe',
                 channel: 'market',
-                assets_ids: [tokenId],
+                token_ids: [tokenId], // Changed to token_ids
             }));
             logger.debug(`Subscribed to token: ${tokenId.substring(0, 20)}...`);
         }
@@ -150,8 +150,15 @@ export class PolymarketWebSocket {
      * Handle incoming WebSocket message
      */
     private handleMessage(data: WebSocket.Data): void {
+        const rawMessage = data.toString();
         try {
-            const message = JSON.parse(data.toString());
+            // Check for known non-JSON messages
+            if (rawMessage === 'INVALID OPERATION') {
+                logger.warn('WebSocket received INVALID OPERATION. Check subscription format.');
+                return;
+            }
+
+            const message = JSON.parse(rawMessage);
 
             if (message.type === 'price_change') {
                 const update: PriceUpdate = {
@@ -181,8 +188,15 @@ export class PolymarketWebSocket {
                 }
             }
 
+            if (message.type === 'error') {
+                logger.error('WebSocket received error message', { message });
+            }
+
         } catch (error) {
-            logger.error('Failed to parse WebSocket message', { error: (error as Error).message });
+            logger.error('Failed to parse WebSocket message', {
+                error: (error as Error).message,
+                rawMessage: rawMessage.substring(0, 100) // Log first 100 chars
+            });
         }
     }
 

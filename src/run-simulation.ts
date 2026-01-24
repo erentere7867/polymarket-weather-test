@@ -6,7 +6,9 @@
  * Example: npx tsx src/run-simulation.ts 20
  */
 
-import { SimulationRunner } from './simulation/index.js';
+import { SimulationRunner } from './simulation/runner.js';
+import { config } from './config.js';
+import { logger } from './logger.js';
 
 async function main(): Promise<void> {
     // Parse command line args
@@ -14,27 +16,20 @@ async function main(): Promise<void> {
 
     console.log(`\n🤖 Starting simulation for ${cycles === -1 ? 'infinite' : cycles} cycles...\n`);
 
-    const runner = new SimulationRunner({
-        startingCapital: 1000000,         // $1M starting capital
-        maxPositionSize: 50000,           // Max $50K per trade
-        minEdgeThreshold: 0.08,           // 8% edge required
-        takeProfitPercent: 0.25,          // 25% take profit
-        stopLossPercent: 0.15,            // 15% stop loss
-        pollIntervalMs: 10000,            // 10 second intervals for fast sim
-        simulatePriceChanges: true,       // Simulate price movements
-        priceVolatility: 0.03,            // 3% volatility per cycle
-    });
+    // Create runner with new API (capital, maxCycles)
+    const runner = new SimulationRunner(1000000, cycles);
 
-    // Handle graceful shutdown
+    // Handle shutdown
     process.on('SIGINT', () => {
-        console.log('\n\nShutting down simulation...');
+        logger.info('\nGracefully shutting down...');
         runner.stop();
+        process.exit(0);
     });
 
     try {
-        await runner.run(cycles);
+        await runner.start();
     } catch (error) {
-        console.error('Simulation error:', error);
+        logger.error('Simulation failed', { error });
         process.exit(1);
     }
 }
