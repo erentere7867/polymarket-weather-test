@@ -53,10 +53,32 @@ app.get('/api/positions/active', (req, res) => {
 // 4. Closed Positions
 app.get('/api/positions/closed', (req, res) => {
     const sim = runner.getSimulator();
-    // Assuming getClosedPositions exists or we filter from log. 
-    // PortfolioSimulator doesn't explicitly expose closed history list publicly in v1 interface?
-    // Let's check PortfolioSimulator. If not, we serve stats.
-    res.json([]); // Placeholder if accessed directly, or extend PortfolioSimulator later.
+    const closedPositions = sim.getClosedPositions().map(p => {
+        const holdDurationMs = p.exitTime && p.entryTime
+            ? p.exitTime.getTime() - p.entryTime.getTime()
+            : 0;
+        const holdDurationSeconds = Math.floor(holdDurationMs / 1000);
+        const pnlPercent = p.entryPrice > 0
+            ? ((p.exitPrice || 0) - p.entryPrice) / p.entryPrice * 100
+            : 0;
+
+        return {
+            id: p.id,
+            marketQuestion: p.marketQuestion,
+            side: p.side,
+            shares: p.shares,
+            entryPrice: p.entryPrice,
+            exitPrice: p.exitPrice || 0,
+            entryTime: p.entryTime,
+            exitTime: p.exitTime,
+            realizedPnL: p.realizedPnL || 0,
+            pnlPercent: pnlPercent,
+            holdDurationSeconds: holdDurationSeconds,
+            status: p.status
+        };
+    });
+    // Return most recent first
+    res.json(closedPositions.reverse());
 });
 
 // 5. Opportunities (Signals)

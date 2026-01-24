@@ -271,10 +271,11 @@ export class PortfolioSimulator {
 
     /**
      * Auto-close positions that should be exited (profit taking, stop loss, expiry)
+     * AGGRESSIVE: 5% take profit for micro-scalping, 10% stop loss
      */
     autoClosePositions(
-        takeProfitThreshold: number = 0.3,  // 30% profit
-        stopLossThreshold: number = -0.2     // 20% loss
+        takeProfitThreshold: number = 0.05,  // 5% profit - quick scalping
+        stopLossThreshold: number = -0.10    // 10% loss - tight risk management
     ): SimulatedPosition[] {
         const closed: SimulatedPosition[] = [];
 

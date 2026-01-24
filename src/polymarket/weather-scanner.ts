@@ -36,6 +36,18 @@ const CITY_PATTERNS = [
     'buenos aires',
 ];
 
+// Keywords to EXCLUDE from weather markets (not actual weather)
+const EXCLUDED_KEYWORDS = [
+    'earthquake',
+    'seismic',
+    'magnitude',
+    'richter',
+    'tremor',
+    'quake',
+    'aftershock',
+    'tectonic',
+];
+
 export class WeatherScanner {
     private gammaClient: GammaClient;
 
@@ -306,6 +318,14 @@ export class WeatherScanner {
      */
     filterActionableMarkets(markets: ParsedWeatherMarket[]): ParsedWeatherMarket[] {
         return markets.filter(m => {
+            const fullText = `${m.eventTitle} ${m.market.question}`.toLowerCase();
+
+            // Exclude earthquake/seismic markets - not actual weather
+            if (EXCLUDED_KEYWORDS.some(keyword => fullText.includes(keyword))) {
+                logger.debug(`Rejecting ${m.market.question}: Contains excluded keyword (earthquake/seismic)`);
+                return false;
+            }
+
             // Must have a known city
             if (!m.city) {
                 logger.debug(`Rejecting ${m.market.question}: No city found`);

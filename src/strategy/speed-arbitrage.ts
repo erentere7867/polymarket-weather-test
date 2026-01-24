@@ -16,10 +16,12 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 // Maximum age of a forecast change before it's considered "stale" (market has caught up)
-const MAX_CHANGE_AGE_MS = 60000; // 60 seconds - after this, market has likely reacted
+// AGGRESSIVE: 15 seconds - act fast before market reacts
+const MAX_CHANGE_AGE_MS = 15000;
 
 // Minimum change threshold to trigger detection
-const MIN_SIGMA_FOR_ARBITRAGE = 2.0; // 2 standard deviations = high confidence
+// AGGRESSIVE: 1.5 sigma = more opportunities, slightly lower confidence
+const MIN_SIGMA_FOR_ARBITRAGE = 1.5;
 
 export class SpeedArbitrageStrategy {
     private store: DataStore;
