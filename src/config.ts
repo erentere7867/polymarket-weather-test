@@ -67,7 +67,7 @@ export const config: Config = {
     noaaHost: 'https://api.weather.gov',
 
     // Bot settings
-    simulationMode: getEnvVarBool('SIMULATION_MODE', true),
+    simulationMode: getEnvVarBool('SIMULATION_MODE', false),
     maxPositionSize: getEnvVarNumber('MAX_POSITION_SIZE', 10),
     minEdgeThreshold: getEnvVarNumber('MIN_EDGE_THRESHOLD', 0.10),
     pollIntervalMs: getEnvVarNumber('POLL_INTERVAL_MS', 300000), // 5 minutes

@@ -49,19 +49,21 @@ export class WeatherScanner {
     async scanForWeatherMarkets(): Promise<ParsedWeatherMarket[]> {
         logger.info('Scanning Polymarket for weather markets...');
 
-        // Fetch weather-specific tags: "Climate & Weather" (1474) and "Climate" (87)
+        // Fetch weather-specific tags: "Climate & Weather" (1474), "Climate" (87), "Weather" (84)
         const weatherTagId = '1474';
         const climateTagId = '87';
+        const simpleWeatherTagId = '84';
 
         // Run fetches in parallel
-        const [tagEvents1, tagEvents2] = await Promise.all([
+        const [tagEvents1, tagEvents2, tagEvents3] = await Promise.all([
             this.gammaClient.getEventsByTag(weatherTagId, 100),
-            this.gammaClient.getEventsByTag(climateTagId, 100) // Fallback/Additional
+            this.gammaClient.getEventsByTag(climateTagId, 100),
+            this.gammaClient.getEventsByTag(simpleWeatherTagId, 100)
         ]);
 
         // Merge and deduplicate by ID
         const allEventsMap = new Map<string, PolymarketEvent>();
-        [...tagEvents1, ...tagEvents2].forEach(e => allEventsMap.set(e.id, e));
+        [...tagEvents1, ...tagEvents2, ...tagEvents3].forEach(e => allEventsMap.set(e.id, e));
 
         const allEvents = Array.from(allEventsMap.values());
         logger.info(`Fetched ${allEvents.length} unique events from weather tags`);
