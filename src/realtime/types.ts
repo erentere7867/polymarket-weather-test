@@ -23,6 +23,12 @@ export interface ForecastSnapshot {
     forecastValue: number; // The specific value relevant to the market (e.g. high temp)
     probability: number; // Calculated probability of YES
     timestamp: Date;
+
+    // Speed arbitrage: track when forecast actually changes
+    previousValue?: number;       // What the forecast was before
+    valueChanged: boolean;        // Did the value change significantly?
+    changeAmount: number;         // How much did it change?
+    changeTimestamp: Date;        // When did the value last change?
 }
 
 export interface MarketState {

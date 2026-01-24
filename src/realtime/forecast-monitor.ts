@@ -117,12 +117,57 @@ export class ForecastMonitor {
                     if (market.comparisonType === 'below') probability = 1 - probability;
                 }
 
+                // SPEED ARBITRAGE: Detect if forecast value actually changed
+                const currentState = this.store.getMarketState(market.market.id);
+                const previousValue = currentState?.lastForecast?.forecastValue;
+                const previousChangeTimestamp = currentState?.lastForecast?.changeTimestamp;
+
+                // Calculate change amount
+                const changeAmount = previousValue !== undefined ? Math.abs(forecastValue - previousValue) : 0;
+
+                // Determine significant change threshold based on metric type
+                let significantChangeThreshold: number;
+                switch (market.metricType) {
+                    case 'temperature_high':
+                    case 'temperature_low':
+                    case 'temperature_threshold':
+                        significantChangeThreshold = 1; // 1°F change is significant
+                        break;
+                    case 'snowfall':
+                        significantChangeThreshold = 0.5; // 0.5 inch change is significant
+                        break;
+                    default:
+                        significantChangeThreshold = 1;
+                }
+
+                // Did the value change significantly?
+                const valueChanged = changeAmount >= significantChangeThreshold;
+                const now = new Date();
+
+                // Track when the change occurred
+                // If changed now, use current time. Otherwise, keep previous change time
+                const changeTimestamp = valueChanged ? now : (previousChangeTimestamp || now);
+
+                if (valueChanged) {
+                    logger.info(`⚡ FORECAST CHANGED for ${city} (${market.metricType})`, {
+                        previousValue: previousValue?.toFixed(1),
+                        newValue: forecastValue.toFixed(1),
+                        changeAmount: changeAmount.toFixed(1),
+                        threshold: market.threshold,
+                    });
+                }
+
                 const snapshot: ForecastSnapshot = {
                     marketId: market.market.id,
                     weatherData,
                     forecastValue,
                     probability,
-                    timestamp: new Date()
+                    timestamp: now,
+                    // Speed arbitrage fields
+                    previousValue,
+                    valueChanged,
+                    changeAmount,
+                    changeTimestamp,
                 };
 
                 this.store.updateForecast(market.market.id, snapshot);
@@ -133,3 +178,4 @@ export class ForecastMonitor {
         }
     }
 }
+
