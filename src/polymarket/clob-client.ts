@@ -4,9 +4,9 @@
  */
 
 import { ClobClient, Side, OrderType, ApiKeyCreds, TickSize } from '@polymarket/clob-client';
-import { Wallet } from 'ethers';
+import { Wallet, providers } from 'ethers';
 import axios, { AxiosInstance } from 'axios';
-import { config } from '../config.js';
+import { config, hasApiCredentials, getApiCredentials } from '../config.js';
 import { logger } from '../logger.js';
 import { TradeOrder, OrderBook } from './types.js';
 
@@ -39,20 +39,37 @@ export class TradingClient {
         }
 
         if (!config.privateKey) {
-            throw new Error('PRIVATE_KEY required for live trading');
+            throw new Error('POLYMARKET_PRIVATE_KEY required for live trading');
         }
 
         try {
-            const signer = new Wallet(config.privateKey);
+            // Create provider and signer
+            const provider = new providers.JsonRpcProvider(config.polygonRpcUrl);
+            const signer = new Wallet(config.privateKey, provider);
 
-            // Initialize client for API key derivation
-            this.client = new ClobClient(config.clobHost, config.chainId, signer);
+            // Check if we have pre-configured API credentials
+            if (hasApiCredentials()) {
+                const creds = getApiCredentials()!;
+                this.apiCreds = {
+                    key: creds.apiKey,
+                    secret: creds.secret,
+                    passphrase: creds.passphrase,
+                };
+                logger.info('Using pre-configured Polymarket API credentials');
+            } else {
+                // Initialize client for API key derivation
+                this.client = new ClobClient(config.clobHost, config.chainId, signer);
 
-            // Derive or create API credentials
-            this.apiCreds = await this.client.createOrDeriveApiKey();
-            logger.info('Derived Polymarket API credentials');
+                // Derive or create API credentials
+                this.apiCreds = await this.client.createOrDeriveApiKey();
+                logger.info('Derived Polymarket API credentials');
+                logger.info('Save these credentials to your .env file:');
+                logger.info(`POLYMARKET_API_KEY=${this.apiCreds.key}`);
+                logger.info(`POLYMARKET_SECRET=${this.apiCreds.secret}`);
+                logger.info(`POLYMARKET_PASSPHRASE=${this.apiCreds.passphrase}`);
+            }
 
-            // Reinitialize with full authentication
+            // Initialize with full authentication
             const signatureType = 0; // EOA
             const funderAddress = signer.address;
 

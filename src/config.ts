@@ -2,10 +2,21 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+export interface PolymarketCredentials {
+    apiKey: string;
+    secret: string;
+    passphrase: string;
+}
+
 export interface Config {
     // Polymarket
     privateKey: string;
+    polymarketApiKey: string;
+    polymarketSecret: string;
+    polymarketPassphrase: string;
     chainId: number;
+    polygonRpcUrl: string;
+    usdcContractAddress: string;
     clobHost: string;
     gammaHost: string;
 
@@ -19,14 +30,6 @@ export interface Config {
     minEdgeThreshold: number;
     pollIntervalMs: number;
     logLevel: string;
-}
-
-function getEnvVar(name: string, defaultValue?: string): string {
-    const value = process.env[name];
-    if (!value && defaultValue === undefined) {
-        throw new Error(`Missing required environment variable: ${name}`);
-    }
-    return value || defaultValue!;
 }
 
 function getEnvVarOptional(name: string, defaultValue: string): string {
@@ -49,8 +52,13 @@ function getEnvVarNumber(name: string, defaultValue: number): number {
 
 export const config: Config = {
     // Polymarket configuration
-    privateKey: getEnvVar('PRIVATE_KEY', ''),
+    privateKey: getEnvVarOptional('POLYMARKET_PRIVATE_KEY', '') || getEnvVarOptional('PRIVATE_KEY', ''),
+    polymarketApiKey: getEnvVarOptional('POLYMARKET_API_KEY', ''),
+    polymarketSecret: getEnvVarOptional('POLYMARKET_SECRET', ''),
+    polymarketPassphrase: getEnvVarOptional('POLYMARKET_PASSPHRASE', ''),
     chainId: 137, // Polygon mainnet
+    polygonRpcUrl: getEnvVarOptional('POLYGON_RPC_URL', 'https://polygon-rpc.com'),
+    usdcContractAddress: getEnvVarOptional('USDC_CONTRACT_ADDRESS', '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'),
     clobHost: 'https://clob.polymarket.com',
     gammaHost: 'https://gamma-api.polymarket.com',
 
@@ -66,8 +74,27 @@ export const config: Config = {
     logLevel: getEnvVarOptional('LOG_LEVEL', 'info'),
 };
 
+/**
+ * Check if we have pre-configured API credentials
+ */
+export function hasApiCredentials(): boolean {
+    return !!(config.polymarketApiKey && config.polymarketSecret && config.polymarketPassphrase);
+}
+
+/**
+ * Get pre-configured credentials if available
+ */
+export function getApiCredentials(): PolymarketCredentials | null {
+    if (!hasApiCredentials()) return null;
+    return {
+        apiKey: config.polymarketApiKey,
+        secret: config.polymarketSecret,
+        passphrase: config.polymarketPassphrase,
+    };
+}
+
 export function validateConfig(): void {
     if (!config.simulationMode && !config.privateKey) {
-        throw new Error('PRIVATE_KEY is required when not in simulation mode');
+        throw new Error('POLYMARKET_PRIVATE_KEY is required when not in simulation mode');
     }
 }
