@@ -5,9 +5,7 @@ export class RateLimiter {
         ['weatherapi', 30000],
         ['weatherbit', 500],
         ['visualcrossing', 1000],
-        ['meteosource', 400],
-        ['weatherxu', 500],
-        ['meteomatics', 500]
+        ['meteosource', 400]
     ]);
 
     // Reset stats daily? For now, simplistic in-memory counter. 

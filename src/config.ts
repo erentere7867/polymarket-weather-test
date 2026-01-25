@@ -26,10 +26,7 @@ export interface Config {
     weatherApiKey: string;
     weatherbitApiKey: string;
     visualCrossingApiKey: string;
-    meteomaticsUsername: string;
-    meteomaticsPassword: string;
     meteosourceApiKey: string;
-    weatherxuApiKey: string;
     noaaHost: string;
 
     // Bot settings
@@ -82,10 +79,7 @@ export const config: Config = {
     weatherApiKey: getEnvVarOptional('WEATHERAPI_KEY', ''),
     weatherbitApiKey: getEnvVarOptional('WEATHERBIT_API_KEY', ''),
     visualCrossingApiKey: getEnvVarOptional('VISUALCROSSING_API_KEY', ''),
-    meteomaticsUsername: getEnvVarOptional('METEOMATICS_USERNAME', ''),
-    meteomaticsPassword: getEnvVarOptional('METEOMATICS_PASSWORD', ''),
     meteosourceApiKey: getEnvVarOptional('METEOSOURCE_API_KEY', ''),
-    weatherxuApiKey: getEnvVarOptional('WEATHERXU_API_KEY', ''),
     noaaHost: 'https://api.weather.gov',
 
     // Bot settings

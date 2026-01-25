@@ -15,9 +15,7 @@ import { TomorrowClient } from '../weather/clients/tomorrow-client.js';
 import { WeatherApiClient } from '../weather/clients/weatherapi-client.js';
 import { WeatherbitClient } from '../weather/clients/weatherbit-client.js';
 import { VisualCrossingClient } from '../weather/clients/visualcrossing-client.js';
-import { MeteomaticsClient } from '../weather/clients/meteomatics-client.js';
 import { MeteosourceClient } from '../weather/clients/meteosource-client.js';
-import { WeatherXuClient } from '../weather/clients/weatherxu-client.js';
 import { findCity } from '../weather/types.js';
 
 export class ForecastMonitor {
@@ -53,9 +51,7 @@ export class ForecastMonitor {
             new WeatherApiClient({ name: 'WeatherAPI', rateLimit: 30000, enabled: true, apiKey: config.weatherApiKey }),
             new WeatherbitClient({ name: 'Weatherbit', rateLimit: 500, enabled: true, apiKey: config.weatherbitApiKey }),
             new VisualCrossingClient({ name: 'Visual Crossing', rateLimit: 1000, enabled: true, apiKey: config.visualCrossingApiKey }),
-            new MeteomaticsClient({ name: 'Meteomatics', rateLimit: 500, enabled: true, username: config.meteomaticsUsername, password: config.meteomaticsPassword }),
-            new MeteosourceClient({ name: 'Meteosource', rateLimit: 400, enabled: true, apiKey: config.meteosourceApiKey }),
-            new WeatherXuClient({ name: 'WeatherXU', rateLimit: 500, enabled: true, apiKey: config.weatherxuApiKey })
+            new MeteosourceClient({ name: 'Meteosource', rateLimit: 400, enabled: true, apiKey: config.meteosourceApiKey })
         ];
 
         for (const client of clients) {
