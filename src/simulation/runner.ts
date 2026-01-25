@@ -121,7 +121,7 @@ export class SimulationRunner {
             if (existingPos) continue;
 
             // Execute
-            this.simulator.openPosition({
+            const position = this.simulator.openPosition({
                 market: state.market,
                 forecastProbability: 0,
                 marketProbability: 0,
@@ -132,6 +132,11 @@ export class SimulationRunner {
                 weatherDataSource: 'noaa',
                 isGuaranteed: signal.isGuaranteed || false
             }, size);
+
+            // Mark this opportunity as captured to prevent re-buying at higher prices
+            if (position && state.lastForecast) {
+                this.strategy.markOpportunityCaptured(signal.marketId, state.lastForecast.forecastValue);
+            }
         }
 
         // 4. Check Take Profit / Stop Loss (Smart Exit)

@@ -30,12 +30,48 @@ export class SpeedArbitrageStrategy {
     private edgeCalculator: EdgeCalculator;
     private entryOptimizer: EntryOptimizer;
 
+    // Track opportunities we've already captured - prevents re-buying at higher prices
+    // Key: marketId, Value: { forecastValue we traded on, when we captured it }
+    private capturedOpportunities: Map<string, { forecastValue: number; capturedAt: Date }> = new Map();
+
     constructor(store: DataStore) {
         this.store = store;
         this.bayesian = new BayesianModel();
         this.marketModel = new MarketModel(store);
         this.edgeCalculator = new EdgeCalculator(this.marketModel);
         this.entryOptimizer = new EntryOptimizer(this.marketModel);
+    }
+
+    /**
+     * Mark an opportunity as captured - prevents re-entry until NEW forecast change
+     */
+    markOpportunityCaptured(marketId: string, forecastValue: number): void {
+        this.capturedOpportunities.set(marketId, {
+            forecastValue,
+            capturedAt: new Date()
+        });
+        logger.info(`📌 Marked opportunity captured: ${marketId} at forecast ${forecastValue.toFixed(1)}`);
+    }
+
+    /**
+     * Check if we've already captured this opportunity
+     */
+    private isOpportunityCaptured(marketId: string, currentForecastValue: number): boolean {
+        const captured = this.capturedOpportunities.get(marketId);
+        if (!captured) return false;
+
+        // Allow re-entry only if forecast value changed significantly (new opportunity)
+        const forecastDiff = Math.abs(currentForecastValue - captured.forecastValue);
+        const significantChange = forecastDiff >= 1.0; // 1 degree or 1 inch = new opportunity
+
+        if (significantChange) {
+            // New forecast value! Clear the captured flag
+            this.capturedOpportunities.delete(marketId);
+            logger.info(`🔄 New forecast for ${marketId}: ${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)}, allowing re-entry`);
+            return false;
+        }
+
+        return true; // Still captured, block re-entry
     }
 
     /**
@@ -62,6 +98,14 @@ export class SpeedArbitrageStrategy {
 
             // Skip if forecast hasn't changed
             if (!forecast.valueChanged) {
+                continue;
+            }
+
+            // =====================================================
+            // SPEED ARBITRAGE CHECK #1.5: Have we already captured this opportunity?
+            // =====================================================
+            if (this.isOpportunityCaptured(market.market.id, forecast.forecastValue)) {
+                logger.debug(`⏭️ Skipping already captured: ${market.market.question.substring(0, 40)}...`);
                 continue;
             }
 
