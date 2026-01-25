@@ -1,10 +1,8 @@
 module.exports = {
     apps: [{
         name: "weather-racing",
-        // Run the web server to enable dashboard & reverse proxy support
-        script: "npx",
-        args: "tsx src/web/server.ts",
-        interpreter: "none",
+        // Run the compiled web server
+        script: "dist/web/server.js",
         instances: 1,
         autorestart: true,
         watch: false,

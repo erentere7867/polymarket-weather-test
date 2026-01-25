@@ -9,9 +9,6 @@ import { config } from '../config.js';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Initialize Simulation (Indefinite Mode)
-const runner = new SimulationRunner(100000, Infinity);
-
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -116,21 +113,43 @@ app.get('/api/opportunities', (req, res) => {
     res.json([]);
 });
 
+// Initialize runner lazily or inside startServer to catch errors
+let runner: SimulationRunner;
+
 // Start Server
 async function startServer() {
     try {
-        // Start Bot
-        runner.start(); // This runs in background (async)
+        logger.info('🚀 Initializing SimulationRunner...');
+        // Initialize Simulation (Indefinite Mode)
+        runner = new SimulationRunner(100000, Infinity);
+
+        // Start Bot background loop
+        logger.info('🔄 Starting Racing Logic...');
+        runner.start().catch(err => {
+            logger.error('❌ Racing Logic Crashed:', err);
+        });
 
         app.listen(PORT, () => {
+            logger.info('='.repeat(50));
             logger.info(`🌐 Web Server running on port ${PORT}`);
             logger.info(`📊 Dashboard available at http://localhost:${PORT}`);
+            logger.info('='.repeat(50));
         });
 
     } catch (error) {
-        logger.error('Failed to start server', { error: (error as Error).message });
+        logger.error('❌ Failed to start server:', { error: (error as Error).message, stack: (error as Error).stack });
+        process.exit(1);
     }
 }
+
+// Routes need to check if runner exists
+app.use((req, res, next) => {
+    if (!runner) {
+        return res.status(503).json({ error: 'Server initializing...' });
+    }
+    next();
+});
+
 
 // Graceful Shutdown
 process.on('SIGINT', () => {
