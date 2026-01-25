@@ -9,6 +9,16 @@ import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { ForecastSnapshot } from './types.js';
 import { logger } from '../logger.js';
 import { config } from '../config.js';
+import { MultiSourceMonitor } from './multi-source-monitor.js';
+import { RateLimiter } from './rate-limiter.js';
+import { TomorrowClient } from '../weather/clients/tomorrow-client.js';
+import { WeatherApiClient } from '../weather/clients/weatherapi-client.js';
+import { WeatherbitClient } from '../weather/clients/weatherbit-client.js';
+import { VisualCrossingClient } from '../weather/clients/visualcrossing-client.js';
+import { MeteomaticsClient } from '../weather/clients/meteomatics-client.js';
+import { MeteosourceClient } from '../weather/clients/meteosource-client.js';
+import { WeatherXuClient } from '../weather/clients/weatherxu-client.js';
+import { findCity } from '../weather/types.js';
 
 export class ForecastMonitor {
     private weatherService: WeatherService;
@@ -18,12 +28,75 @@ export class ForecastMonitor {
     private pollTimeout: NodeJS.Timeout | null = null;
     private cityCache: Map<string, { data: WeatherData, timestamp: Date }> = new Map();
 
+    private multiSourceMonitor: MultiSourceMonitor;
+    private multiSourceInterval: NodeJS.Timeout | null = null;
+    private rateLimiter: RateLimiter;
+
     constructor(store: DataStore, pollIntervalMs?: number) {
         this.store = store;
         this.weatherService = new WeatherService();
         // Use config default (30s) for speed arbitrage, or allow override
         this.pollIntervalMs = pollIntervalMs ?? config.forecastPollIntervalMs;
+
+        // Initialize Multi-Source Monitor
+        this.rateLimiter = new RateLimiter();
+        this.multiSourceMonitor = new MultiSourceMonitor(this.rateLimiter);
+        this.initializeClients();
+        this.setupMultiSourceEvents();
+
         logger.info(`ForecastMonitor initialized with ${this.pollIntervalMs / 1000}s polling interval`);
+    }
+
+    private initializeClients(): void {
+        const clients = [
+            new TomorrowClient({ name: 'Tomorrow.io', rateLimit: 500, enabled: true, apiKey: config.tomorrowApiKey }),
+            new WeatherApiClient({ name: 'WeatherAPI', rateLimit: 30000, enabled: true, apiKey: config.weatherApiKey }),
+            new WeatherbitClient({ name: 'Weatherbit', rateLimit: 500, enabled: true, apiKey: config.weatherbitApiKey }),
+            new VisualCrossingClient({ name: 'Visual Crossing', rateLimit: 1000, enabled: true, apiKey: config.visualCrossingApiKey }),
+            new MeteomaticsClient({ name: 'Meteomatics', rateLimit: 500, enabled: true, username: config.meteomaticsUsername, password: config.meteomaticsPassword }),
+            new MeteosourceClient({ name: 'Meteosource', rateLimit: 400, enabled: true, apiKey: config.meteosourceApiKey }),
+            new WeatherXuClient({ name: 'WeatherXU', rateLimit: 500, enabled: true, apiKey: config.weatherxuApiKey })
+        ];
+
+        for (const client of clients) {
+            this.multiSourceMonitor.addSource(client);
+        }
+    }
+
+    private setupMultiSourceEvents(): void {
+        this.multiSourceMonitor.on('forecast-changed', async (event) => {
+            // event: { city, source, oldValue, newValue, timestamp, fullResult }
+            logger.info(`⚡ Fast Update (${event.source}) for ${event.city}: ${event.newValue}°F`);
+
+            // Construct pseudo WeatherData from result
+            // Since these APIs usually return simple temp, we fill gaps or fetch full if needed.
+            // But for speed, we use the temperature directly to update the cache and trigger logic.
+
+            // Fetch markets for this city
+            const markets = this.store.getAllMarkets().filter(m => m.city === event.city);
+            if (markets.length === 0) return;
+
+            // Update cache with this new data point
+            const coords = findCity(event.city)?.coordinates || { lat: 0, lon: 0 };
+
+            // Create minimal WeatherData for cache-hit
+            const newData: WeatherData = {
+                location: coords,
+                fetchedAt: new Date(),
+                source: 'openweather', // flagging as external/fast
+                hourly: [{
+                    timestamp: new Date(),
+                    temperatureF: event.newValue,
+                    temperatureC: (event.newValue - 32) * 5 / 9,
+                    isDaytime: true,
+                    probabilityOfPrecipitation: 0
+                }]
+            };
+            this.cityCache.set(event.city, { data: newData, timestamp: new Date() });
+
+            // Trigger analysis immediately
+            await this.updateCityForecasts(event.city, markets);
+        });
     }
 
     /**
@@ -33,7 +106,21 @@ export class ForecastMonitor {
         if (this.isRunning) return;
         this.isRunning = true;
         this.poll();
+        this.startMultiSourcePolling();
         logger.info('ForecastMonitor started');
+    }
+
+    private startMultiSourcePolling(): void {
+        if (this.multiSourceInterval) clearInterval(this.multiSourceInterval);
+
+        logger.info(`Starting Multi-Source Racing Monitor (${config.multiSourcePollIntervalMs}ms interval)`);
+        this.multiSourceInterval = setInterval(() => {
+            const cityResolver = async (city: string) => {
+                const loc = findCity(city);
+                return loc ? loc.coordinates : null;
+            };
+            this.multiSourceMonitor.pollNext(cityResolver);
+        }, config.multiSourcePollIntervalMs);
     }
 
     /**
@@ -44,6 +131,10 @@ export class ForecastMonitor {
         if (this.pollTimeout) {
             clearTimeout(this.pollTimeout);
             this.pollTimeout = null;
+        }
+        if (this.multiSourceInterval) {
+            clearInterval(this.multiSourceInterval);
+            this.multiSourceInterval = null;
         }
         logger.info('ForecastMonitor stopped');
     }
@@ -64,9 +155,48 @@ export class ForecastMonitor {
                 }
             }
 
+            // Split into US (standard poll) and International (multi-source handled)
+            const usCities = new Map<string, ParsedWeatherMarket[]>();
+            const internationalCities = new Set<string>();
+
             for (const [city, cityMarkets] of cityGroups) {
-                await this.updateCityForecasts(city, cityMarkets);
+                const location = findCity(city);
+                if (location && location.timezone.startsWith('America/')) { // Simple heuristic for US/Canada
+                    // Actually, Toronto is America/Toronto but likely want standard flow if NOAA covers it?
+                    // NOAA usually only US. 
+                    // Let's explicitly check coordinates or known US list.
+                    // For implementation simplicity: if 'New York', 'Chicago', etc. -> US.
+                    // If 'London', 'Seoul' -> International.
+
+                    // Simple check: Positive longitude is East (Intl usually), Negative is West (Americas).
+                    // US is roughly -60 to -125.
+                    // Or rely on isUS(coords) helper if available.
+
+                    // For now, treat US as standard polling.
+                    // International cities get added to multi-source monitor.
+                    // BUT: We don't want to poll them here if multi-source handles them.
+
+                    if (this.weatherService.isInUS(location.coordinates)) {
+                        await this.updateCityForecasts(city, cityMarkets);
+                    } else {
+                        internationalCities.add(city);
+                        // Initial fetch or periodic sync for international?
+                        // MultiSource handles rapid updates. 
+                        // We might want one "Open-Meteo" fetch here as backup/baseline every 30s.
+                        // Let's do it to ensure baseline data.
+                        await this.updateCityForecasts(city, cityMarkets);
+                    }
+                } else {
+                    // Assume international
+                    internationalCities.add(city);
+                    // Still standard poll for baseline
+                    await this.updateCityForecasts(city, cityMarkets);
+                }
             }
+
+            // Update MultiSourceMonitor with current active international cities
+            this.multiSourceMonitor.setCities(Array.from(internationalCities));
+
 
         } catch (error) {
             logger.error('Forecast poll failed', { error: (error as Error).message });

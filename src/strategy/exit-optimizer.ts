@@ -1,6 +1,7 @@
 /**
  * Exit Optimizer
  * Determines when to close positions (Profit Taking / Stop Loss)
+ * Enhanced with price momentum detection and resolution-time exit
  */
 
 import { MarketModel } from '../probability/market-model.js';
@@ -15,6 +16,8 @@ export interface Position {
     entryTime: Date;
     pnl: number;        // Unrealized PnL amount
     pnlPercent: number; // Unrealized PnL % (e.g. 0.10 for 10%)
+    priceHistory?: { price: number; timestamp: Date }[]; // For momentum detection
+    marketEndTime?: Date; // When market resolves
 }
 
 export interface ExitSignal {
@@ -24,6 +27,9 @@ export interface ExitSignal {
     limitPrice?: number;
 }
 
+// Exit before resolution deadline to avoid settlement risk
+const EXIT_BEFORE_RESOLUTION_MS = 2 * 60 * 60 * 1000; // 2 hours before
+
 export class ExitOptimizer {
     private marketModel: MarketModel;
 
@@ -31,6 +37,7 @@ export class ExitOptimizer {
     private takeProfitThreshold: number = 0.05; // 5% - aggressive micro-profits
     private stopLossThreshold: number = -0.10;  // -10%
     private timeLimitMs: number = 24 * 60 * 60 * 1000; // 24 hours max hold
+    private momentumWindowMs: number = 60 * 1000; // 1 minute window for momentum
 
     constructor(marketModel: MarketModel) {
         this.marketModel = marketModel;
@@ -56,10 +63,64 @@ export class ExitOptimizer {
     }
 
     /**
-     * Check if a position should be exited
+     * Calculate price momentum (positive = price rising, negative = falling)
+     * Returns price change per second
+     */
+    private calculateMomentum(priceHistory: { price: number; timestamp: Date }[] | undefined): number {
+        if (!priceHistory || priceHistory.length < 2) return 0;
+
+        const now = Date.now();
+        const recentPrices = priceHistory.filter(p =>
+            now - p.timestamp.getTime() < this.momentumWindowMs
+        );
+
+        if (recentPrices.length < 2) return 0;
+
+        const first = recentPrices[0];
+        const last = recentPrices[recentPrices.length - 1];
+        const timeDeltaS = (last.timestamp.getTime() - first.timestamp.getTime()) / 1000;
+
+        if (timeDeltaS <= 0) return 0;
+
+        return (last.price - first.price) / timeDeltaS;
+    }
+
+    /**
+     * Check if momentum is favorable for position
+     * YES position: positive momentum = good
+     * NO position: negative momentum = good
+     */
+    private isMomentumFavorable(position: Position): boolean {
+        const momentum = this.calculateMomentum(position.priceHistory);
+
+        // Only consider significant momentum (> 0.001/sec = 6% per minute)
+        const significantMomentum = Math.abs(momentum) > 0.001;
+        if (!significantMomentum) return false;
+
+        if (position.side === 'yes') {
+            return momentum > 0; // Price rising is good for YES
+        } else {
+            return momentum < 0; // Price falling is good for NO (our NO shares gain value)
+        }
+    }
+
+    /**
+     * Check if position should be exited
      */
     checkExit(position: Position, forecastProbability: number): ExitSignal {
-        // 1. Stop Loss
+        // 0. Emergency: Exit before market resolution
+        if (position.marketEndTime) {
+            const timeToResolution = position.marketEndTime.getTime() - Date.now();
+            if (timeToResolution < EXIT_BEFORE_RESOLUTION_MS && timeToResolution > 0) {
+                return {
+                    shouldExit: true,
+                    reason: `Market resolves in ${(timeToResolution / 3600000).toFixed(1)}h - exiting to avoid settlement risk`,
+                    urgency: 'HIGH'
+                };
+            }
+        }
+
+        // 1. Stop Loss (always exit on stop loss)
         if (position.pnlPercent <= this.stopLossThreshold) {
             return {
                 shouldExit: true,
@@ -68,36 +129,48 @@ export class ExitOptimizer {
             };
         }
 
-        // 2. Take Profit (Target Price)
-        // If price reached fair value (forecast probability), take profit?
-        // Or if we hit fixed ROI threshold.
+        // 2. Take Profit with momentum check
         const fairValue = forecastProbability;
         const currentPrice = position.currentPrice;
 
-        // If we are LONG YES, and Price >= FairValue, maybe exit?
-        // Or if we surpassed fair value (Market Overreaction).
+        // If we hit take profit threshold BUT momentum is still favorable, hold
+        if (position.pnlPercent >= this.takeProfitThreshold) {
+            const favorableMomentum = this.isMomentumFavorable(position);
 
+            if (favorableMomentum) {
+                // Don't exit yet - price still moving in our favor
+                logger.debug(`💨 Holding despite TP hit - favorable momentum for ${position.marketId}`);
+            } else {
+                return {
+                    shouldExit: true,
+                    reason: `Take Profit hit: ${(position.pnlPercent * 100).toFixed(1)}% (momentum slowed)`,
+                    urgency: 'MEDIUM'
+                };
+            }
+        }
+
+        // 3. Fair value reached (market caught up)
         const isOvervalued = position.side === 'yes'
             ? currentPrice >= fairValue
             : currentPrice <= fairValue;
 
         if (isOvervalued) {
-            return {
-                shouldExit: true,
-                reason: `Fair value reached (Price ${currentPrice.toFixed(2)} vs Prob ${fairValue.toFixed(2)})`,
-                urgency: 'MEDIUM'
-            };
+            // Even if overvalued, check if momentum suggests further movement
+            const favorableMomentum = this.isMomentumFavorable(position);
+
+            if (favorableMomentum && position.pnlPercent > 0) {
+                // Hold if momentum still favorable and we're in profit
+                logger.debug(`💨 Holding despite fair value - favorable momentum for ${position.marketId}`);
+            } else {
+                return {
+                    shouldExit: true,
+                    reason: `Fair value reached (Price ${currentPrice.toFixed(2)} vs Prob ${fairValue.toFixed(2)})`,
+                    urgency: 'MEDIUM'
+                };
+            }
         }
 
-        if (position.pnlPercent >= this.takeProfitThreshold) {
-            return {
-                shouldExit: true,
-                reason: `Take Profit hit: ${(position.pnlPercent * 100).toFixed(1)}%`,
-                urgency: 'MEDIUM'
-            };
-        }
-
-        // 3. Time Limit
+        // 4. Time Limit
         const holdTime = Date.now() - position.entryTime.getTime();
         if (holdTime > this.timeLimitMs) {
             return {
@@ -106,15 +179,6 @@ export class ExitOptimizer {
                 urgency: 'LOW'
             };
         }
-
-        // 4. Forecast Reversal (Stop Loss based on fundamental change)
-        // If forecast changed against us significantly.
-        // Assuming forecastProbability is the NEW probability.
-        // If we are LONG YES (entry 0.50), and Forecast is now 0.30.
-        // That is captured by "Fair value reached" logic? 
-        // No, Fair Value Reached logic above:
-        // YES: Price (0.50) >= FairValue (0.30) -> TRUE, Exit.
-        // So yes, it covers bad news too.
 
         return { shouldExit: false };
     }

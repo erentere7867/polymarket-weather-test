@@ -22,6 +22,14 @@ export interface Config {
 
     // Weather APIs
     openWeatherApiKey: string;
+    tomorrowApiKey: string;
+    weatherApiKey: string;
+    weatherbitApiKey: string;
+    visualCrossingApiKey: string;
+    meteomaticsUsername: string;
+    meteomaticsPassword: string;
+    meteosourceApiKey: string;
+    weatherxuApiKey: string;
     noaaHost: string;
 
     // Bot settings
@@ -30,6 +38,7 @@ export interface Config {
     minEdgeThreshold: number;
     pollIntervalMs: number;
     forecastPollIntervalMs: number;
+    multiSourcePollIntervalMs: number;
     logLevel: string;
 
     // Guaranteed outcome detection
@@ -69,6 +78,14 @@ export const config: Config = {
 
     // Weather APIs
     openWeatherApiKey: getEnvVarOptional('OPENWEATHER_API_KEY', ''),
+    tomorrowApiKey: getEnvVarOptional('TOMORROW_API_KEY', ''),
+    weatherApiKey: getEnvVarOptional('WEATHERAPI_KEY', ''),
+    weatherbitApiKey: getEnvVarOptional('WEATHERBIT_API_KEY', ''),
+    visualCrossingApiKey: getEnvVarOptional('VISUALCROSSING_API_KEY', ''),
+    meteomaticsUsername: getEnvVarOptional('METEOMATICS_USERNAME', ''),
+    meteomaticsPassword: getEnvVarOptional('METEOMATICS_PASSWORD', ''),
+    meteosourceApiKey: getEnvVarOptional('METEOSOURCE_API_KEY', ''),
+    weatherxuApiKey: getEnvVarOptional('WEATHERXU_API_KEY', ''),
     noaaHost: 'https://api.weather.gov',
 
     // Bot settings
@@ -77,6 +94,7 @@ export const config: Config = {
     minEdgeThreshold: getEnvVarNumber('MIN_EDGE_THRESHOLD', 0.10),
     pollIntervalMs: getEnvVarNumber('POLL_INTERVAL_MS', 300000), // 5 minutes
     forecastPollIntervalMs: getEnvVarNumber('FORECAST_POLL_INTERVAL_MS', 30000), // 30 seconds for speed arbitrage
+    multiSourcePollIntervalMs: getEnvVarNumber('MULTISOURCE_POLL_INTERVAL_MS', 5000), // 5 seconds default
     logLevel: getEnvVarOptional('LOG_LEVEL', 'info'),
 
     // Guaranteed outcome detection

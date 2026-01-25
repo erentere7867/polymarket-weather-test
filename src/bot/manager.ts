@@ -7,6 +7,7 @@ import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { TradingClient } from '../polymarket/clob-client.js';
 import { OpportunityDetector } from './opportunity-detector.js';
 import { OrderExecutor } from './order-executor.js';
+import { telemetry } from './telemetry.js';
 import { config, validateConfig } from '../config.js';
 import { logger } from '../logger.js';
 import { TradingOpportunity, ParsedWeatherMarket } from '../polymarket/types.js';
@@ -120,10 +121,30 @@ export class BotManager {
                             opp.forecastValue,
                             opp.action
                         );
+
+                        // Record telemetry
+                        telemetry.recordTrade({
+                            marketId: opp.market.market.id,
+                            forecastTimestamp: new Date(), // Would be better if we tracked this
+                            tradeTimestamp: new Date(),
+                            latencyMs: 0, // To be improved with actual forecast timestamp tracking
+                            forecastValue: opp.forecastValue,
+                            threshold: opp.market.threshold || 0,
+                            sigma: opp.certaintySigma || 0,
+                            entryPrice: opp.action === 'buy_yes' ? opp.market.yesPrice : opp.market.noPrice,
+                            edge: opp.edge,
+                            isGuaranteed: opp.isGuaranteed || false,
+                            outcome: 'pending',
+                        });
                     }
                 }
 
                 logger.info(`Executed ${successfulTrades.length}/${opportunities.length} trades`);
+
+                // Print telemetry summary every 10 trades
+                if (this.stats.tradesExecuted > 0 && this.stats.tradesExecuted % 10 === 0) {
+                    telemetry.printSummary();
+                }
             }
 
         } catch (error) {
@@ -196,5 +217,26 @@ export class BotManager {
      */
     private delay(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Get telemetry statistics for dashboard
+     */
+    getTelemetryStats() {
+        return telemetry.getStats();
+    }
+
+    /**
+     * Get trade history from telemetry
+     */
+    getTradeHistory() {
+        return telemetry.getTradeHistory();
+    }
+
+    /**
+     * Print telemetry summary
+     */
+    printTelemetrySummary(): void {
+        telemetry.printSummary();
     }
 }

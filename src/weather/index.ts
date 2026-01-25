@@ -30,7 +30,7 @@ export class WeatherService {
     /**
      * Check if coordinates are within the continental US
      */
-    private isInUS(coords: Coordinates): boolean {
+    public isInUS(coords: Coordinates): boolean {
         return (
             coords.lat >= this.US_BOUNDS.minLat &&
             coords.lat <= this.US_BOUNDS.maxLat &&

@@ -14,6 +14,20 @@ const MARKET_CAUGHT_UP_THRESHOLD = 0.10; // If price within 10% of probability, 
 // Minimum forecast change to allow re-entry on a captured opportunity
 const SIGNIFICANT_FORECAST_CHANGE = 1.0; // 1 degree or 1 inch
 
+// Base uncertainty values (scale with days ahead)
+const BASE_UNCERTAINTY = {
+    temperature: 2.0,  // °F for same-day forecast
+    snowfall: 1.0,     // inches for same-day forecast
+    precipitation: 8,  // percentage points for same-day
+};
+
+// Uncertainty growth per day ahead
+const UNCERTAINTY_GROWTH_RATE = {
+    temperature: 0.5,  // +0.5°F per day
+    snowfall: 0.5,     // +0.5 inches per day (snow is harder to predict)
+    precipitation: 3,  // +3 percentage points per day
+};
+
 interface CapturedOpportunity {
     forecastValue: number;
     capturedAt: Date;
@@ -86,6 +100,23 @@ export class OpportunityDetector {
      */
     clearCapturedOpportunity(marketId: string): void {
         this.capturedOpportunities.delete(marketId);
+    }
+
+    /**
+     * Calculate dynamic uncertainty based on forecast distance
+     * Uncertainty grows as we forecast further into the future
+     */
+    private calculateDynamicUncertainty(
+        metricType: 'temperature' | 'snowfall' | 'precipitation',
+        targetDate: Date
+    ): number {
+        const daysAhead = Math.max(0, (targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+        const baseUncertainty = BASE_UNCERTAINTY[metricType];
+        const growthRate = UNCERTAINTY_GROWTH_RATE[metricType];
+
+        // Uncertainty = base + (days * growth), capped at 3x base
+        const uncertainty = baseUncertainty + (daysAhead * growthRate);
+        return Math.min(uncertainty, baseUncertainty * 3);
     }
 
     /**
@@ -275,7 +306,8 @@ export class OpportunityDetector {
 
             // Calculate probability based on comparison type
             let probability: number;
-            const uncertainty = 3; // Typical forecast uncertainty in °F
+            // Dynamic uncertainty based on forecast distance
+            const uncertainty = this.calculateDynamicUncertainty('temperature', targetDate);
 
             if (market.comparisonType === 'above') {
                 // Probability that temp will be ABOVE threshold
@@ -342,7 +374,8 @@ export class OpportunityDetector {
             }
 
             let probability: number;
-            const uncertainty = 3;
+            // Dynamic uncertainty based on forecast distance
+            const uncertainty = this.calculateDynamicUncertainty('temperature', targetDate);
 
             if (market.comparisonType === 'below') {
                 probability = 1 - this.weatherService.calculateTempExceedsProbability(
@@ -401,7 +434,8 @@ export class OpportunityDetector {
                 endDate
             );
 
-            const uncertainty = 2; // Snow forecast uncertainty in inches
+            // Dynamic uncertainty based on forecast distance (snow is harder to predict)
+            const uncertainty = this.calculateDynamicUncertainty('snowfall', targetDate);
             let probability: number;
 
             if (market.comparisonType === 'above') {
@@ -482,15 +516,23 @@ export class OpportunityDetector {
     }
 
     /**
-     * Batch analyze multiple markets
+     * Batch analyze multiple markets (parallel for speed)
      */
     async analyzeMarkets(markets: ParsedWeatherMarket[]): Promise<TradingOpportunity[]> {
         const opportunities: TradingOpportunity[] = [];
 
-        for (const market of markets) {
-            const opportunity = await this.analyzeMarket(market);
-            if (opportunity && opportunity.action !== 'none') {
-                opportunities.push(opportunity);
+        // Process in parallel batches of 5 to avoid overwhelming weather APIs
+        const BATCH_SIZE = 5;
+        for (let i = 0; i < markets.length; i += BATCH_SIZE) {
+            const batch = markets.slice(i, i + BATCH_SIZE);
+            const results = await Promise.all(
+                batch.map(market => this.analyzeMarket(market))
+            );
+
+            for (const opportunity of results) {
+                if (opportunity && opportunity.action !== 'none') {
+                    opportunities.push(opportunity);
+                }
             }
         }
 
