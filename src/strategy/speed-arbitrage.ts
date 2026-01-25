@@ -127,14 +127,28 @@ export class SpeedArbitrageStrategy {
             // Check if price was updated AFTER the forecast change
             // If price updated after change, market has already reacted - no edge
             if (priceYesPoint.timestamp.getTime() > forecast.changeTimestamp.getTime()) {
-                // Price updated after forecast - check if it moved significantly
+                // Price updated after forecast - check if it moved TOWARDS the new forecast probability
                 const priceBeforeChange = this.findPriceBeforeChange(state.priceHistory.yes.history, forecast.changeTimestamp);
                 const currentPrice = priceYesPoint.price;
-                const priceMoved = priceBeforeChange !== null && Math.abs(currentPrice - priceBeforeChange) > 0.05;
 
-                if (priceMoved) {
-                    // Market already reacted, skip
-                    continue;
+                if (priceBeforeChange !== null) {
+                    // Determine expected direction: if forecast > threshold, price should go up (for 'above' markets)
+                    const diff = forecast.forecastValue - (market.threshold || 0);
+                    let expectedProbability: number;
+                    if (market.comparisonType === 'above') {
+                        expectedProbability = diff > 0 ? 1.0 : 0.0;
+                    } else {
+                        expectedProbability = diff < 0 ? 1.0 : 0.0;
+                    }
+
+                    const priceMovedTowards = (expectedProbability > 0.5 && currentPrice > priceBeforeChange) ||
+                        (expectedProbability < 0.5 && currentPrice < priceBeforeChange);
+                    const significantMove = Math.abs(currentPrice - priceBeforeChange) > 0.05;
+
+                    if (priceMovedTowards && significantMove) {
+                        // Market already reacted in the correct direction, skip
+                        continue;
+                    }
                 }
             }
 

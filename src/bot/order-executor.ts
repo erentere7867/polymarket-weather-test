@@ -15,9 +15,13 @@ interface ExecutionResult {
     error?: string;
 }
 
+// Cooldown period to prevent duplicate trades on same market (ms)
+const TRADE_COOLDOWN_MS = 60000; // 60 seconds
+
 export class OrderExecutor {
     private tradingClient: TradingClient;
     private executedOrderIds: Set<string> = new Set();
+    private recentlyTradedMarkets: Map<string, Date> = new Map();
 
     constructor(tradingClient: TradingClient) {
         this.tradingClient = tradingClient;
@@ -44,11 +48,15 @@ export class OrderExecutor {
             const tokenId = isBuyYes ? opportunity.market.yesTokenId : opportunity.market.noTokenId;
             const price = isBuyYes ? opportunity.market.yesPrice : opportunity.market.noPrice;
 
+            // For guaranteed outcomes, use more aggressive pricing to ensure fills
+            const isGuaranteed = opportunity.isGuaranteed || false;
+            const priceIncrement = isGuaranteed ? 0.05 : 0.01; // 5¢ for guaranteed, 1¢ otherwise
+
             // Build order
             const order: TradeOrder = {
                 tokenId,
                 side: 'BUY',
-                price: Math.min(price + 0.01, 0.99), // Slightly above current price for fill
+                price: Math.min(price + priceIncrement, 0.99),
                 size: positionSize,
                 orderType: 'GTC', // Good til cancelled
             };
@@ -67,6 +75,8 @@ export class OrderExecutor {
 
             if (result) {
                 this.executedOrderIds.add(result.orderId);
+                // Track this market as recently traded
+                this.recentlyTradedMarkets.set(opportunity.market.market.id, new Date());
                 return {
                     opportunity,
                     executed: true,
@@ -145,9 +155,18 @@ export class OrderExecutor {
     /**
      * Check if a market was recently traded (to avoid duplicate trades)
      */
-    private recentlyTraded(_marketKey: string): boolean {
-        // For now, just check order IDs - could track by market in future
-        return false;
+    private recentlyTraded(marketKey: string): boolean {
+        const lastTrade = this.recentlyTradedMarkets.get(marketKey);
+        if (!lastTrade) return false;
+
+        const elapsed = Date.now() - lastTrade.getTime();
+        if (elapsed > TRADE_COOLDOWN_MS) {
+            // Cooldown expired, clean up and allow trading
+            this.recentlyTradedMarkets.delete(marketKey);
+            return false;
+        }
+
+        return true; // Still in cooldown
     }
 
     /**

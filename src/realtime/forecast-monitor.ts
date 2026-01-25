@@ -84,7 +84,8 @@ export class ForecastMonitor {
             let weatherData: WeatherData;
             const cached = this.cityCache.get(city);
 
-            if (cached && (Date.now() - cached.timestamp.getTime() < 60000)) {
+            // 15s cache to match MAX_CHANGE_AGE_MS in speed-arbitrage.ts
+            if (cached && (Date.now() - cached.timestamp.getTime() < 15000)) {
                 weatherData = cached.data;
             } else {
                 weatherData = await this.weatherService.getForecastByCity(city);
