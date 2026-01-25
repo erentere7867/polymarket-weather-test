@@ -8,11 +8,84 @@ import { ParsedWeatherMarket, TradingOpportunity } from '../polymarket/types.js'
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
+// Threshold for considering market "caught up" to the forecast
+const MARKET_CAUGHT_UP_THRESHOLD = 0.10; // If price within 10% of probability, market caught up
+
+// Minimum forecast change to allow re-entry on a captured opportunity
+const SIGNIFICANT_FORECAST_CHANGE = 1.0; // 1 degree or 1 inch
+
+interface CapturedOpportunity {
+    forecastValue: number;
+    capturedAt: Date;
+    side: 'buy_yes' | 'buy_no';
+}
+
 export class OpportunityDetector {
     private weatherService: WeatherService;
 
+    // Track opportunities we've already acted on - prevents re-buying at higher prices
+    private capturedOpportunities: Map<string, CapturedOpportunity> = new Map();
+
     constructor() {
         this.weatherService = new WeatherService();
+    }
+
+    /**
+     * Mark an opportunity as captured after successful trade
+     */
+    markOpportunityCaptured(marketId: string, forecastValue: number, side: 'buy_yes' | 'buy_no'): void {
+        this.capturedOpportunities.set(marketId, {
+            forecastValue,
+            capturedAt: new Date(),
+            side
+        });
+        logger.info(`📌 Opportunity captured: ${marketId} at forecast ${forecastValue.toFixed(1)} (${side})`);
+    }
+
+    /**
+     * Check if opportunity is already captured and whether market has caught up
+     */
+    private shouldSkipOpportunity(
+        marketId: string,
+        currentForecastValue: number | undefined,
+        marketProbability: number,
+        forecastProbability: number
+    ): { skip: boolean; reason: string } {
+        // Check 1: Has market caught up to the probability?
+        const priceDiff = Math.abs(marketProbability - forecastProbability);
+        if (priceDiff < MARKET_CAUGHT_UP_THRESHOLD) {
+            return {
+                skip: true,
+                reason: `Market caught up: price ${(marketProbability * 100).toFixed(1)}% ≈ forecast ${(forecastProbability * 100).toFixed(1)}%`
+            };
+        }
+
+        // Check 2: Have we already captured this opportunity?
+        const captured = this.capturedOpportunities.get(marketId);
+        if (!captured || currentForecastValue === undefined) {
+            return { skip: false, reason: '' };
+        }
+
+        // Allow re-entry only if forecast changed significantly (new opportunity)
+        const forecastDiff = Math.abs(currentForecastValue - captured.forecastValue);
+        if (forecastDiff >= SIGNIFICANT_FORECAST_CHANGE) {
+            // New forecast! Clear captured flag
+            this.capturedOpportunities.delete(marketId);
+            logger.info(`🔄 New forecast for ${marketId}: ${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)}, allowing re-entry`);
+            return { skip: false, reason: '' };
+        }
+
+        return {
+            skip: true,
+            reason: `Already captured at forecast ${captured.forecastValue.toFixed(1)}, current ${currentForecastValue?.toFixed(1)}`
+        };
+    }
+
+    /**
+     * Clear captured opportunity (e.g., when market resolves)
+     */
+    clearCapturedOpportunity(marketId: string): void {
+        this.capturedOpportunities.delete(marketId);
     }
 
     /**
@@ -112,6 +185,18 @@ export class OpportunityDetector {
                     guaranteedProbability: finalProbability,
                     marketProbability: marketProbability.toFixed(3),
                 });
+            }
+
+            // Check if we should skip this opportunity (already captured or market caught up)
+            const skipCheck = this.shouldSkipOpportunity(
+                market.market.id,
+                forecastValue,
+                marketProbability,
+                finalProbability
+            );
+            if (skipCheck.skip) {
+                logger.debug(`⏭️ Skipping ${market.market.question.substring(0, 40)}...: ${skipCheck.reason}`);
+                return null;
             }
 
             // Edge calculation: positive = market underprices YES, negative = market overprices YES

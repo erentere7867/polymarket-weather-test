@@ -111,6 +111,18 @@ export class BotManager {
                 const successfulTrades = results.filter(r => r.executed);
                 this.stats.tradesExecuted += successfulTrades.length;
 
+                // Mark successful trades as captured to prevent re-buying at higher prices
+                for (const result of successfulTrades) {
+                    const opp = result.opportunity;
+                    if (opp.forecastValue !== undefined && (opp.action === 'buy_yes' || opp.action === 'buy_no')) {
+                        this.opportunityDetector.markOpportunityCaptured(
+                            opp.market.market.id,
+                            opp.forecastValue,
+                            opp.action
+                        );
+                    }
+                }
+
                 logger.info(`Executed ${successfulTrades.length}/${opportunities.length} trades`);
             }
 
