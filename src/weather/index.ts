@@ -35,7 +35,9 @@ export class WeatherService {
             coords.lat >= this.US_BOUNDS.minLat &&
             coords.lat <= this.US_BOUNDS.maxLat &&
             coords.lon >= this.US_BOUNDS.minLon &&
-            coords.lon <= this.US_BOUNDS.maxLon
+            coords.lon <= this.US_BOUNDS.maxLon &&
+            // Explicitly exclude Toronto/Montreal which fall in the bounding box
+            !(coords.lat > 43.5 && coords.lat < 46.0 && coords.lon > -80.0 && coords.lon < -73.0)
         );
     }
 

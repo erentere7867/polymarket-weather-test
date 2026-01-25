@@ -245,15 +245,28 @@ export class OpportunityDetector {
                 if (edge > 0) {
                     // Forecast says higher probability than market -> buy YES
                     action = 'buy_yes';
+
+                    // High Asymmetry Check: Market <= 10% but Forecast High
+                    const isHighAsymmetry = marketProbability <= 0.10 && finalProbability >= 0.50;
+
                     reason = isGuaranteed
                         ? `🎯 GUARANTEED: Forecast ${forecastValue}${forecastValueUnit} vs threshold ${market.threshold}${forecastValueUnit} (${certaintySigma?.toFixed(1)}σ)`
-                        : `Forecast (${(finalProbability * 100).toFixed(1)}%) higher than market (${(marketProbability * 100).toFixed(1)}%)`;
+                        : isHighAsymmetry
+                            ? `💎 HIGH ASYMMETRY: Market at ${(marketProbability * 100).toFixed(1)}% vs Forecast ${(finalProbability * 100).toFixed(1)}%`
+                            : `Forecast (${(finalProbability * 100).toFixed(1)}%) higher than market (${(marketProbability * 100).toFixed(1)}%)`;
                 } else {
                     // Forecast says lower probability than market -> buy NO
                     action = 'buy_no';
+
+                    // High Asymmetry Check: Market >= 90% (No Price <= 10%) but Forecast Low
+                    const noPrice = 1 - marketProbability;
+                    const isHighAsymmetry = noPrice <= 0.10 && finalProbability <= 0.50;
+
                     reason = isGuaranteed
                         ? `🎯 GUARANTEED: Forecast ${forecastValue}${forecastValueUnit} vs threshold ${market.threshold}${forecastValueUnit} (${certaintySigma?.toFixed(1)}σ)`
-                        : `Forecast (${(finalProbability * 100).toFixed(1)}%) lower than market (${(marketProbability * 100).toFixed(1)}%)`;
+                        : isHighAsymmetry
+                            ? `💎 HIGH ASYMMETRY: Market NO at ${(noPrice * 100).toFixed(1)}% vs Forecast NO ${(1 - finalProbability) * 100}%`
+                            : `Forecast (${(finalProbability * 100).toFixed(1)}%) lower than market (${(marketProbability * 100).toFixed(1)}%)`;
                 }
             } else {
                 reason = `Edge ${(absEdge * 100).toFixed(1)}% below threshold ${(effectiveThreshold * 100).toFixed(0)}%`;

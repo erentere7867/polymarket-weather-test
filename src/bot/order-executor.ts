@@ -111,7 +111,18 @@ export class OrderExecutor {
         const halfKelly = kellyFraction * 0.5;
 
         // Calculate USDC amount
-        const usdcAmount = maxSize * Math.min(halfKelly * 10, 1); // Scale and cap at max
+        let maxUsdc = maxSize;
+
+        // Apply multiplier for guaranteed outcomes
+        if (opportunity.isGuaranteed) {
+            maxUsdc = maxSize * config.guaranteedPositionMultiplier;
+            // For guaranteed, we go heavier on Kelly
+            // Kelly fraction = edge * confidence. 
+            // If guaranteed: edge ~ 0.9, confidence = 1.0 -> kelly = 0.9
+            // Max size logic below will cap it.
+        }
+
+        const usdcAmount = maxUsdc * Math.min(halfKelly * 10, 1); // Scale and cap at max
 
         // Calculate number of shares (price determines how many shares per USDC)
         const price = opportunity.action === 'buy_yes'

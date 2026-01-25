@@ -131,4 +131,5 @@ export interface Position {
     currentPrice: number;
     unrealizedPnL: number;
     entryTime: Date;
+    isGuaranteed?: boolean; // Strategy tag: hold to settlement
 }

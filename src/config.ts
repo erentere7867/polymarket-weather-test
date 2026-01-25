@@ -84,10 +84,10 @@ export const config: Config = {
 
     // Bot settings
     simulationMode: getEnvVarBool('SIMULATION_MODE', false),
-    maxPositionSize: getEnvVarNumber('MAX_POSITION_SIZE', 10),
+    maxPositionSize: getEnvVarNumber('MAX_POSITION_SIZE', 50),
     minEdgeThreshold: getEnvVarNumber('MIN_EDGE_THRESHOLD', 0.10),
     pollIntervalMs: getEnvVarNumber('POLL_INTERVAL_MS', 300000), // 5 minutes
-    forecastPollIntervalMs: getEnvVarNumber('FORECAST_POLL_INTERVAL_MS', 30000), // 30 seconds for speed arbitrage
+    forecastPollIntervalMs: getEnvVarNumber('FORECAST_POLL_INTERVAL_MS', 10000), // 10 seconds for speed arbitrage
     multiSourcePollIntervalMs: getEnvVarNumber('MULTISOURCE_POLL_INTERVAL_MS', 5000), // 5 seconds default
     logLevel: getEnvVarOptional('LOG_LEVEL', 'info'),
 

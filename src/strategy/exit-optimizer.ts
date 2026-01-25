@@ -18,6 +18,7 @@ export interface Position {
     pnlPercent: number; // Unrealized PnL % (e.g. 0.10 for 10%)
     priceHistory?: { price: number; timestamp: Date }[]; // For momentum detection
     marketEndTime?: Date; // When market resolves
+    isGuaranteed?: boolean; // If true, hold to settlement (ignore TP/Fair Value)
 }
 
 export interface ExitSignal {
@@ -122,11 +123,22 @@ export class ExitOptimizer {
 
         // 1. Stop Loss (always exit on stop loss)
         if (position.pnlPercent <= this.stopLossThreshold) {
+            // For guaranteed trades, we might even ignore stop loss if we are VERY confident,
+            // but for safety we keep it broadly looser or standard. 
+            // In this strategy, "a few losses don't matter", so we accept the Stop Loss.
             return {
                 shouldExit: true,
                 reason: `Stop Loss hit: ${(position.pnlPercent * 100).toFixed(1)}%`,
                 urgency: 'HIGH'
             };
+        }
+
+        // SPECIAL CASE: Guaranteed Outcome - Hold to Settlement
+        // We only exit if the forecast changes significantly (logic handled externally) 
+        // or if we are forced to via emergency exit.
+        if (position.isGuaranteed) {
+            logger.debug(`🔒 Holding guaranteed position ${position.marketId} to settlement`);
+            return { shouldExit: false };
         }
 
         // 2. Take Profit with momentum check

@@ -11,6 +11,10 @@ import { telemetry } from './telemetry.js';
 import { config, validateConfig } from '../config.js';
 import { logger } from '../logger.js';
 import { TradingOpportunity, ParsedWeatherMarket } from '../polymarket/types.js';
+import { DataStore } from '../realtime/data-store.js';
+import { ForecastMonitor } from '../realtime/forecast-monitor.js';
+import { PriceTracker } from '../realtime/price-tracker.js';
+import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
 
 interface BotStats {
     startTime: Date;
@@ -28,6 +32,13 @@ export class BotManager {
     private opportunityDetector: OpportunityDetector;
     private orderExecutor: OrderExecutor;
 
+    // Real-time components
+    private dataStore: DataStore;
+    private forecastMonitor: ForecastMonitor;
+    private priceTracker: PriceTracker;
+    private speedArbitrageStrategy: SpeedArbitrageStrategy;
+    private speedLoopInterval: NodeJS.Timeout | null = null;
+
     private isRunning: boolean = false;
     private stats: BotStats;
 
@@ -35,7 +46,15 @@ export class BotManager {
         this.weatherScanner = new WeatherScanner();
         this.tradingClient = new TradingClient();
         this.opportunityDetector = new OpportunityDetector();
+        this.tradingClient = new TradingClient();
+        this.opportunityDetector = new OpportunityDetector();
         this.orderExecutor = new OrderExecutor(this.tradingClient);
+
+        // Initialize real-time components
+        this.dataStore = new DataStore();
+        this.speedArbitrageStrategy = new SpeedArbitrageStrategy(this.dataStore);
+        this.forecastMonitor = new ForecastMonitor(this.dataStore);
+        this.priceTracker = new PriceTracker(this.dataStore);
 
         this.stats = {
             startTime: new Date(),
@@ -83,6 +102,11 @@ export class BotManager {
             const actionableMarkets = this.weatherScanner.filterActionableMarkets(allMarkets);
 
             this.stats.marketsScanned += allMarkets.length;
+
+            // Register markets with DataStore for real-time tracking
+            for (const market of actionableMarkets) {
+                this.dataStore.addMarket(market);
+            }
 
             logger.info(`Found ${allMarkets.length} weather markets, ${actionableMarkets.length} actionable`);
 
@@ -167,6 +191,14 @@ export class BotManager {
         logger.info('Bot started - entering polling loop');
         logger.info(`Poll interval: ${config.pollIntervalMs / 1000}s`);
 
+        // Start real-time monitors
+        this.forecastMonitor.start();
+        // Price tracker needs scanner to know what to poll
+        this.priceTracker.start(this.weatherScanner, 5000);
+
+        // Start high-frequency speed arbitrage loop
+        this.startSpeedLoop();
+
         while (this.isRunning) {
             await this.runCycle();
 
@@ -185,6 +217,11 @@ export class BotManager {
     stop(): void {
         logger.info('Stopping bot...');
         this.isRunning = false;
+
+        this.forecastMonitor.stop();
+        if (this.speedLoopInterval) {
+            clearInterval(this.speedLoopInterval);
+        }
     }
 
     /**
@@ -238,5 +275,70 @@ export class BotManager {
      */
     printTelemetrySummary(): void {
         telemetry.printSummary();
+    }
+
+    /**
+     * High-frequency loop for Speed Arbitrage
+     */
+    private startSpeedLoop(): void {
+        logger.info('Starting Speed Arbitrage Loop (1s interval)...');
+
+        this.speedLoopInterval = setInterval(async () => {
+            if (!this.isRunning) return;
+
+            try {
+                // 1. Detect Opportunities
+                const signals = this.speedArbitrageStrategy.detectOpportunities();
+
+                if (signals.length === 0) return;
+
+                // 2. Map to TradingOpportunity
+                const opportunities: TradingOpportunity[] = signals.map(signal => {
+                    const state = this.dataStore.getMarketState(signal.marketId);
+                    if (!state) return null;
+
+                    const market = state.market;
+                    // Mock probabilities for mapping since signal uses calculated edge
+                    // We assume signal.confidence ~ forecastProb for mapping visualization
+                    // But critical part is EDGE and ACTION
+
+                    return {
+                        market,
+                        forecastProbability: 0, // Placeholder
+                        marketProbability: 0, // Placeholder
+                        edge: signal.estimatedEdge,
+                        action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
+                        confidence: signal.confidence,
+                        reason: `🚀 SPEED: ${signal.reason}`,
+                        weatherDataSource: 'noaa', // Default
+                        isGuaranteed: signal.isGuaranteed,
+                        certaintySigma: 0
+                    } as TradingOpportunity;
+                }).filter((op): op is TradingOpportunity => op !== null);
+
+                if (opportunities.length > 0) {
+                    logger.info(`⚡ Speed Arbitrage found ${opportunities.length} signals! Executing immediately.`);
+
+                    // 3. Execute
+                    const results = await this.orderExecutor.executeOpportunities(opportunities);
+
+                    // 4. Mark captured
+                    for (const result of results) {
+                        if (result.executed) {
+                            const state = this.dataStore.getMarketState(result.opportunity.market.market.id);
+                            if (state && state.lastForecast) {
+                                this.speedArbitrageStrategy.markOpportunityCaptured(
+                                    result.opportunity.market.market.id,
+                                    state.lastForecast.forecastValue
+                                );
+                            }
+                        }
+                    }
+                }
+
+            } catch (error) {
+                logger.error('Error in Speed Loop', { error: (error as Error).message });
+            }
+        }, 1000); // Check every 1 second
     }
 }
