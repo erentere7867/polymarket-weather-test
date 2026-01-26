@@ -55,7 +55,15 @@ export class DataStore {
         const state = this.markets.get(marketId);
         if (!state) return;
 
-        const historyObj = state.market.yesTokenId === tokenId ? state.priceHistory.yes : state.priceHistory.no;
+        const isYes = state.market.yesTokenId === tokenId;
+        const historyObj = isYes ? state.priceHistory.yes : state.priceHistory.no;
+
+        // Update current market state price
+        if (isYes) {
+            state.market.yesPrice = price;
+        } else {
+            state.market.noPrice = price;
+        }
 
         // Add new point
         historyObj.history.push({ price, timestamp });
