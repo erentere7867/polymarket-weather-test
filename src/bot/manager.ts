@@ -339,7 +339,8 @@ export class BotManager {
                         reason: `🚀 SPEED: ${signal.reason}`,
                         weatherDataSource: 'noaa', // Default
                         isGuaranteed: signal.isGuaranteed,
-                        certaintySigma: 0
+                        certaintySigma: 0,
+                        snapshotPrice: signal.side === 'yes' ? market.yesPrice : market.noPrice
                     } as TradingOpportunity;
                 }).filter((op): op is TradingOpportunity => op !== null);
 

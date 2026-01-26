@@ -285,6 +285,7 @@ export class OpportunityDetector {
                 forecastValueUnit,
                 isGuaranteed,
                 certaintySigma,
+                snapshotPrice: action === 'buy_yes' ? market.yesPrice : (action === 'buy_no' ? market.noPrice : undefined)
             };
         } catch (error) {
             logger.error(`Failed to analyze market: ${market.market.question}`, {

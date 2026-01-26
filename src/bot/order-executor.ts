@@ -56,6 +56,16 @@ export class OrderExecutor {
             const tokenId = isBuyYes ? opportunity.market.yesTokenId : opportunity.market.noTokenId;
             const price = isBuyYes ? opportunity.market.yesPrice : opportunity.market.noPrice;
 
+            // SAFETY CHECK: Compare current price against snapshot price
+            // If the market moved significantly between detection and execution, ABORT.
+            if (opportunity.snapshotPrice !== undefined) {
+                const diff = Math.abs(price - opportunity.snapshotPrice);
+                if (diff > 0.05) { // 5 cent tolerance
+                    logger.error(`🚨 PRICE SLIPPAGE ABORT: Snapshot ${opportunity.snapshotPrice} -> Current ${price}. Market moved too fast.`);
+                    return { opportunity, executed: false, error: 'Price slippage abort' };
+                }
+            }
+
             // CHECK: Do we already have a position in this market?
             // If so, avoid "chasing" price significantly higher
             const existingPos = this.positions.get(tokenId);
