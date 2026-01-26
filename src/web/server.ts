@@ -39,7 +39,7 @@ app.get('/api/positions/active', (req, res) => {
         const state = runner.getStore().getMarketState(p.marketId);
         return {
             ...p,
-            marketTitle: state?.market?.eventTitle || p.marketId, // Fallback
+            marketTitle: p.marketQuestion || state?.market?.eventTitle || p.marketId, // Use specific question
             currentPrice: p.currentPrice,
             pnlPercent: ((p.currentPrice - p.entryPrice) / p.entryPrice) * 100
         };

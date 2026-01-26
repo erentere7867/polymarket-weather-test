@@ -126,7 +126,8 @@ export class PortfolioSimulator {
         // Model: Impact = k * sqrt(Size)
         const liquidityFactor = 200000; // Simulated liquidity depth
         const priceImpact = (positionValue / liquidityFactor) * 0.1;
-        const executionPrice = Math.min(0.99, Math.max(0.01, basePrice + (isBuyYes ? priceImpact : -priceImpact)));
+        // Normalize to 4 decimal places to prevent micro-slippage artifacts in PnL display
+        const executionPrice = parseFloat(Math.min(0.99, Math.max(0.01, basePrice + (isBuyYes ? priceImpact : -priceImpact))).toFixed(4));
 
         // 2. Add Fees (Polymarket CTF = 0% usually, but let's be conservative or add gas equivalent)
         const feeRate = 0.00; // 0% fees on Polymarket currently for taker
