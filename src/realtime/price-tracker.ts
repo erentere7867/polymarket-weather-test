@@ -55,11 +55,17 @@ export class PriceTracker {
         });
 
         this.ws.on('message', (data: WebSocket.Data) => {
+            const raw = data.toString();
             try {
-                const message = JSON.parse(data.toString());
+                if (raw === 'PONG') return; // Ignore pong responses
+
+                const message = JSON.parse(raw);
                 this.handleMessage(message);
             } catch (error) {
-                logger.error('Failed to parse WebSocket message', { error });
+                logger.error('Failed to parse WebSocket message', {
+                    error: (error as Error).message,
+                    raw: raw.substring(0, 100) // Log first 100 chars
+                });
             }
         });
 
