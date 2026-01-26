@@ -54,23 +54,8 @@ export class SimulationRunner {
         logger.info('🚀 Starting Speed Arbitrage Simulation v2...');
         this.isRunning = true;
 
-        // 1. Initial Market Scan
-        logger.info('Scanning for weather markets...');
-        const markets = await this.scanner.scanForWeatherMarkets();
-        logger.info(`Found ${markets.length} weather markets`);
-
-        if (markets.length === 0) {
-            logger.warn('No active weather markets found. Simulation cannot run effectively.');
-            return;
-        }
-
-        // Register markets
-        for (const market of markets) {
-            this.store.addMarket(market);
-        }
-
-        // 2. Connect to Real-Time Data (Polling)
-        await this.priceTracker.start(this.scanner, 3000); // 3s polling
+        // 1. Start Real-Time Data (WebSocket + Discovery)
+        await this.priceTracker.start(this.scanner);
         this.forecastMonitor.start();
 
         // Wait a bit for initial data to populate
@@ -231,7 +216,7 @@ export class SimulationRunner {
 
     stop(): void {
         logger.info('Stopping simulation...');
-        // this.priceTracker.disconnect(); // Removed in v2 optimization
+        this.priceTracker.stop();
         this.forecastMonitor.stop();
         this.simulator.printSummary();
     }

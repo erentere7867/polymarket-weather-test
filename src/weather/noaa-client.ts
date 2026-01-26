@@ -104,8 +104,12 @@ export class NOAAClient {
 
             logger.debug(`NOAA grid point resolved: ${locationName} -> ${gridId}/${gridX},${gridY}`);
             return result;
-        } catch (error) {
-            logger.error('Failed to get NOAA grid point', { coords, error: (error as Error).message });
+        } catch (error: any) {
+            if (error.response && error.response.status === 404) {
+                logger.warn(`Location not supported by NOAA (likely outside US): ${coords.lat}, ${coords.lon}`);
+            } else {
+                logger.error('Failed to get NOAA grid point', { coords, error: error.message });
+            }
             throw error;
         }
     }

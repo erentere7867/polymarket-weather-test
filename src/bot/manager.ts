@@ -194,7 +194,7 @@ export class BotManager {
         // Start real-time monitors
         this.forecastMonitor.start();
         // Price tracker needs scanner to know what to poll
-        this.priceTracker.start(this.weatherScanner, 5000);
+        this.priceTracker.start(this.weatherScanner);
 
         // Start high-frequency speed arbitrage loop
         this.startSpeedLoop();
