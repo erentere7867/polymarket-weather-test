@@ -18,10 +18,14 @@ interface ExecutionResult {
 // Cooldown period to prevent duplicate trades on same market (ms)
 const TRADE_COOLDOWN_MS = 60000; // 60 seconds
 
+// Cooldown period after a position is closed (prevent re-entry)
+const EXIT_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
+
 export class OrderExecutor {
     private tradingClient: TradingClient;
     private executedOrderIds: Set<string> = new Set();
     private recentlyTradedMarkets: Map<string, Date> = new Map();
+    private recentlyClosedMarkets: Map<string, Date> = new Map();
 
     // Cache of current positions to prevent re-entering worse trades
     private positions: Map<string, Position> = new Map();
@@ -42,6 +46,7 @@ export class OrderExecutor {
         }
 
         // 2. Preserve local positions for recently traded markets (if API is stale)
+        // AND Detect closed positions
         for (const [tokenId, cachedPos] of this.positions) {
             // If we have a local position but API doesn't report it yet...
             if (!newPositions.has(tokenId)) {
@@ -53,6 +58,11 @@ export class OrderExecutor {
                     // Keep local version
                     newPositions.set(tokenId, cachedPos);
                     logger.info(`Preserving local position for ${cachedPos.marketQuestion.substring(0, 30)}... (API update pending)`);
+                } else {
+                    // Position is gone and NOT recently traded. It was closed externally.
+                    // Mark as CLOSED/BURNED to prevent immediate re-entry
+                    this.recentlyClosedMarkets.set(cachedPos.marketId, new Date());
+                    logger.info(`🚫 Position closed for ${cachedPos.marketQuestion.substring(0, 40)}... - Burning market for 15m`);
                 }
             }
         }
@@ -286,17 +296,30 @@ export class OrderExecutor {
      * Check if a market was recently traded (to avoid duplicate trades)
      */
     private recentlyTraded(marketKey: string): boolean {
+        // 1. Check Trade Cooldown (Entry)
         const lastTrade = this.recentlyTradedMarkets.get(marketKey);
-        if (!lastTrade) return false;
-
-        const elapsed = Date.now() - lastTrade.getTime();
-        if (elapsed > TRADE_COOLDOWN_MS) {
-            // Cooldown expired, clean up and allow trading
-            this.recentlyTradedMarkets.delete(marketKey);
-            return false;
+        if (lastTrade) {
+            const elapsed = Date.now() - lastTrade.getTime();
+            if (elapsed > TRADE_COOLDOWN_MS) {
+                this.recentlyTradedMarkets.delete(marketKey);
+            } else {
+                return true; // Still in cooldown
+            }
         }
 
-        return true; // Still in cooldown
+        // 2. Check Exit Cooldown (Re-entry prevention)
+        const lastClosed = this.recentlyClosedMarkets.get(marketKey);
+        if (lastClosed) {
+            const elapsed = Date.now() - lastClosed.getTime();
+            if (elapsed > EXIT_COOLDOWN_MS) {
+                this.recentlyClosedMarkets.delete(marketKey);
+            } else {
+                logger.debug(`Skipping ${marketKey}: In exit cooldown (${(EXIT_COOLDOWN_MS - elapsed)/1000}s remaining)`);
+                return true; // Block re-entry
+            }
+        }
+
+        return false;
     }
 
     /**
