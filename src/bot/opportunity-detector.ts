@@ -8,9 +8,6 @@ import { ParsedWeatherMarket, TradingOpportunity } from '../polymarket/types.js'
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
-// Threshold for considering market "caught up" to the forecast
-const MARKET_CAUGHT_UP_THRESHOLD = 0.10; // If price within 10% of probability, market caught up
-
 // Minimum forecast change to allow re-entry on a captured opportunity
 const SIGNIFICANT_FORECAST_CHANGE = 1.0; // 1 degree or 1 inch
 
@@ -67,10 +64,11 @@ export class OpportunityDetector {
     ): { skip: boolean; reason: string } {
         // Check 1: Has market caught up to the probability?
         const priceDiff = Math.abs(marketProbability - forecastProbability);
-        if (priceDiff < MARKET_CAUGHT_UP_THRESHOLD) {
+        // Use configured minEdgeThreshold instead of hardcoded 10%
+        if (priceDiff < config.minEdgeThreshold) {
             return {
                 skip: true,
-                reason: `Market caught up: price ${(marketProbability * 100).toFixed(1)}% ≈ forecast ${(forecastProbability * 100).toFixed(1)}%`
+                reason: `Market caught up: price ${(marketProbability * 100).toFixed(1)}% ≈ forecast ${(forecastProbability * 100).toFixed(1)}% (diff < ${config.minEdgeThreshold * 100}%)`
             };
         }
 

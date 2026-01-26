@@ -118,7 +118,12 @@ export class WeatherScanner {
         const city = this.extractCity(fullText);
 
         // Extract metric type and threshold
-        const { metricType, threshold, thresholdUnit, comparisonType } = this.extractMetric(fullText);
+        // Try question first (more accurate), fallback to full text
+        let metric = this.extractMetric(question);
+        if (metric.metricType === 'unknown') {
+            metric = this.extractMetric(fullText);
+        }
+        const { metricType, threshold, thresholdUnit, comparisonType } = metric;
 
         // Extract target date
         const targetDate = this.extractDate(fullText, event);
@@ -335,6 +340,13 @@ export class WeatherScanner {
             // Must be a supported metric type
             if (m.metricType === 'unknown') {
                 logger.debug(`Rejecting ${m.market.question}: Unknown metric`);
+                return false;
+            }
+
+            // Reject Range markets ("Between X and Y") as they are not supported yet
+            // and often misclassified as "Below" markets
+            if (m.market.question.toLowerCase().includes('between')) {
+                logger.debug(`Rejecting ${m.market.question}: Range markets not supported`);
                 return false;
             }
 
