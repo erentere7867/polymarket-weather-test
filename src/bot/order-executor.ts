@@ -4,7 +4,7 @@
  */
 
 import { TradingClient } from '../polymarket/clob-client.js';
-import { TradingOpportunity, TradeOrder } from '../polymarket/types.js';
+import { TradingOpportunity, TradeOrder, Position } from '../polymarket/types.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -23,8 +23,23 @@ export class OrderExecutor {
     private executedOrderIds: Set<string> = new Set();
     private recentlyTradedMarkets: Map<string, Date> = new Map();
 
+    // Cache of current positions to prevent re-entering worse trades
+    private positions: Map<string, Position> = new Map();
+
     constructor(tradingClient: TradingClient) {
         this.tradingClient = tradingClient;
+    }
+
+    /**
+     * Update position cache from external source
+     */
+    syncPositions(positions: Position[]): void {
+        this.positions.clear();
+        for (const pos of positions) {
+            // Key by tokenId for precise lookup
+            this.positions.set(pos.tokenId, pos);
+        }
+        logger.info(`Synced ${positions.length} positions to cache`);
     }
 
     /**
@@ -36,17 +51,45 @@ export class OrderExecutor {
         }
 
         try {
+            // Determine token and price
+            const isBuyYes = opportunity.action === 'buy_yes';
+            const tokenId = isBuyYes ? opportunity.market.yesTokenId : opportunity.market.noTokenId;
+            const price = isBuyYes ? opportunity.market.yesPrice : opportunity.market.noPrice;
+
+            // CHECK: Do we already have a position in this market?
+            // If so, avoid "chasing" price significantly higher
+            const existingPos = this.positions.get(tokenId);
+            if (existingPos && existingPos.size > 1) { // Ignore dust
+                // If current price is significantly worse than entry, SKIP
+                // "Significantly changed" = > 5 cents or > 10% worse
+                const priceDiff = price - existingPos.avgPrice;
+                const priceRatio = price / existingPos.avgPrice;
+
+                // Thresholds:
+                // 1. Absolute diff > 0.05 (5 cents)
+                // 2. Relative diff > 10% (1.10)
+                const isSignificantlyWorse = priceDiff > 0.05 || priceRatio > 1.10;
+
+                if (isSignificantlyWorse) {
+                    const msg = `Skipping trade: Price chased significantly ($${existingPos.avgPrice.toFixed(2)} -> $${price.toFixed(2)})`;
+                    logger.warn(msg, {
+                        market: opportunity.market.market.question.substring(0, 40),
+                        diff: priceDiff.toFixed(3),
+                        ratio: priceRatio.toFixed(2)
+                    });
+                    return { opportunity, executed: false, error: 'Price chasing prevented' };
+                }
+
+                // If not significantly worse, we might add to position, but log it
+                logger.info(`Adding to position: Price change acceptable ($${existingPos.avgPrice.toFixed(2)} -> $${price.toFixed(2)})`);
+            }
+
             // Calculate position size
             const positionSize = this.calculatePositionSize(opportunity);
 
             if (positionSize <= 0) {
                 return { opportunity, executed: false, error: 'Position size too small' };
             }
-
-            // Determine token and price
-            const isBuyYes = opportunity.action === 'buy_yes';
-            const tokenId = isBuyYes ? opportunity.market.yesTokenId : opportunity.market.noTokenId;
-            const price = isBuyYes ? opportunity.market.yesPrice : opportunity.market.noPrice;
 
             // For guaranteed outcomes, use more aggressive pricing to ensure fills
             const isGuaranteed = opportunity.isGuaranteed || false;
@@ -77,6 +120,10 @@ export class OrderExecutor {
                 this.executedOrderIds.add(result.orderId);
                 // Track this market as recently traded
                 this.recentlyTradedMarkets.set(opportunity.market.market.id, new Date());
+
+                // Optimistically update position cache
+                this.updatePositionCacheOptimistic(order, opportunity);
+
                 return {
                     opportunity,
                     executed: true,
@@ -93,6 +140,36 @@ export class OrderExecutor {
                 error: (error as Error).message,
             };
         }
+    }
+
+    /**
+     * Optimistically update position cache after a trade
+     */
+    private updatePositionCacheOptimistic(order: TradeOrder, opportunity: TradingOpportunity): void {
+        const existing = this.positions.get(order.tokenId);
+
+        let newSize = order.size;
+        let newAvgPrice = order.price; // Approximation since we don't know fill price exactly yet
+
+        if (existing) {
+            const totalCost = (existing.size * existing.avgPrice) + (order.size * order.price);
+            newSize = existing.size + order.size;
+            newAvgPrice = totalCost / newSize;
+        }
+
+        const newPos: Position = {
+            tokenId: order.tokenId,
+            marketId: opportunity.market.market.id,
+            marketQuestion: opportunity.market.market.question,
+            side: opportunity.action === 'buy_yes' ? 'yes' : 'no',
+            size: newSize,
+            avgPrice: newAvgPrice,
+            currentPrice: order.price,
+            unrealizedPnL: 0, // Not calculated here
+            entryTime: new Date(),
+        };
+
+        this.positions.set(order.tokenId, newPos);
     }
 
     /**
