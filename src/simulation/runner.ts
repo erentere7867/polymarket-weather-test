@@ -32,11 +32,6 @@ export class SimulationRunner {
     private cycles: number = 0;
     private maxCycles: number;
 
-    // Track when we last exited a market to prevent immediate re-entry (churning)
-    private lastExitTimes: Map<string, number> = new Map();
-    // 15 minute cooldown
-    private readonly EXIT_COOLDOWN_MS = 15 * 60 * 1000;
-
     constructor(startingCapital: number = 1000000, maxCycles: number = 20) {
         // Initialize v2 Engine
         this.store = new DataStore();
@@ -110,13 +105,6 @@ export class SimulationRunner {
             const existingPos = this.simulator.getAllPositions().find(p => p.marketId === signal.marketId && p.side === signal.side);
             if (existingPos) continue;
 
-            // Check Cooldown: Don't re-enter immediately after exit
-            const lastExit = this.lastExitTimes.get(signal.marketId);
-            if (lastExit && (Date.now() - lastExit < this.EXIT_COOLDOWN_MS)) {
-                logger.debug(`⏳ Skipping re-entry for ${signal.marketId} due to cooldown`);
-                continue;
-            }
-
             // Execute
             const position = this.simulator.openPosition({
                 market: state.market,
@@ -157,7 +145,6 @@ export class SimulationRunner {
 
             if (exitSignal.shouldExit) {
                 this.simulator.closePosition(pos.id, pos.currentPrice, exitSignal.reason);
-                this.lastExitTimes.set(pos.marketId, Date.now());
             }
         }
 

@@ -60,8 +60,20 @@ export class SpeedArbitrageStrategy {
         const captured = this.capturedOpportunities.get(marketId);
         if (!captured) return false;
 
-        // Allow re-entry only if forecast value changed significantly (new opportunity)
+        // DYNAMIC JITTER PROTECTION:
+        // Prevent re-entry if the change is small (jitter) and happened too recently (churning).
+        // But allow immediate re-entry if the change is MAJOR (e.g. 5.0 units).
+
         const forecastDiff = Math.abs(currentForecastValue - captured.forecastValue);
+        const timeSinceCapture = Date.now() - captured.capturedAt.getTime();
+
+        // 1. If very recent (< 5s) AND change is small (< 5.0), BLOCK IT (Jitter Protection)
+        if (timeSinceCapture < 5000 && forecastDiff < 5.0) {
+            logger.debug(`🛡️ Jitter protection: Blocked re-entry for ${marketId} (Diff ${forecastDiff.toFixed(1)} < 5.0 within 5s)`);
+            return true; // Still captured
+        }
+
+        // 2. Otherwise, check standard significant change threshold (1.0)
         const significantChange = forecastDiff >= 1.0; // 1 degree or 1 inch = new opportunity
 
         if (significantChange) {
