@@ -62,6 +62,8 @@ const WEATHER_CODE_MAP: { [key: number]: string } = {
 
 export class OpenMeteoClient {
     private client: AxiosInstance;
+    private static lastRequestTime: number = 0;
+    private static readonly MIN_INTERVAL_MS = 1000; // 1 second between requests
 
     constructor() {
         this.client = axios.create({
@@ -71,11 +73,48 @@ export class OpenMeteoClient {
     }
 
     /**
+     * Enforce rate limit across all instances
+     */
+    private async enforceRateLimit(): Promise<void> {
+        const now = Date.now();
+        const timeSinceLastRequest = now - OpenMeteoClient.lastRequestTime;
+
+        if (timeSinceLastRequest < OpenMeteoClient.MIN_INTERVAL_MS) {
+            const delay = OpenMeteoClient.MIN_INTERVAL_MS - timeSinceLastRequest;
+            // Reserve the slot immediately
+            OpenMeteoClient.lastRequestTime = now + delay;
+            await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+            OpenMeteoClient.lastRequestTime = now;
+        }
+    }
+
+    /**
+     * Make a request with retries and rate limiting
+     */
+    private async makeRequest<T>(url: string, config: any, retries = 3): Promise<T> {
+        await this.enforceRateLimit();
+
+        try {
+            const response = await this.client.get<T>(url, config);
+            return response.data;
+        } catch (error: any) {
+            if (retries > 0 && error.response && error.response.status === 429) {
+                const backoff = Math.pow(2, 4 - retries) * 1000; // 2s, 4s, 8s
+                logger.warn(`Open-Meteo 429 encountered, retrying in ${backoff}ms...`);
+                await new Promise(resolve => setTimeout(resolve, backoff));
+                return this.makeRequest<T>(url, config, retries - 1);
+            }
+            throw error;
+        }
+    }
+
+    /**
      * Get hourly forecast for coordinates
      */
     async getHourlyForecast(coords: Coordinates): Promise<WeatherData> {
         try {
-            const response = await this.client.get<OpenMeteoResponse>('/forecast', {
+            const data = await this.makeRequest<OpenMeteoResponse>('/forecast', {
                 params: {
                     latitude: coords.lat,
                     longitude: coords.lon,
@@ -95,7 +134,6 @@ export class OpenMeteoClient {
                 },
             });
 
-            const data = response.data;
             const hourly: HourlyForecast[] = [];
 
             for (let i = 0; i < data.hourly.time.length; i++) {
@@ -151,7 +189,7 @@ export class OpenMeteoClient {
      */
     async getExpectedSnowfall(coords: Coordinates, startDate: Date, endDate: Date): Promise<number> {
         try {
-            const response = await this.client.get<OpenMeteoResponse>('/forecast', {
+            const data = await this.makeRequest<OpenMeteoResponse>('/forecast', {
                 params: {
                     latitude: coords.lat,
                     longitude: coords.lon,
@@ -161,7 +199,6 @@ export class OpenMeteoClient {
             });
 
             let totalSnow = 0;
-            const data = response.data;
 
             for (let i = 0; i < data.hourly.time.length; i++) {
                 const timestamp = new Date(data.hourly.time[i]);
