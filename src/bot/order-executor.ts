@@ -34,12 +34,31 @@ export class OrderExecutor {
      * Update position cache from external source
      */
     syncPositions(positions: Position[]): void {
-        this.positions.clear();
+        const newPositions = new Map<string, Position>();
+
+        // 1. Load positions from API
         for (const pos of positions) {
-            // Key by tokenId for precise lookup
-            this.positions.set(pos.tokenId, pos);
+            newPositions.set(pos.tokenId, pos);
         }
-        logger.info(`Synced ${positions.length} positions to cache`);
+
+        // 2. Preserve local positions for recently traded markets (if API is stale)
+        for (const [tokenId, cachedPos] of this.positions) {
+            // If we have a local position but API doesn't report it yet...
+            if (!newPositions.has(tokenId)) {
+                // Check if we traded this market recently
+                // Note: Position has marketId, recentlyTradedMarkets is keyed by marketId
+                const isRecentlyTraded = this.recentlyTradedMarkets.has(cachedPos.marketId);
+
+                if (isRecentlyTraded) {
+                    // Keep local version
+                    newPositions.set(tokenId, cachedPos);
+                    logger.info(`Preserving local position for ${cachedPos.marketQuestion.substring(0, 30)}... (API update pending)`);
+                }
+            }
+        }
+
+        this.positions = newPositions;
+        logger.info(`Synced positions: ${positions.length} from API, ${this.positions.size} total cached`);
     }
 
     /**
@@ -123,25 +142,38 @@ export class OrderExecutor {
                 simulated: config.simulationMode,
             });
 
-            // Place order
-            const result = await this.tradingClient.placeOrder(order);
+            // OPTIMISTIC LOCK: Mark as traded BEFORE placing order to prevent race conditions
+            this.recentlyTradedMarkets.set(opportunity.market.market.id, new Date());
 
-            if (result) {
-                this.executedOrderIds.add(result.orderId);
-                // Track this market as recently traded
-                this.recentlyTradedMarkets.set(opportunity.market.market.id, new Date());
+            try {
+                // Place order
+                const result = await this.tradingClient.placeOrder(order);
 
-                // Optimistically update position cache
-                this.updatePositionCacheOptimistic(order, opportunity);
+                if (result) {
+                    this.executedOrderIds.add(result.orderId);
+                    // Lock is already set above
 
-                return {
-                    opportunity,
-                    executed: true,
-                    orderId: result.orderId,
-                };
+                    // Optimistically update position cache
+                    this.updatePositionCacheOptimistic(order, opportunity);
+
+                    return {
+                        opportunity,
+                        executed: true,
+                        orderId: result.orderId,
+                    };
+                }
+
+                // If result is null (e.g. error handled internally but didn't throw), remove lock?
+                // Depending on implementation, but for safety let's leave it unless we know it failed.
+                // If it returned null, it means order wasn't placed.
+                this.recentlyTradedMarkets.delete(opportunity.market.market.id);
+                return { opportunity, executed: false, error: 'Order placement returned null' };
+
+            } catch (error) {
+                // If order placement failed, RELEASE THE LOCK so we can retry later
+                this.recentlyTradedMarkets.delete(opportunity.market.market.id);
+                throw error; // Re-throw to be caught by outer catch
             }
-
-            return { opportunity, executed: false, error: 'Order placement returned null' };
         } catch (error) {
             logger.error('Order execution failed', { error: (error as Error).message });
             return {
