@@ -222,30 +222,42 @@ export class ForecastMonitor {
                 if (!market.targetDate) continue;
 
                 let probability = 0;
-                let forecastValue = 0;
+                let forecastValue: number | null = null;
 
                 // Extract forecast value based on metric
                 if (market.metricType === 'temperature_high') {
-                    const high = await this.weatherService.getExpectedHigh(city, market.targetDate);
+                    // Use calculated logic to utilize cached/fast-update data
+                    const high = this.weatherService.calculateExpectedHigh(weatherData, market.targetDate);
                     if (high !== null && market.threshold !== undefined) {
                         forecastValue = high;
                         probability = this.weatherService.calculateTempExceedsProbability(high, market.threshold);
                         if (market.comparisonType === 'below') probability = 1 - probability;
                     }
                 } else if (market.metricType === 'snowfall') {
-                    // Assume 24h window around target date for simplicity
-                    const start = new Date(market.targetDate);
-                    start.setHours(0, 0, 0, 0);
-                    const end = new Date(market.targetDate);
-                    end.setHours(23, 59, 59, 999);
+                    // Skip snowfall updates if we are using a "Fast Update" (len=1) which lacks snow data
+                    // This prevents zeroing out snowfall forecasts when a temp-only update arrives
+                    if (weatherData.hourly.length > 1) {
+                        // Assume 24h window around target date for simplicity
+                        const start = new Date(market.targetDate);
+                        start.setHours(0, 0, 0, 0);
+                        const end = new Date(market.targetDate);
+                        end.setHours(23, 59, 59, 999);
 
-                    const snow = await this.weatherService.getExpectedSnowfall(city, start, end);
-                    forecastValue = snow;
-                    if (market.threshold !== undefined) {
-                        probability = this.weatherService.calculateSnowExceedsProbability(snow, market.threshold);
+                        // Keep using getExpectedSnowfall for now (until HourlyForecast supports snow)
+                        // But strictly only when we have full data.
+                        // Note: This still incurs a network call if getExpectedSnowfall doesn't use cache.
+                        // Ideally we should refactor getExpectedSnowfall to use 'weatherData' too,
+                        // but since 'weatherData' (OpenMeteo) lacks snow, we might need to fetch anyway.
+                        const snow = await this.weatherService.getExpectedSnowfall(city, start, end);
+                        forecastValue = snow;
+                        if (market.threshold !== undefined) {
+                            probability = this.weatherService.calculateSnowExceedsProbability(snow, market.threshold);
+                        }
+                        if (market.comparisonType === 'below') probability = 1 - probability;
                     }
-                    if (market.comparisonType === 'below') probability = 1 - probability;
                 }
+
+                if (forecastValue === null) continue;
 
                 // SPEED ARBITRAGE: Detect if forecast value actually changed
                 const currentState = this.store.getMarketState(market.market.id);
