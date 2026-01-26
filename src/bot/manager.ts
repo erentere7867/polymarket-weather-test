@@ -97,32 +97,43 @@ export class BotManager {
 
         try {
             // Step 1: Scan for weather markets
-            logger.info('Scanning for weather markets...');
-            const allMarkets = await this.weatherScanner.scanForWeatherMarkets();
+            // logger.debug('Scanning for weather markets...');
+
+            // OPTIMIZATION: Use DataStore (updated via WebSocket) instead of API polling
+            // This prevents memory bloat and rate limits
+            let allMarkets = this.dataStore.getAllMarkets();
+
+            if (allMarkets.length === 0) {
+                // Initial bootstrap only
+                logger.info('Bootstrap: Initial API scan for weather markets...');
+                allMarkets = await this.weatherScanner.scanForWeatherMarkets();
+                for (const market of allMarkets) {
+                    this.dataStore.addMarket(market);
+                }
+            }
+
             const actionableMarkets = this.weatherScanner.filterActionableMarkets(allMarkets);
 
             this.stats.marketsScanned += allMarkets.length;
 
-            // Register markets with DataStore for real-time tracking
-            for (const market of actionableMarkets) {
-                this.dataStore.addMarket(market);
-            }
+            // Register markets loop is redundant if we read from DataStore, but safe to keep for new markets
+            // for (const market of actionableMarkets) { ... } -- removed
 
-            logger.info(`Found ${allMarkets.length} weather markets, ${actionableMarkets.length} actionable`);
+            logger.debug(`Found ${allMarkets.length} weather markets, ${actionableMarkets.length} actionable`);
 
             if (actionableMarkets.length === 0) {
-                logger.info('No actionable markets found this cycle');
+                logger.debug('No actionable markets found this cycle');
                 return;
             }
 
             // Step 2: Analyze markets for opportunities
-            logger.info('Analyzing markets for opportunities...');
+            logger.debug('Analyzing markets for opportunities...');
             const opportunities = await this.opportunityDetector.analyzeMarkets(actionableMarkets);
 
             this.stats.opportunitiesFound += opportunities.length;
 
             if (opportunities.length === 0) {
-                logger.info('No trading opportunities found this cycle');
+                logger.debug('No trading opportunities found this cycle');
             } else {
                 logger.info(`Found ${opportunities.length} trading opportunities`);
                 this.logOpportunities(opportunities);
@@ -203,7 +214,7 @@ export class BotManager {
             await this.runCycle();
 
             if (this.isRunning) {
-                logger.info(`Next cycle in ${config.pollIntervalMs / 1000}s...`);
+                logger.debug(`Next cycle in ${config.pollIntervalMs / 1000}s...`);
                 await this.delay(config.pollIntervalMs);
             }
         }
