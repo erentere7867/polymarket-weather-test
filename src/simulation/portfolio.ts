@@ -64,6 +64,7 @@ export class PortfolioSimulator {
     private startingCash: number;
     private cash: number;
     private positions: Map<string, SimulatedPosition> = new Map();
+    private positionsByToken: Map<string, Set<string>> = new Map();
     private closedPositions: SimulatedPosition[] = [];
     private tradeHistory: TradeRecord[] = [];
     private peakValue: number;
@@ -156,6 +157,12 @@ export class PortfolioSimulator {
         this.cash -= actualCost;
         this.positions.set(position.id, position);
 
+        // Update token index
+        if (!this.positionsByToken.has(position.tokenId)) {
+            this.positionsByToken.set(position.tokenId, new Set());
+        }
+        this.positionsByToken.get(position.tokenId)!.add(position.id);
+
         // Record trade
         this.tradeHistory.push({
             id: `trade_${Date.now()}`,
@@ -196,8 +203,13 @@ export class PortfolioSimulator {
      * Update all positions by token ID
      */
     updatePriceByToken(tokenId: string, newPrice: number): void {
-        for (const [id, position] of this.positions) {
-            if (position.tokenId === tokenId && position.status === 'open') {
+        const positionIds = this.positionsByToken.get(tokenId);
+        if (!positionIds) return;
+
+        for (const id of positionIds) {
+            // Verify position still exists and is open
+            const position = this.positions.get(id);
+            if (position && position.status === 'open') {
                 this.updatePositionPrice(id, newPrice);
             }
         }
@@ -226,6 +238,15 @@ export class PortfolioSimulator {
         // Move to closed positions
         this.closedPositions.push(position);
         this.positions.delete(positionId);
+
+        // Update token index
+        const tokenSet = this.positionsByToken.get(position.tokenId);
+        if (tokenSet) {
+            tokenSet.delete(positionId);
+            if (tokenSet.size === 0) {
+                this.positionsByToken.delete(position.tokenId);
+            }
+        }
 
         // Record trade
         this.tradeHistory.push({
