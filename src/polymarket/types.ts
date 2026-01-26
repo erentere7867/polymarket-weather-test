@@ -102,6 +102,9 @@ export interface TradingOpportunity {
     forecastValue?: number;
     forecastValueUnit?: string;
 
+    // Snapshot of price at detection time (to prevent latency execution errors)
+    snapshotPrice?: number;
+
     // Guaranteed outcome detection
     isGuaranteed: boolean;      // Whether this is a near-certain outcome
     certaintySigma?: number;    // How many std devs from threshold

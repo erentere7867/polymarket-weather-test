@@ -105,6 +105,48 @@ export class WeatherService {
     }
 
     /**
+     * Calculate expected high from existing WeatherData without fetching
+     */
+    calculateExpectedHigh(data: WeatherData, date: Date): number | null {
+        const targetDate = date.toISOString().split('T')[0];
+
+        // Handle Fast Update (single point)
+        if (data.hourly.length === 1) {
+            const point = data.hourly[0];
+            // If data is recent (within 1 hour) and target date is today/tomorrow,
+            // we accept the fast update value as the current best guess for the high.
+            // This is specific to how "ForecastMonitor" constructs the fast update cache.
+            // However, strictly checking the date is safer.
+            const pointDate = point.timestamp.toISOString().split('T')[0];
+            if (pointDate === targetDate) {
+                return point.temperatureF;
+            }
+        }
+
+        const dayTemps = data.hourly
+            .filter(h => h.timestamp.toISOString().split('T')[0] === targetDate && h.isDaytime)
+            .map(h => h.temperatureF);
+
+        if (dayTemps.length === 0) return null;
+        return Math.max(...dayTemps);
+    }
+
+    /**
+     * Calculate expected snowfall from existing WeatherData without fetching
+     */
+    calculateExpectedSnowfall(data: WeatherData, startDate: Date, endDate: Date): number {
+        let total = 0;
+        // Simple sum of available snowfall data or probability-based estimation could go here
+        // For now, if we don't have explicit snowfall field in HourlyForecast, we can't sum it easily
+        // unless we duplicate the estimation logic from NOAAClient.
+        // Given the task focuses on temperature, we'll return 0 if no explicit data.
+
+        // TODO: Enhance HourlyForecast to include snowfallInches
+
+        return total;
+    }
+
+    /**
      * Get expected low temperature for a city on a specific date
      */
     async getExpectedLow(cityName: string, date: Date): Promise<number | null> {
