@@ -85,6 +85,14 @@ export class BotManager {
 
         await this.tradingClient.initialize();
 
+        // Initial Position Sync
+        try {
+            const positions = await this.tradingClient.getPositions();
+            this.orderExecutor.syncPositions(positions);
+        } catch (e) {
+            logger.warn('Failed to fetch initial positions', { error: (e as Error).message });
+        }
+
         logger.info('Bot initialized successfully');
     }
 
@@ -96,6 +104,14 @@ export class BotManager {
         logger.info('Starting scan cycle...');
 
         try {
+            // Step 0: Refresh Positions
+            try {
+                const positions = await this.tradingClient.getPositions();
+                this.orderExecutor.syncPositions(positions);
+            } catch (e) {
+                logger.warn('Failed to refresh positions', { error: (e as Error).message });
+            }
+
             // Step 1: Scan for weather markets
             // logger.debug('Scanning for weather markets...');
 

@@ -8,7 +8,7 @@ import { Wallet, providers } from 'ethers';
 import axios, { AxiosInstance } from 'axios';
 import { config, hasApiCredentials, getApiCredentials } from '../config.js';
 import { logger } from '../logger.js';
-import { TradeOrder, OrderBook } from './types.js';
+import { TradeOrder, OrderBook, Position } from './types.js';
 
 interface MarketInfo {
     tickSize: TickSize;
@@ -18,12 +18,17 @@ interface MarketInfo {
 export class TradingClient {
     private client: ClobClient | null = null;
     private httpClient: AxiosInstance;
+    private dataApiClient: AxiosInstance;
     private initialized: boolean = false;
     private apiCreds: ApiKeyCreds | null = null;
 
     constructor() {
         this.httpClient = axios.create({
             baseURL: config.clobHost,
+            timeout: 15000,
+        });
+        this.dataApiClient = axios.create({
+            baseURL: config.dataApiHost,
             timeout: 15000,
         });
     }
@@ -249,6 +254,58 @@ export class TradingClient {
         } catch (error) {
             logger.error('Failed to get trades', { error: (error as Error).message });
             throw error;
+        }
+    }
+
+    /**
+     * Get user positions from Data API
+     */
+    async getPositions(userAddress?: string): Promise<Position[]> {
+        if (config.simulationMode) {
+            return [];
+        }
+
+        if (!this.client && !userAddress) {
+            throw new Error('Trading client not initialized and no address provided');
+        }
+
+        // Use initialized client address if not provided
+        const address = userAddress || (this.client as any)?.signer?.address;
+
+        if (!address) {
+            logger.warn('No address available to fetch positions');
+            return [];
+        }
+
+        try {
+            const response = await this.dataApiClient.get('/positions', {
+                params: {
+                    user: address,
+                    sizeThreshold: 0.1, // Filter dust
+                },
+            });
+
+            // Map response to Position interface
+            // Expected response: array of objects
+            if (Array.isArray(response.data)) {
+                return response.data.map((p: any) => ({
+                    tokenId: p.asset,
+                    marketId: p.conditionId, // Often maps to conditionId or marketId depending on API version
+                    marketQuestion: p.title || '',
+                    side: p.side === 'YES' ? 'yes' : 'no',
+                    size: parseFloat(p.size),
+                    avgPrice: parseFloat(p.avgPrice),
+                    currentPrice: parseFloat(p.currentPrice || p.avgPrice), // Fallback if current not provided
+                    unrealizedPnL: parseFloat(p.unrealizedPnl || 0),
+                    entryTime: new Date(p.timestamp || Date.now()), // API might not return timestamp
+                }));
+            }
+
+            return [];
+        } catch (error) {
+            logger.error('Failed to get positions', { error: (error as Error).message });
+            // Return empty to avoid breaking flows, but log error
+            return [];
         }
     }
 

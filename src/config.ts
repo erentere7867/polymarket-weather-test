@@ -19,6 +19,7 @@ export interface Config {
     usdcContractAddress: string;
     clobHost: string;
     gammaHost: string;
+    dataApiHost: string;
 
     // Weather APIs
     openWeatherApiKey: string;
@@ -72,6 +73,7 @@ export const config: Config = {
     usdcContractAddress: getEnvVarOptional('USDC_CONTRACT_ADDRESS', '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'),
     clobHost: 'https://clob.polymarket.com',
     gammaHost: 'https://gamma-api.polymarket.com',
+    dataApiHost: 'https://data-api.polymarket.com',
 
     // Weather APIs
     openWeatherApiKey: getEnvVarOptional('OPENWEATHER_API_KEY', ''),
