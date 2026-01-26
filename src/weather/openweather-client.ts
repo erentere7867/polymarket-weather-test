@@ -37,8 +37,8 @@ interface OWMForecastResponse {
         weather: Array<{ id: number; main: string; description: string }>;
         wind: { speed: number; deg: number };
         pop: number; // Probability of precipitation (0-1)
-        snow?: { '3h': number };
-        rain?: { '3h': number };
+        snow?: { '3h'?: number; '1h'?: number };
+        rain?: { '3h'?: number; '1h'?: number };
     }>;
     city: {
         name: string;
@@ -124,6 +124,17 @@ export class OpenWeatherClient {
                 const timestamp = new Date(item.dt * 1000);
                 const hour = timestamp.getHours();
 
+                const precipType = this.detectPrecipType(item.weather[0]?.main, item.snow, item.rain);
+                const pop = Math.round(item.pop * 100);
+
+                let snowfallInches = 0;
+                if (item.snow && (item.snow['3h'] || item.snow['1h'])) {
+                    const mm = (item.snow['3h'] || 0) + (item.snow['1h'] || 0);
+                    snowfallInches = mm / 25.4;
+                } else if (precipType === 'snow' && pop > 50) {
+                    snowfallInches = 0.5; // Rough estimate per 3-hour period
+                }
+
                 return {
                     timestamp,
                     temperatureF: Math.round(item.main.temp),
@@ -132,8 +143,9 @@ export class OpenWeatherClient {
                     feelsLikeC: this.fahrenheitToCelsius(item.main.feels_like),
                     humidity: item.main.humidity,
                     windSpeedMph: Math.round(item.wind.speed),
-                    probabilityOfPrecipitation: Math.round(item.pop * 100),
-                    precipitationType: this.detectPrecipType(item.weather[0]?.main, item.snow, item.rain),
+                    probabilityOfPrecipitation: pop,
+                    precipitationType: precipType,
+                    snowfallInches,
                     shortForecast: item.weather[0]?.description || '',
                     isDaytime: hour >= 6 && hour < 18,
                 };

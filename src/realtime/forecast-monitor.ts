@@ -3,7 +3,7 @@
  * Polls weather APIs and updates DataStore with latest forecasts
  */
 
-import { WeatherService, WeatherData } from '../weather/index.js';
+import { WeatherService, WeatherData, findCity } from '../weather/index.js';
 import { DataStore } from './data-store.js';
 import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { ForecastSnapshot } from './types.js';
@@ -92,6 +92,9 @@ export class ForecastMonitor {
                 this.cityCache.set(city, { data: weatherData, timestamp: new Date() });
             }
 
+            const cityInfo = findCity(city);
+            const timezone = cityInfo?.timezone;
+
             for (const market of markets) {
                 if (!market.targetDate) continue;
 
@@ -100,7 +103,7 @@ export class ForecastMonitor {
 
                 // Extract forecast value based on metric
                 if (market.metricType === 'temperature_high') {
-                    const high = await this.weatherService.getExpectedHigh(city, market.targetDate);
+                    const high = this.weatherService.calculateExpectedHigh(weatherData, market.targetDate, timezone);
                     if (high !== null && market.threshold !== undefined) {
                         forecastValue = high;
                         probability = this.weatherService.calculateTempExceedsProbability(high, market.threshold);
@@ -113,7 +116,7 @@ export class ForecastMonitor {
                     const end = new Date(market.targetDate);
                     end.setHours(23, 59, 59, 999);
 
-                    const snow = await this.weatherService.getExpectedSnowfall(city, start, end);
+                    const snow = this.weatherService.calculateExpectedSnowfall(weatherData, start, end);
                     forecastValue = snow;
                     if (market.threshold !== undefined) {
                         probability = this.weatherService.calculateSnowExceedsProbability(snow, market.threshold);

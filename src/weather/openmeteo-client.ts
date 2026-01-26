@@ -113,6 +113,7 @@ export class OpenMeteoClient {
                         data.hourly.weather_code[i],
                         data.hourly.snowfall[i]
                     ),
+                    snowfallInches: (data.hourly.snowfall[i] || 0) / 2.54, // cm to inches
                     shortForecast: WEATHER_CODE_MAP[data.hourly.weather_code[i]] || 'Unknown',
                     isDaytime: hour >= 6 && hour < 18,
                 });
@@ -122,7 +123,7 @@ export class OpenMeteoClient {
                 location: coords,
                 locationName: `${coords.lat.toFixed(2)}, ${coords.lon.toFixed(2)}`,
                 fetchedAt: new Date(),
-                source: 'openweather', // Using openweather as generic non-NOAA source
+                source: 'openmeteo',
                 hourly,
             };
         } catch (error) {

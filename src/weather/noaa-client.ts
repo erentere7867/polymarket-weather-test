@@ -124,6 +124,17 @@ export class NOAAClient {
                 const tempF = period.temperatureUnit === 'F' ? period.temperature : this.celsiusToFahrenheit(period.temperature);
                 const tempC = period.temperatureUnit === 'C' ? period.temperature : this.fahrenheitToCelsius(period.temperature);
 
+                // Calculate snowfall for this hour
+                let snowfallInches = 0;
+                const precipType = this.detectPrecipType(period.shortForecast);
+                const pop = period.probabilityOfPrecipitation?.value ?? 0;
+
+                if (precipType === 'snow' && pop > 30) {
+                    const snowRate = this.estimateSnowRate(period.shortForecast, tempF, pop);
+                    const probabilityWeight = pop / 100;
+                    snowfallInches = snowRate * probabilityWeight;
+                }
+
                 return {
                     timestamp: new Date(period.startTime),
                     temperatureF: tempF,
@@ -131,8 +142,9 @@ export class NOAAClient {
                     humidity: period.relativeHumidity?.value ?? undefined,
                     windSpeedMph: this.parseWindSpeed(period.windSpeed),
                     windDirection: period.windDirection,
-                    probabilityOfPrecipitation: period.probabilityOfPrecipitation?.value ?? 0,
-                    precipitationType: this.detectPrecipType(period.shortForecast),
+                    probabilityOfPrecipitation: pop,
+                    precipitationType: precipType,
+                    snowfallInches,
                     shortForecast: period.shortForecast,
                     isDaytime: period.isDaytime,
                 };

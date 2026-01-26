@@ -34,6 +34,7 @@ export interface HourlyForecast {
     windDirection?: string;
     probabilityOfPrecipitation: number;
     precipitationType?: 'rain' | 'snow' | 'sleet' | 'mixed' | 'none';
+    snowfallInches?: number;
     shortForecast?: string;
     isDaytime: boolean;
 }
@@ -53,7 +54,7 @@ export interface WeatherData {
     location: Coordinates;
     locationName?: string;
     fetchedAt: Date;
-    source: 'noaa' | 'openweather';
+    source: 'noaa' | 'openweather' | 'openmeteo';
     hourly: HourlyForecast[];
     daily?: DailyForecast[];
 }

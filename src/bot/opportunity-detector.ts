@@ -100,7 +100,7 @@ export class OpportunityDetector {
             let forecastProbability: number | null = null;
             let forecastValue: number | undefined;
             let forecastValueUnit: string | undefined;
-            let weatherDataSource: 'noaa' | 'openweather' = 'noaa';
+            let weatherDataSource: 'noaa' | 'openweather' | 'openmeteo' = 'noaa';
             let confidence = 0.7; // Default confidence
 
             switch (market.metricType) {
@@ -256,7 +256,7 @@ export class OpportunityDetector {
     private async analyzeTemperatureMarket(market: ParsedWeatherMarket): Promise<{
         probability: number;
         forecastValue: number;
-        source: 'noaa' | 'openweather';
+        source: 'noaa' | 'openweather' | 'openmeteo';
         confidence: number;
     } | null> {
         if (!market.city || !market.threshold) {
@@ -325,7 +325,7 @@ export class OpportunityDetector {
     private async analyzeTemperatureLowMarket(market: ParsedWeatherMarket): Promise<{
         probability: number;
         forecastValue: number;
-        source: 'noaa' | 'openweather';
+        source: 'noaa' | 'openweather' | 'openmeteo';
         confidence: number;
     } | null> {
         if (!market.city || !market.threshold) {
@@ -378,7 +378,7 @@ export class OpportunityDetector {
     private async analyzeSnowfallMarket(market: ParsedWeatherMarket): Promise<{
         probability: number;
         forecastValue: number;
-        source: 'noaa' | 'openweather';
+        source: 'noaa' | 'openweather' | 'openmeteo';
         confidence: number;
     } | null> {
         if (!market.city) {
@@ -439,7 +439,7 @@ export class OpportunityDetector {
     private async analyzePrecipitationMarket(market: ParsedWeatherMarket): Promise<{
         probability: number;
         forecastValue: number;
-        source: 'noaa' | 'openweather';
+        source: 'noaa' | 'openweather' | 'openmeteo';
         confidence: number;
     } | null> {
         if (!market.city) {

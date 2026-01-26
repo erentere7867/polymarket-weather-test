@@ -98,7 +98,7 @@ export interface TradingOpportunity {
     reason: string;
 
     // Weather data used
-    weatherDataSource: 'noaa' | 'openweather';
+    weatherDataSource: 'noaa' | 'openweather' | 'openmeteo';
     forecastValue?: number;
     forecastValueUnit?: string;
 

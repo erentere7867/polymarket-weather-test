@@ -143,6 +143,51 @@ export class WeatherService {
     }
 
     /**
+     * Calculate expected high temperature from existing weather data
+     * Uses 24-hour max (midnight to midnight)
+     * If timezone is provided, filters data based on local date
+     */
+    calculateExpectedHigh(data: WeatherData, date: Date, timezone?: string): number | null {
+        // Assume date represents the target day in UTC (e.g., 2024-01-01T00:00:00Z)
+        const targetDateStr = date.toISOString().split('T')[0];
+
+        const temps = data.hourly
+            .filter(h => {
+                let hDateStr: string;
+                if (timezone) {
+                    try {
+                        hDateStr = h.timestamp.toLocaleDateString('en-CA', { timeZone: timezone });
+                    } catch (e) {
+                        // Fallback to UTC if timezone is invalid
+                        hDateStr = h.timestamp.toISOString().split('T')[0];
+                    }
+                } else {
+                    hDateStr = h.timestamp.toISOString().split('T')[0];
+                }
+                return hDateStr === targetDateStr;
+            })
+            .map(h => h.temperatureF);
+
+        if (temps.length === 0) return null;
+        return Math.max(...temps);
+    }
+
+    /**
+     * Calculate expected snowfall from existing weather data
+     */
+    calculateExpectedSnowfall(data: WeatherData, startDate: Date, endDate: Date): number {
+        let totalSnow = 0;
+
+        for (const hour of data.hourly) {
+            if (hour.timestamp >= startDate && hour.timestamp <= endDate) {
+                totalSnow += (hour.snowfallInches || 0);
+            }
+        }
+
+        return Math.round(totalSnow * 10) / 10;
+    }
+
+    /**
      * Calculate probability that temperature will exceed a threshold
      * Returns 0-1 probability based on forecast vs threshold
      */
