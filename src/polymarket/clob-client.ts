@@ -20,6 +20,7 @@ export class TradingClient {
     private httpClient: AxiosInstance;
     private initialized: boolean = false;
     private apiCreds: ApiKeyCreds | null = null;
+    private marketInfoCache = new Map<string, Promise<MarketInfo>>();
 
     constructor() {
         this.httpClient = axios.create({
@@ -127,17 +128,23 @@ export class TradingClient {
      * Get market info (needed for order placement)
      */
     async getMarketInfo(tokenId: string): Promise<MarketInfo> {
-        try {
-            const response = await this.httpClient.get(`/markets/${tokenId}`);
-            return {
-                tickSize: response.data.minimum_tick_size || '0.01',
-                negRisk: response.data.neg_risk || false,
-            };
-        } catch (error) {
-            // Default values if can't fetch
-            logger.warn('Could not fetch market info, using defaults', { tokenId });
-            return { tickSize: '0.01', negRisk: false };
+        if (!this.marketInfoCache.has(tokenId)) {
+            this.marketInfoCache.set(tokenId, (async () => {
+                try {
+                    const response = await this.httpClient.get(`/markets/${tokenId}`);
+                    return {
+                        tickSize: response.data.minimum_tick_size || '0.01',
+                        negRisk: response.data.neg_risk || false,
+                    };
+                } catch (error) {
+                    // Default values if can't fetch
+                    logger.warn('Could not fetch market info, using defaults', { tokenId });
+                    return { tickSize: '0.01', negRisk: false };
+                }
+            })());
         }
+
+        return this.marketInfoCache.get(tokenId)!;
     }
 
     /**
