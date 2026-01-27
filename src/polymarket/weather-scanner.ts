@@ -20,20 +20,27 @@ const WEATHER_KEYWORDS = [
 ];
 
 // Common cities in weather markets
-const CITY_PATTERNS = [
-    'new york', 'nyc', 'ny',
-    'washington', 'dc', 'd.c.',
-    'chicago',
-    'los angeles', 'la',
-    'miami',
-    'dallas',
-    'seattle',
-    'atlanta',
-    'toronto',
-    'london',
-    'seoul',
-    'ankara',
-    'buenos aires',
+// Order matters: longer/more specific patterns first to avoid partial matches
+const CITY_PATTERNS: Array<{ pattern: string; name: string }> = [
+    { pattern: 'new york city', name: 'New York City' },
+    { pattern: 'new york', name: 'New York City' },
+    { pattern: 'nyc', name: 'New York City' },
+    { pattern: 'washington dc', name: 'Washington DC' },
+    { pattern: 'washington d.c.', name: 'Washington DC' },
+    { pattern: 'washington', name: 'Washington DC' },
+    { pattern: 'd.c.', name: 'Washington DC' },
+    { pattern: 'dc', name: 'Washington DC' },
+    { pattern: 'los angeles', name: 'Los Angeles' },
+    { pattern: 'buenos aires', name: 'Buenos Aires' },
+    { pattern: 'chicago', name: 'Chicago' },
+    { pattern: 'dallas', name: 'Dallas' },
+    { pattern: 'atlanta', name: 'Atlanta' },
+    { pattern: 'seattle', name: 'Seattle' },
+    { pattern: 'miami', name: 'Miami' },
+    { pattern: 'toronto', name: 'Toronto' },
+    { pattern: 'london', name: 'London' },
+    { pattern: 'seoul', name: 'Seoul' },
+    { pattern: 'ankara', name: 'Ankara' },
 ];
 
 // Keywords to EXCLUDE from weather markets (not actual weather)
@@ -154,18 +161,17 @@ export class WeatherScanner {
     }
 
     /**
-     * Extract city name from market text
+     * Extract city name from market text using word boundary matching
      */
     private extractCity(text: string): string | null {
-        for (const cityPattern of CITY_PATTERNS) {
-            if (text.includes(cityPattern)) {
-                // Normalize city name
-                if (cityPattern === 'nyc' || cityPattern === 'ny') return 'New York City';
-                if (cityPattern === 'dc' || cityPattern === 'd.c.') return 'Washington DC';
-                if (cityPattern === 'la') return 'Los Angeles';
+        const lowerText = text.toLowerCase();
 
-                // Capitalize properly
-                return cityPattern.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        for (const { pattern, name } of CITY_PATTERNS) {
+            // Use word boundary check to avoid partial matches
+            // e.g., 'la' should not match 'dallas' or 'atlanta'
+            const regex = new RegExp(`\\b${pattern.replace(/\./g, '\\.')}\\b`, 'i');
+            if (regex.test(lowerText)) {
+                return name;
             }
         }
         return null;

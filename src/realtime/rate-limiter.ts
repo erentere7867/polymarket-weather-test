@@ -1,10 +1,11 @@
 export class RateLimiter {
     private callCounts: Map<string, number> = new Map();
+    // Keys should match the normalized (lowercased) source names from clients
     private dailyLimits: Map<string, number> = new Map([
-        ['tomorrow', 500],
+        ['tomorrow.io', 500],
         ['weatherapi', 30000],
         ['weatherbit', 500],
-        ['visualcrossing', 1000],
+        ['visual crossing', 1000],
         ['meteosource', 400]
     ]);
 
@@ -21,7 +22,7 @@ export class RateLimiter {
         this.checkReset();
         const source = sourceName.toLowerCase();
 
-        // Open-Meteo is unlimited
+        // Open-Meteo and NOAA are unlimited (free APIs)
         if (source === 'open-meteo' || source === 'noaa') return true;
 
         const count = this.callCounts.get(source) || 0;

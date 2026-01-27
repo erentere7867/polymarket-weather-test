@@ -170,12 +170,15 @@ export class SpeedArbitrageStrategy {
             const threshold = market.threshold;
             if (threshold === undefined) continue;
 
+            // Determine uncertainty based on metric type AND units
+            // Celsius has smaller numeric range, adjust uncertainty accordingly
             let uncertainty: number;
             switch (market.metricType) {
                 case 'temperature_high':
                 case 'temperature_low':
                 case 'temperature_threshold':
-                    uncertainty = 3; // °F
+                    // Uncertainty is about 3°F or ~1.7°C
+                    uncertainty = market.thresholdUnit === 'C' ? 1.7 : 3;
                     break;
                 case 'snowfall':
                     uncertainty = 2; // inches
@@ -184,6 +187,8 @@ export class SpeedArbitrageStrategy {
                     uncertainty = 5;
             }
 
+            // NOTE: forecast.forecastValue is already converted to match threshold units
+            // by the ForecastMonitor (Fahrenheit for F markets, Celsius for C markets)
             const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
 
             // Only trade if forecast is strongly indicating one direction

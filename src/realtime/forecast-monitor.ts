@@ -227,8 +227,14 @@ export class ForecastMonitor {
                 // Extract forecast value based on metric
                 if (market.metricType === 'temperature_high') {
                     // Use calculated logic to utilize cached/fast-update data
-                    const high = this.weatherService.calculateExpectedHigh(weatherData, market.targetDate);
+                    let high = this.weatherService.calculateExpectedHigh(weatherData, market.targetDate);
                     if (high !== null && market.threshold !== undefined) {
+                        // CRITICAL: Convert forecast to match market threshold units
+                        // Forecasts are always in Fahrenheit, but thresholds may be in Celsius
+                        if (market.thresholdUnit === 'C') {
+                            // Convert Fahrenheit forecast to Celsius for comparison
+                            high = (high - 32) * 5 / 9;
+                        }
                         forecastValue = high;
                         probability = this.weatherService.calculateTempExceedsProbability(high, market.threshold);
                         if (market.comparisonType === 'below') probability = 1 - probability;

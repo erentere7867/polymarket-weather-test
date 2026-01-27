@@ -136,6 +136,12 @@ export const KNOWN_CITIES: CityLocation[] = [
         timezone: 'America/New_York',
     },
     {
+        name: 'Dallas',
+        aliases: ['DFW', 'Dallas-Fort Worth'],
+        coordinates: { lat: 32.7767, lon: -96.7970 },
+        timezone: 'America/Chicago',
+    },
+    {
         name: 'Toronto',
         aliases: [],
         coordinates: { lat: 43.6532, lon: -79.3832 },
