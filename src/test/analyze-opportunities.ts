@@ -5,6 +5,7 @@
 
 import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { OpportunityDetector } from '../bot/opportunity-detector.js';
+import { TradingClient } from '../polymarket/clob-client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -13,7 +14,8 @@ async function main(): Promise<void> {
     logger.info(`Edge threshold: ${(config.minEdgeThreshold * 100).toFixed(0)}%`);
 
     const scanner = new WeatherScanner();
-    const detector = new OpportunityDetector();
+    const tradingClient = new TradingClient();
+    const detector = new OpportunityDetector(tradingClient);
 
     try {
         // Scan markets

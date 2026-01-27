@@ -45,9 +45,7 @@ export class BotManager {
     constructor() {
         this.weatherScanner = new WeatherScanner();
         this.tradingClient = new TradingClient();
-        this.opportunityDetector = new OpportunityDetector();
-        this.tradingClient = new TradingClient();
-        this.opportunityDetector = new OpportunityDetector();
+        this.opportunityDetector = new OpportunityDetector(this.tradingClient);
         this.orderExecutor = new OrderExecutor(this.tradingClient);
 
         // Initialize real-time components

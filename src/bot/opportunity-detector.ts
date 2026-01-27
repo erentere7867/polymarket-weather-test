@@ -4,6 +4,7 @@
  */
 
 import { WeatherService } from '../weather/index.js';
+import { TradingClient } from '../polymarket/clob-client.js';
 import { ParsedWeatherMarket, TradingOpportunity } from '../polymarket/types.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -33,12 +34,14 @@ interface CapturedOpportunity {
 
 export class OpportunityDetector {
     private weatherService: WeatherService;
+    private tradingClient: TradingClient;
 
     // Track opportunities we've already acted on - prevents re-buying at higher prices
     private capturedOpportunities: Map<string, CapturedOpportunity> = new Map();
 
-    constructor() {
+    constructor(tradingClient: TradingClient) {
         this.weatherService = new WeatherService();
+        this.tradingClient = tradingClient;
     }
 
     /**
@@ -187,7 +190,7 @@ export class OpportunityDetector {
             }
 
             // Market implied probability (YES price = probability of YES outcome)
-            const marketProbability = market.yesPrice;
+            let marketProbability = market.yesPrice;
 
             // Check for guaranteed outcome (forecast far beyond threshold)
             const guaranteedResult = this.isGuaranteedOutcome(
@@ -216,6 +219,51 @@ export class OpportunityDetector {
                 });
             }
 
+            // Preliminary Edge calculation
+            let edge = finalProbability - marketProbability;
+
+            // PRICE VERIFICATION: If edge is promising, check live CLOB prices
+            // Gamma prices are often stale. We need to verify before committing.
+            // Check if potential edge > half of threshold (to be safe)
+            if (Math.abs(edge) >= config.minEdgeThreshold / 2) {
+                // Determine which side we would likely trade
+                // If edge > 0, we think YES is underpriced -> Buy YES
+                // If edge < 0, we think YES is overpriced -> Buy NO
+                const tentativeAction = edge > 0 ? 'buy_yes' : 'buy_no';
+                const tokenId = tentativeAction === 'buy_yes' ? market.yesTokenId : market.noTokenId;
+
+                try {
+                    // Fetch Best Ask for the token we want to buy
+                    const clobAsk = await this.tradingClient.getBestAsk(tokenId);
+
+                    if (clobAsk !== null) {
+                        const prevPrice = tentativeAction === 'buy_yes' ? market.yesPrice : market.noPrice;
+                        // Only update if difference is meaningful (> 0.5%)
+                        if (Math.abs(clobAsk - prevPrice) > 0.005) {
+                            logger.debug(`🔍 Verifying price for ${market.city} (${tentativeAction}): Gamma ${prevPrice.toFixed(3)} -> CLOB ${clobAsk.toFixed(3)}`);
+
+                            // Update market state
+                            if (tentativeAction === 'buy_yes') {
+                                market.yesPrice = clobAsk;
+                                marketProbability = clobAsk; // Price of YES
+                            } else {
+                                market.noPrice = clobAsk;
+                                // If we buy NO at price P, the implied YES probability is roughly 1 - P
+                                marketProbability = 1 - clobAsk;
+                            }
+
+                            // Recalculate edge with validated price
+                            edge = finalProbability - marketProbability;
+                        }
+                    } else {
+                        // No liquidity
+                        logger.debug(`⚠️ No liquidity on CLOB for ${market.market.question} (${tentativeAction})`);
+                    }
+                } catch (e) {
+                    logger.warn(`Failed to verify CLOB price: ${(e as Error).message}`);
+                }
+            }
+
             // Check if we should skip this opportunity (already captured or market caught up)
             const skipCheck = this.shouldSkipOpportunity(
                 market.market.id,
@@ -228,8 +276,6 @@ export class OpportunityDetector {
                 return null;
             }
 
-            // Edge calculation: positive = market underprices YES, negative = market overprices YES
-            const edge = finalProbability - marketProbability;
             const absEdge = Math.abs(edge);
 
             // Determine action based on edge
