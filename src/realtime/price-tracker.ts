@@ -132,8 +132,20 @@ export class PriceTracker {
                         let price: number | null = null;
 
                         if (event.bids && event.bids.length > 0 && event.asks && event.asks.length > 0) {
-                            const bestBid = parseFloat(event.bids[0].price);
-                            const bestAsk = parseFloat(event.asks[0].price);
+                            // Find Best Bid (Highest Price)
+                            let bestBid = parseFloat(event.bids[0].price);
+                            for (let i = 1; i < event.bids.length; i++) {
+                                const p = parseFloat(event.bids[i].price);
+                                if (p > bestBid) bestBid = p;
+                            }
+
+                            // Find Best Ask (Lowest Price)
+                            let bestAsk = parseFloat(event.asks[0].price);
+                            for (let i = 1; i < event.asks.length; i++) {
+                                const p = parseFloat(event.asks[i].price);
+                                if (p < bestAsk) bestAsk = p;
+                            }
+
                             price = (bestBid + bestAsk) / 2;
                         }
 
