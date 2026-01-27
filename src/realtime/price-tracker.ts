@@ -110,36 +110,32 @@ export class PriceTracker {
     private handleMessage(message: any): void {
         if (Array.isArray(message)) {
             for (const event of message) {
+                // Log all events at debug level to see what we're receiving
+                // logger.debug('WS Event:', { type: event.event_type, id: event.asset_id });
+
                 if (event.event_type === 'price_change' || event.event_type === 'book') {
-                    // event.asset_id is the token ID
-                    // event.price is the price (for price_change)
-                    // For book, we might need to parse bids/asks, but CLOB WS usually sends price updates or orderbook updates
+                    const tokenId = event.asset_id;
+                    if (!tokenId) continue;
 
-                    // Note: Polymarket CLOB WS 'market' channel sends orderbook updates
-                    // Format: { "event_type": "book", "asset_id": "...", "bids": [...], "asks": [...] }
-                    // OR { "event_type": "price_change", ... } ?
+                    let price: number | null = null;
 
-                    // Actually, let's handle "book" updates which contain the best bid/ask
-                    if (event.event_type === 'book' || event.eventType === 'book') {
-                        const tokenId = event.asset_id;
-                        // Calculate mid price or best bid/ask
-                        // simplified: just log for now to see format, or try to extract price
-
-                        // If we receive book updates, we can derive price. Needs parsing.
-                        // Let's assume we get updates. Current store expects a single price.
-                        // Let's use the 'price' field if available, or midpoint of best bid/ask
-
-                        let price: number | null = null;
-
+                    // Handle 'price_change' events
+                    if (event.event_type === 'price_change' && event.price) {
+                         price = parseFloat(event.price);
+                    }
+                    // Handle 'book' events (orderbook updates)
+                    else if (event.event_type === 'book' || event.eventType === 'book') {
+                        // Calculate mid price from best bid/ask
                         if (event.bids && event.bids.length > 0 && event.asks && event.asks.length > 0) {
                             const bestBid = parseFloat(event.bids[0].price);
                             const bestAsk = parseFloat(event.asks[0].price);
                             price = (bestBid + bestAsk) / 2;
                         }
+                    }
 
-                        if (price !== null && tokenId) {
-                            this.store.updatePrice(tokenId, price, new Date());
-                        }
+                    if (price !== null && !isNaN(price)) {
+                        // logger.debug(`Price update for ${tokenId}: ${price}`);
+                        this.store.updatePrice(tokenId, price, new Date());
                     }
                 }
             }

@@ -96,22 +96,23 @@ export class SpeedArbitrageStrategy {
             // =====================================================
             const forecast = state.lastForecast;
 
-            // Skip if forecast hasn't changed
-            if (!forecast.valueChanged) {
+            // Calculate change age
+            const changeAge = now - forecast.changeTimestamp.getTime();
+
+            // Skip if the change is too old (market has likely caught up)
+            if (changeAge > MAX_CHANGE_AGE_MS) {
                 continue;
             }
+
+            // Note: We removed "if (!forecast.valueChanged) continue"
+            // We allow trading as long as the change is RECENT (within MAX_CHANGE_AGE_MS)
+            // regardless of whether it happened in THIS specific cycle.
 
             // =====================================================
             // SPEED ARBITRAGE CHECK #1.5: Have we already captured this opportunity?
             // =====================================================
             if (this.isOpportunityCaptured(market.market.id, forecast.forecastValue)) {
-                logger.debug(`⏭️ Skipping already captured: ${market.market.question.substring(0, 40)}...`);
-                continue;
-            }
-
-            // Skip if the change is too old (market has likely caught up)
-            const changeAge = now - forecast.changeTimestamp.getTime();
-            if (changeAge > MAX_CHANGE_AGE_MS) {
+                // logger.debug(`⏭️ Skipping already captured: ${market.market.question.substring(0, 40)}...`);
                 continue;
             }
 
@@ -123,6 +124,13 @@ export class SpeedArbitrageStrategy {
                 : null;
 
             if (!priceYesPoint) continue;
+
+            // Check if price is fresh enough (e.g. < 60s)
+            // If price is too old, we risk trading on stale data when market actually moved
+            if (now - priceYesPoint.timestamp.getTime() > 60000) {
+                // logger.debug(`⚠️ Stale price for ${market.market.id}, skipping`);
+                continue;
+            }
 
             // Check if price was updated AFTER the forecast change
             // If price updated after change, market has already reacted - no edge
