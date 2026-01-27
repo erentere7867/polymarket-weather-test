@@ -138,8 +138,14 @@ export class TradingClient {
             if (!book.asks || book.asks.length === 0) {
                 return null;
             }
-            // Asks are sorted ascending (lowest first)
-            return parseFloat(book.asks[0].price);
+            // Find the lowest ask price (best price for buyer)
+            // API usually returns descending (highest first), so we scan all to be safe
+            let minPrice = parseFloat(book.asks[0].price);
+            for (let i = 1; i < book.asks.length; i++) {
+                const p = parseFloat(book.asks[i].price);
+                if (p < minPrice) minPrice = p;
+            }
+            return minPrice;
         } catch (error) {
             logger.warn('Failed to get best ask', { tokenId, error: (error as Error).message });
             return null;
