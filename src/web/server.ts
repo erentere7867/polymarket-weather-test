@@ -22,7 +22,8 @@ app.get('/api/status', (req, res) => {
         online: runner.isSimulationRunning(),
         cycles: runner.getCycles(),
         uptime: process.uptime(),
-        simulationMode: config.simulationMode
+        simulationMode: config.simulationMode,
+        debug: runner.getDebugStats()
     });
 });
 

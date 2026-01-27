@@ -214,6 +214,10 @@ export class SimulationRunner {
         return this.exitOptimizer.getConfig();
     }
 
+    getDebugStats() {
+        return this.store.getStats();
+    }
+
     stop(): void {
         logger.info('Stopping simulation...');
         this.priceTracker.stop();
