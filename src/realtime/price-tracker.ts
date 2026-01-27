@@ -110,48 +110,49 @@ export class PriceTracker {
     private handleMessage(message: any): void {
         if (Array.isArray(message)) {
             for (const event of message) {
-                if (event.event_type === 'price_change' || event.event_type === 'book') {
-                    // event.asset_id is the token ID
-                    // event.price is the price (for price_change)
-                    // For book, we might need to parse bids/asks, but CLOB WS usually sends price updates or orderbook updates
+                // Handle "price_change" events (Last Trade Price)
+                if (event.event_type === 'price_change') {
+                    const tokenId = event.asset_id;
+                    const price = parseFloat(event.price);
 
-                    // Note: Polymarket CLOB WS 'market' channel sends orderbook updates
-                    // Format: { "event_type": "book", "asset_id": "...", "bids": [...], "asks": [...] }
-                    // OR { "event_type": "price_change", ... } ?
+                    if (tokenId && !isNaN(price)) {
+                        this.store.updatePrice(tokenId, price, new Date());
+                    }
+                }
 
-                    // Actually, let's handle "book" updates which contain the best bid/ask
-                    if (event.event_type === 'book' || event.eventType === 'book') {
-                        const tokenId = event.asset_id;
-                        // Calculate mid price or best bid/ask
-                        // simplified: just log for now to see format, or try to extract price
+                // Handle "book" events (Order Book Updates)
+                else if (event.event_type === 'book') {
+                    const tokenId = event.asset_id;
 
-                        // If we receive book updates, we can derive price. Needs parsing.
-                        // Let's assume we get updates. Current store expects a single price.
-                        // Let's use the 'price' field if available, or midpoint of best bid/ask
+                    // If we receive book updates, we can derive price. Needs parsing.
+                    // Let's use the midpoint of best bid/ask
 
-                        let price: number | null = null;
+                    let price: number | null = null;
+                    const bids = event.bids || [];
+                    const asks = event.asks || [];
 
-                        if (event.bids && event.bids.length > 0 && event.asks && event.asks.length > 0) {
-                            // Find Best Bid (Highest Price)
-                            let bestBid = parseFloat(event.bids[0].price);
-                            for (let i = 1; i < event.bids.length; i++) {
-                                const p = parseFloat(event.bids[i].price);
-                                if (p > bestBid) bestBid = p;
-                            }
-
-                            // Find Best Ask (Lowest Price)
-                            let bestAsk = parseFloat(event.asks[0].price);
-                            for (let i = 1; i < event.asks.length; i++) {
-                                const p = parseFloat(event.asks[i].price);
-                                if (p < bestAsk) bestAsk = p;
-                            }
-
-                            price = (bestBid + bestAsk) / 2;
+                    if (bids.length > 0 && asks.length > 0) {
+                        // Find Best Bid (Highest Price)
+                        // Bids are sorted ascending (worst to best), but we iterate to be safe
+                        let bestBid = parseFloat(bids[0].price);
+                        for (let i = 1; i < bids.length; i++) {
+                            const p = parseFloat(bids[i].price);
+                            if (p > bestBid) bestBid = p;
                         }
 
-                        if (price !== null && tokenId) {
-                            this.store.updatePrice(tokenId, price, new Date());
+                        // Find Best Ask (Lowest Price)
+                        // Asks are sorted descending (worst to best), but we iterate to be safe
+                        let bestAsk = parseFloat(asks[0].price);
+                        for (let i = 1; i < asks.length; i++) {
+                            const p = parseFloat(asks[i].price);
+                            if (p < bestAsk) bestAsk = p;
                         }
+
+                        price = (bestBid + bestAsk) / 2;
+                    }
+
+                    if (price !== null && tokenId) {
+                        this.store.updatePrice(tokenId, price, new Date());
                     }
                 }
             }
