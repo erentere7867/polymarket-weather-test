@@ -43,6 +43,12 @@ const CITY_PATTERNS: Array<{ pattern: string; name: string }> = [
     { pattern: 'ankara', name: 'Ankara' },
 ];
 
+// Pre-compile regexes for performance
+const COMPILED_CITY_PATTERNS = CITY_PATTERNS.map(({ pattern, name }) => ({
+    regex: new RegExp(`\\b${pattern.replace(/\./g, '\\.')}\\b`, 'i'),
+    name
+}));
+
 // Keywords to EXCLUDE from weather markets (not actual weather)
 const EXCLUDED_KEYWORDS = [
     'earthquake',
@@ -166,10 +172,7 @@ export class WeatherScanner {
     private extractCity(text: string): string | null {
         const lowerText = text.toLowerCase();
 
-        for (const { pattern, name } of CITY_PATTERNS) {
-            // Use word boundary check to avoid partial matches
-            // e.g., 'la' should not match 'dallas' or 'atlanta'
-            const regex = new RegExp(`\\b${pattern.replace(/\./g, '\\.')}\\b`, 'i');
+        for (const { regex, name } of COMPILED_CITY_PATTERNS) {
             if (regex.test(lowerText)) {
                 return name;
             }
