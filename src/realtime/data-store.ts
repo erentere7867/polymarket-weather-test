@@ -11,6 +11,12 @@ export class DataStore {
     private markets: Map<string, MarketState> = new Map();
     private tokenToMarketId: Map<string, string> = new Map();
 
+    // Debug Stats
+    private lastGlobalPriceUpdate: Date | null = null;
+    private lastGlobalForecastUpdate: Date | null = null;
+    private totalPriceUpdates: number = 0;
+    private totalForecastUpdates: number = 0;
+
     constructor() { }
 
     /**
@@ -69,6 +75,10 @@ export class DataStore {
         historyObj.history.push({ price, timestamp });
         historyObj.lastUpdated = timestamp;
 
+        // Update Global Stats
+        this.lastGlobalPriceUpdate = timestamp;
+        this.totalPriceUpdates++;
+
         // Prune history older than 60 minutes
         const cutoff = new Date(timestamp.getTime() - 60 * 60 * 1000);
         historyObj.history = historyObj.history.filter(p => p.timestamp > cutoff);
@@ -108,6 +118,10 @@ export class DataStore {
         state.lastForecast = snapshot;
         state.forecastHistory.push(snapshot);
 
+        // Update Global Stats
+        this.lastGlobalForecastUpdate = snapshot.timestamp;
+        this.totalForecastUpdates++;
+
         // Keep last 24h of forecasts
         const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
         state.forecastHistory = state.forecastHistory.filter(f => f.timestamp > cutoff);
@@ -132,5 +146,18 @@ export class DataStore {
      */
     getMarketIdByToken(tokenId: string): string | undefined {
         return this.tokenToMarketId.get(tokenId);
+    }
+
+    /**
+     * Get Debug Stats
+     */
+    getStats() {
+        return {
+            marketCount: this.markets.size,
+            lastPriceUpdate: this.lastGlobalPriceUpdate,
+            lastForecastUpdate: this.lastGlobalForecastUpdate,
+            totalPriceUpdates: this.totalPriceUpdates,
+            totalForecastUpdates: this.totalForecastUpdates
+        };
     }
 }
