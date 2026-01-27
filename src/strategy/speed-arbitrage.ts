@@ -20,8 +20,8 @@ import { logger } from '../logger.js';
 const MAX_CHANGE_AGE_MS = 15000;
 
 // Minimum change threshold to trigger detection
-// AGGRESSIVE: 0.25 sigma (down from 1.5) to catch small forecast movements
-const MIN_SIGMA_FOR_ARBITRAGE = 0.25;
+// AGGRESSIVE: 0.5 sigma (down from 1.5) to catch small forecast movements
+const MIN_SIGMA_FOR_ARBITRAGE = 0.5;
 
 export class SpeedArbitrageStrategy {
     private store: DataStore;
