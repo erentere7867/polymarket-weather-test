@@ -17,7 +17,9 @@ export class PriceTracker {
     private pingInterval: NodeJS.Timeout | null = null;
     private scanInterval: NodeJS.Timeout | null = null;
     private reconnectTimeout: NodeJS.Timeout | null = null;
+    private heartbeatInterval: NodeJS.Timeout | null = null;
     private isSimulator: boolean = false;
+    private updateCount: number = 0;
 
     constructor(store: DataStore) {
         this.store = store;
@@ -40,6 +42,17 @@ export class PriceTracker {
         // 3. Schedule Periodic Scan (every 10 minutes)
         // To discover NEW markets that appear
         this.scanInterval = setInterval(() => this.scanAndSubscribe(), 10 * 60 * 1000);
+
+        // 4. Start Heartbeat
+        this.heartbeatInterval = setInterval(() => {
+            if (this.updateCount > 0) {
+                logger.info(`PriceTracker Heartbeat: Received ${this.updateCount} updates in last minute`);
+            } else {
+                logger.warn('PriceTracker Heartbeat: No updates received in last minute. WebSocket might be stale.');
+                // Optional: Reconnect if no updates? But maybe market is just quiet.
+            }
+            this.updateCount = 0;
+        }, 60000);
     }
 
     private connect(): void {
@@ -108,54 +121,70 @@ export class PriceTracker {
      * Or array of these
      */
     private handleMessage(message: any): void {
-        if (Array.isArray(message)) {
-            for (const event of message) {
-                // Handle "price_change" events (Last Trade Price)
-                if (event.event_type === 'price_change') {
-                    const tokenId = event.asset_id;
-                    const price = parseFloat(event.price);
+        const events = Array.isArray(message) ? message : [message];
 
-                    if (tokenId && !isNaN(price)) {
-                        this.store.updatePrice(tokenId, price, new Date());
-                    }
-                }
+        for (const event of events) {
+            if (!event || !event.event_type) {
+                // Log debug for unknown structures (e.g. subscription success or errors)
+                logger.debug('WebSocket received message', { message: event });
+                continue;
+            }
 
-                // Handle "book" events (Order Book Updates)
-                else if (event.event_type === 'book') {
-                    const tokenId = event.asset_id;
+            // Handle "price_change" events (Last Trade Price)
+            if (event.event_type === 'price_change') {
+                if (!event.asset_id) continue;
+                const tokenId = String(event.asset_id); // Ensure string
+                const price = parseFloat(event.price);
 
-                    // If we receive book updates, we can derive price. Needs parsing.
-                    // Let's use the midpoint of best bid/ask
-
-                    let price: number | null = null;
-                    const bids = event.bids || [];
-                    const asks = event.asks || [];
-
-                    if (bids.length > 0 && asks.length > 0) {
-                        // Find Best Bid (Highest Price)
-                        // Bids are sorted ascending (worst to best), but we iterate to be safe
-                        let bestBid = parseFloat(bids[0].price);
-                        for (let i = 1; i < bids.length; i++) {
-                            const p = parseFloat(bids[i].price);
-                            if (p > bestBid) bestBid = p;
-                        }
-
-                        // Find Best Ask (Lowest Price)
-                        // Asks are sorted descending (worst to best), but we iterate to be safe
-                        let bestAsk = parseFloat(asks[0].price);
-                        for (let i = 1; i < asks.length; i++) {
-                            const p = parseFloat(asks[i].price);
-                            if (p < bestAsk) bestAsk = p;
-                        }
-
-                        price = (bestBid + bestAsk) / 2;
-                    }
-
-                    if (price !== null && tokenId) {
-                        this.store.updatePrice(tokenId, price, new Date());
-                    }
+                if (tokenId && !isNaN(price)) {
+                    this.store.updatePrice(tokenId, price, new Date());
+                    this.updateCount++;
+                    logger.debug(`Price update (Last Trade): ${tokenId} = ${price}`);
                 }
             }
+
+            // Handle "book" events (Order Book Updates)
+            else if (event.event_type === 'book') {
+                if (!event.asset_id) continue;
+                const tokenId = String(event.asset_id); // Ensure string
+
+                // If we receive book updates, we can derive price. Needs parsing.
+                // Let's use the midpoint of best bid/ask
+
+                let price: number | null = null;
+                const bids = event.bids || [];
+                const asks = event.asks || [];
+
+                if (bids.length > 0 && asks.length > 0) {
+                    // Find Best Bid (Highest Price)
+                    // Bids are sorted ascending (worst to best), but we iterate to be safe
+                    let bestBid = parseFloat(bids[0].price);
+                    for (let i = 1; i < bids.length; i++) {
+                        const p = parseFloat(bids[i].price);
+                        if (p > bestBid) bestBid = p;
+                    }
+
+                    // Find Best Ask (Lowest Price)
+                    // Asks are sorted descending (worst to best), but we iterate to be safe
+                    let bestAsk = parseFloat(asks[0].price);
+                    for (let i = 1; i < asks.length; i++) {
+                        const p = parseFloat(asks[i].price);
+                        if (p < bestAsk) bestAsk = p;
+                    }
+
+                    price = (bestBid + bestAsk) / 2;
+                }
+
+                if (price !== null && tokenId) {
+                    this.store.updatePrice(tokenId, price, new Date());
+                    this.updateCount++;
+                    // Reduce log spam for book updates
+                    // logger.debug(`Price update (Book Midpoint): ${tokenId} = ${price}`);
+                }
+            }
+             else {
+                 logger.debug(`WebSocket ignored event type: ${event.event_type}`);
+             }
         }
     }
 
@@ -217,6 +246,7 @@ export class PriceTracker {
     stop(): void {
         if (this.scanInterval) clearInterval(this.scanInterval);
         if (this.pingInterval) clearInterval(this.pingInterval);
+        if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
         if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
         this.ws?.close();
     }
