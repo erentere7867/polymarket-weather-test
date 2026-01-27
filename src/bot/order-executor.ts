@@ -16,7 +16,7 @@ interface ExecutionResult {
 }
 
 // Cooldown period to prevent duplicate trades on same market (ms)
-const TRADE_COOLDOWN_MS = 60000; // 60 seconds
+const TRADE_COOLDOWN_MS = 10000; // 10 seconds (AGGRESSIVE)
 
 export class OrderExecutor {
     private tradingClient: TradingClient;
@@ -60,7 +60,7 @@ export class OrderExecutor {
             // If the market moved significantly between detection and execution, ABORT.
             if (opportunity.snapshotPrice !== undefined) {
                 const diff = Math.abs(price - opportunity.snapshotPrice);
-                if (diff > 0.05) { // 5 cent tolerance
+                if (diff > 0.10) { // 10 cent tolerance (AGGRESSIVE)
                     logger.error(`🚨 PRICE SLIPPAGE ABORT: Snapshot ${opportunity.snapshotPrice} -> Current ${price}. Market moved too fast.`);
                     return { opportunity, executed: false, error: 'Price slippage abort' };
                 }
@@ -71,14 +71,14 @@ export class OrderExecutor {
             const existingPos = this.positions.get(tokenId);
             if (existingPos && existingPos.size > 1) { // Ignore dust
                 // If current price is significantly worse than entry, SKIP
-                // "Significantly changed" = > 5 cents or > 10% worse
+                // "Significantly changed" = > 15 cents or > 30% worse (AGGRESSIVE)
                 const priceDiff = price - existingPos.avgPrice;
                 const priceRatio = price / existingPos.avgPrice;
 
                 // Thresholds:
-                // 1. Absolute diff > 0.05 (5 cents)
-                // 2. Relative diff > 10% (1.10)
-                const isSignificantlyWorse = priceDiff > 0.05 || priceRatio > 1.10;
+                // 1. Absolute diff > 0.15 (15 cents)
+                // 2. Relative diff > 30% (1.30)
+                const isSignificantlyWorse = priceDiff > 0.15 || priceRatio > 1.30;
 
                 if (isSignificantlyWorse) {
                     const msg = `Skipping trade: Price chased significantly ($${existingPos.avgPrice.toFixed(2)} -> $${price.toFixed(2)})`;

@@ -20,8 +20,8 @@ import { logger } from '../logger.js';
 const MAX_CHANGE_AGE_MS = 15000;
 
 // Minimum change threshold to trigger detection
-// AGGRESSIVE: 1.5 sigma = more opportunities, slightly lower confidence
-const MIN_SIGMA_FOR_ARBITRAGE = 1.5;
+// AGGRESSIVE: 0.25 sigma (down from 1.5) to catch small forecast movements
+const MIN_SIGMA_FOR_ARBITRAGE = 0.25;
 
 export class SpeedArbitrageStrategy {
     private store: DataStore;
@@ -62,7 +62,7 @@ export class SpeedArbitrageStrategy {
 
         // Allow re-entry only if forecast value changed significantly (new opportunity)
         const forecastDiff = Math.abs(currentForecastValue - captured.forecastValue);
-        const significantChange = forecastDiff >= 1.0; // 1 degree or 1 inch = new opportunity
+        const significantChange = forecastDiff >= 0.1; // 0.1 degree or 0.1 inch = new opportunity (AGGRESSIVE)
 
         if (significantChange) {
             // New forecast value! Clear the captured flag
