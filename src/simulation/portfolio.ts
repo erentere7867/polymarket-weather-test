@@ -64,6 +64,10 @@ export class PortfolioSimulator {
     private startingCash: number;
     private cash: number;
     private positions: Map<string, SimulatedPosition> = new Map();
+    // Optimization: Index positions by token ID for O(1) lookup during updates
+    private positionsByToken: Map<string, Set<string>> = new Map();
+    // Optimization: Cache total position value to avoid O(N) iteration
+    private totalPositionValue: number = 0;
     private closedPositions: SimulatedPosition[] = [];
     private tradeHistory: TradeRecord[] = [];
     private peakValue: number;
@@ -157,6 +161,15 @@ export class PortfolioSimulator {
         this.cash -= actualCost;
         this.positions.set(position.id, position);
 
+        // Update index
+        if (!this.positionsByToken.has(position.tokenId)) {
+            this.positionsByToken.set(position.tokenId, new Set());
+        }
+        this.positionsByToken.get(position.tokenId)!.add(position.id);
+
+        // Update value cache
+        this.totalPositionValue += position.shares * position.currentPrice;
+
         // Record trade
         this.tradeHistory.push({
             id: `trade_${Date.now()}`,
@@ -188,8 +201,13 @@ export class PortfolioSimulator {
         const position = this.positions.get(positionId);
         if (!position || position.status !== 'open') return;
 
+        const oldPrice = position.currentPrice;
         position.currentPrice = newPrice;
         position.unrealizedPnL = (newPrice - position.entryPrice) * position.shares;
+
+        // Update value cache
+        this.totalPositionValue += (newPrice - oldPrice) * position.shares;
+
         this.updateDrawdown();
     }
 
@@ -197,8 +215,10 @@ export class PortfolioSimulator {
      * Update all positions by token ID
      */
     updatePriceByToken(tokenId: string, newPrice: number): void {
-        for (const [id, position] of this.positions) {
-            if (position.tokenId === tokenId && position.status === 'open') {
+        // Optimization: Use index to find positions
+        const positionIds = this.positionsByToken.get(tokenId);
+        if (positionIds) {
+            for (const id of positionIds) {
                 this.updatePositionPrice(id, newPrice);
             }
         }
@@ -223,6 +243,18 @@ export class PortfolioSimulator {
 
         // Add cash back
         this.cash += exitValue;
+
+        // Remove from index
+        const tokenPositions = this.positionsByToken.get(position.tokenId);
+        if (tokenPositions) {
+            tokenPositions.delete(positionId);
+            if (tokenPositions.size === 0) {
+                this.positionsByToken.delete(position.tokenId);
+            }
+        }
+
+        // Update value cache
+        this.totalPositionValue -= position.shares * position.currentPrice;
 
         // Move to closed positions
         this.closedPositions.push(position);
@@ -315,13 +347,8 @@ export class PortfolioSimulator {
      * Get total portfolio value
      */
     getTotalValue(): number {
-        let positionValue = 0;
-        for (const position of this.positions.values()) {
-            if (position.status === 'open') {
-                positionValue += position.shares * position.currentPrice;
-            }
-        }
-        return this.cash + positionValue;
+        // Optimization: Use cached value
+        return this.cash + this.totalPositionValue;
     }
 
     /**
