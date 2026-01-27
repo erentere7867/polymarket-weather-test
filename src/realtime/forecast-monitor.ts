@@ -294,7 +294,9 @@ export class ForecastMonitor {
 
                 // Track when the change occurred
                 // If changed now, use current time. Otherwise, keep previous change time
-                const changeTimestamp = valueChanged ? now : (previousChangeTimestamp || now);
+                // FIX: If no previous timestamp (startup), assume data is old (Date(0)) to prevent
+                // firing speed arbitrage on initial load.
+                const changeTimestamp = valueChanged ? now : (previousChangeTimestamp || new Date(0));
 
                 if (valueChanged) {
                     logger.info(`⚡ FORECAST CHANGED for ${city} (${market.metricType})`, {
