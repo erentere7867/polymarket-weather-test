@@ -38,6 +38,7 @@ export class BotManager {
     private priceTracker: PriceTracker;
     private speedArbitrageStrategy: SpeedArbitrageStrategy;
     private speedLoopInterval: NodeJS.Timeout | null = null;
+    private isProcessingSpeedLoop: boolean = false;
 
     private isRunning: boolean = false;
     private stats: BotStats;
@@ -311,6 +312,12 @@ export class BotManager {
         this.speedLoopInterval = setInterval(async () => {
             if (!this.isRunning) return;
 
+            // Prevent overlap: If previous loop is still running, skip this tick
+            if (this.isProcessingSpeedLoop) {
+                return;
+            }
+            this.isProcessingSpeedLoop = true;
+
             try {
                 // 1. Detect Opportunities
                 const signals = this.speedArbitrageStrategy.detectOpportunities();
@@ -364,6 +371,8 @@ export class BotManager {
 
             } catch (error) {
                 logger.error('Error in Speed Loop', { error: (error as Error).message });
+            } finally {
+                this.isProcessingSpeedLoop = false;
             }
         }, 1000); // Check every 1 second
     }

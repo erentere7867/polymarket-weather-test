@@ -36,7 +36,7 @@ export class ExitOptimizer {
 
     // Configuration
     private takeProfitThreshold: number = 0.05; // 5% - aggressive micro-profits
-    private stopLossThreshold: number = -0.10;  // -10%
+    private stopLossThreshold: number = -0.30;  // -30% (relaxed to handle spread)
     private timeLimitMs: number = 24 * 60 * 60 * 1000; // 24 hours max hold
     private momentumWindowMs: number = 60 * 1000; // 1 minute window for momentum
 

@@ -28,6 +28,10 @@ export class SimulationRunner {
     private exitOptimizer: ExitOptimizer;
     private marketModel: MarketModel;
 
+    // Cooldown tracking for closed markets
+    private recentlyClosedMarkets: Map<string, number> = new Map(); // MarketId -> Timestamp
+    private readonly EXIT_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
+
     private isRunning: boolean = false;
     private cycles: number = 0;
     private maxCycles: number;
@@ -96,6 +100,17 @@ export class SimulationRunner {
             const state = this.store.getMarketState(signal.marketId);
             if (!state) continue;
 
+            // Check Exit Cooldown
+            const lastClosed = this.recentlyClosedMarkets.get(signal.marketId);
+            if (lastClosed) {
+                if (Date.now() - lastClosed < this.EXIT_COOLDOWN_MS) {
+                    // logger.debug(`Skipping re-entry for ${signal.marketId} (Cooldown)`);
+                    continue;
+                } else {
+                    this.recentlyClosedMarkets.delete(signal.marketId);
+                }
+            }
+
             const size = signal.size;
 
             if (size < 10) continue; // Too small
@@ -145,6 +160,8 @@ export class SimulationRunner {
 
             if (exitSignal.shouldExit) {
                 this.simulator.closePosition(pos.id, pos.currentPrice, exitSignal.reason);
+                this.recentlyClosedMarkets.set(pos.marketId, Date.now());
+                logger.info(`🚫 Cooldown triggered for ${pos.marketId} (15m)`);
             }
         }
 
