@@ -10,7 +10,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 // Minimum forecast change to allow re-entry on a captured opportunity
-const SIGNIFICANT_FORECAST_CHANGE = 1.0; // 1 degree or 1 inch
+const SIGNIFICANT_FORECAST_CHANGE = 0.1; // 0.1 degree or 0.1 inch (AGGRESSIVE)
 
 // Base uncertainty values (scale with days ahead)
 const BASE_UNCERTAINTY = {

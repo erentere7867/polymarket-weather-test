@@ -87,14 +87,14 @@ export const config: Config = {
     // Bot settings
     simulationMode: getEnvVarBool('SIMULATION_MODE', false),
     maxPositionSize: getEnvVarNumber('MAX_POSITION_SIZE', 50),
-    minEdgeThreshold: getEnvVarNumber('MIN_EDGE_THRESHOLD', 0.10),
+    minEdgeThreshold: getEnvVarNumber('MIN_EDGE_THRESHOLD', 0.02), // 2% edge (AGGRESSIVE)
     pollIntervalMs: getEnvVarNumber('POLL_INTERVAL_MS', 300000), // 5 minutes
     forecastPollIntervalMs: getEnvVarNumber('FORECAST_POLL_INTERVAL_MS', 10000), // 10 seconds for speed arbitrage
     multiSourcePollIntervalMs: getEnvVarNumber('MULTISOURCE_POLL_INTERVAL_MS', 5000), // 5 seconds default
     logLevel: getEnvVarOptional('LOG_LEVEL', 'info'),
 
     // Guaranteed outcome detection
-    certaintySigmaThreshold: getEnvVarNumber('CERTAINTY_SIGMA_THRESHOLD', 3.0), // 3 std devs = 99.87% certain
+    certaintySigmaThreshold: getEnvVarNumber('CERTAINTY_SIGMA_THRESHOLD', 1.5), // 1.5 std devs (AGGRESSIVE)
     guaranteedPositionMultiplier: getEnvVarNumber('GUARANTEED_POSITION_MULTIPLIER', 2.0), // 2x position for guaranteed
 };
 
