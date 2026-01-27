@@ -27,6 +27,7 @@ async function main(): Promise<void> {
             console.log(`Target Date: ${market.targetDate?.toISOString() || 'N/A'}`);
             console.log(`YES Price: ${(market.yesPrice * 100).toFixed(1)}%`);
             console.log(`NO Price: ${(market.noPrice * 100).toFixed(1)}%`);
+            console.log(`Outcomes: ${JSON.stringify(market.market.outcomes)}`);
             console.log(`YES Token: ${market.yesTokenId.substring(0, 20)}...`);
         }
 

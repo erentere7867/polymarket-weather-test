@@ -129,6 +129,24 @@ export class TradingClient {
     }
 
     /**
+     * Get best ask price for a token from the order book
+     * Returns null if no asks available
+     */
+    async getBestAsk(tokenId: string): Promise<number | null> {
+        try {
+            const book = await this.getOrderBook(tokenId);
+            if (!book.asks || book.asks.length === 0) {
+                return null;
+            }
+            // Asks are sorted ascending (lowest first)
+            return parseFloat(book.asks[0].price);
+        } catch (error) {
+            logger.warn('Failed to get best ask', { tokenId, error: (error as Error).message });
+            return null;
+        }
+    }
+
+    /**
      * Get market info (needed for order placement)
      */
     async getMarketInfo(tokenId: string): Promise<MarketInfo> {
