@@ -104,6 +104,12 @@ export class SpeedArbitrageStrategy {
                 continue;
             }
 
+            // Skip if this is the first data point (no previous value to compare change against)
+            // This prevents the bot from trading on "initial load" as if it were a fresh change
+            if (forecast.previousValue === undefined) {
+                continue;
+            }
+
             // Note: We removed "if (!forecast.valueChanged) continue"
             // We allow trading as long as the change is RECENT (within MAX_CHANGE_AGE_MS)
             // regardless of whether it happened in THIS specific cycle.
