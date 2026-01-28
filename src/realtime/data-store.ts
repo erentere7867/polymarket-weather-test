@@ -81,7 +81,11 @@ export class DataStore {
 
         // Prune history older than 60 minutes
         const cutoff = new Date(timestamp.getTime() - 60 * 60 * 1000);
-        historyObj.history = historyObj.history.filter(p => p.timestamp > cutoff);
+        // Optimization: Only run filter if the oldest point is actually expired
+        // This prevents O(N) memory allocation on every update
+        if (historyObj.history.length > 0 && historyObj.history[0].timestamp <= cutoff) {
+            historyObj.history = historyObj.history.filter(p => p.timestamp > cutoff);
+        }
 
         // Calculate velocity (price change per second over last minute)
         this.updateVelocity(historyObj);
@@ -90,15 +94,39 @@ export class DataStore {
     private updateVelocity(history: { history: PricePoint[], velocity: number }): void {
         const now = new Date();
         const oneMinuteAgo = new Date(now.getTime() - 60 * 1000);
+        const hist = history.history;
 
-        const recentPoints = history.history.filter(p => p.timestamp > oneMinuteAgo);
-        if (recentPoints.length < 2) {
+        // OPTIMIZATION: Replaced .filter() (O(N) allocation) with index search
+        // Find the start index of points within the 1-minute window
+        let validStartIndex = 0;
+        let found = false;
+        const limit = oneMinuteAgo.getTime();
+
+        // Search backwards because the window (1m) is much smaller than history (60m)
+        for (let i = hist.length - 1; i >= 0; i--) {
+            if (hist[i].timestamp.getTime() <= limit) {
+                // This point is too old. The NEXT point (i+1) is the first valid one.
+                validStartIndex = i + 1;
+                found = true;
+                break;
+            }
+        }
+
+        // If loop finished without finding an old point, all points are valid (index 0)
+        if (!found) {
+            validStartIndex = 0;
+        }
+
+        // Need at least 2 points to calculate velocity
+        // validStartIndex is the first valid index.
+        // If validStartIndex >= hist.length - 1, we have 0 or 1 valid point.
+        if (validStartIndex >= hist.length - 1) {
             history.velocity = 0;
             return;
         }
 
-        const first = recentPoints[0];
-        const last = recentPoints[recentPoints.length - 1];
+        const first = hist[validStartIndex];
+        const last = hist[hist.length - 1];
         const timeDiffSeconds = (last.timestamp.getTime() - first.timestamp.getTime()) / 1000;
 
         if (timeDiffSeconds > 0) {
