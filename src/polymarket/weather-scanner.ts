@@ -175,15 +175,25 @@ export class WeatherScanner {
         thresholdUnit?: 'F' | 'C' | 'inches';
         comparisonType?: 'above' | 'below' | 'equals' | 'range';
     } {
+        // Range check (between X and Y) - unsupported currently
+        if (text.includes('between')) {
+            return { metricType: 'unknown' };
+        }
+
         // Temperature high patterns
         // Matches: 7°C, 7 C, 7 degrees C, 7 deg C, 7°
         const highTempMatch = text.match(/(?:highest|high|maximum|max)\s*(?:temp|temperature)?[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
         if (highTempMatch) {
             // Check direction explicitly
             const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
-            const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least)\b/i);
+            const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least|reach|hit)\b/i);
             
-            // Default to 'above' (>=) if no direction specified, as "Will temp reach X" usually means X or higher
+            // STRICT MODE: Require explicit direction.
+            // If neither 'below' nor 'above/reach' is found, assume it's a specific bucket or ambiguous (return unknown).
+            if (!isBelow && !isAbove) {
+                return { metricType: 'unknown' };
+            }
+
             const comparisonType = isBelow ? 'below' : 'above';
 
             return {
@@ -219,11 +229,20 @@ export class WeatherScanner {
         // Just a temperature number
         const simpleTempMatch = text.match(/(?:temperature|temp)[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
         if (simpleTempMatch) {
+            // Check direction explicitly
+            const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
+            const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least|reach|hit)\b/i);
+
+            // STRICT MODE: Require explicit direction.
+            if (!isBelow && !isAbove) {
+                return { metricType: 'unknown' };
+            }
+
             return {
                 metricType: 'temperature_high',
                 threshold: parseInt(simpleTempMatch[1], 10),
                 thresholdUnit: (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
-                comparisonType: 'above',
+                comparisonType: isBelow ? 'below' : 'above',
             };
         }
 
