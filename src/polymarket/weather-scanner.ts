@@ -117,8 +117,17 @@ export class WeatherScanner {
         // Extract city
         const city = this.extractCity(fullText);
 
+        // Determine default unit based on city/country
+        let defaultUnit: 'F' | 'C' = 'F';
+        if (city) {
+            const cityData = findCity(city);
+            if (cityData && cityData.country !== 'US') {
+                defaultUnit = 'C';
+            }
+        }
+
         // Extract metric type and threshold - use QUESTION only to avoid Date matching in Title
-        const { metricType, threshold, thresholdUnit, comparisonType } = this.extractMetric(question);
+        const { metricType, threshold, thresholdUnit, comparisonType } = this.extractMetric(question, defaultUnit);
 
         // Extract target date
         const targetDate = this.extractDate(fullText, event);
@@ -169,7 +178,7 @@ export class WeatherScanner {
     /**
      * Extract weather metric type and threshold
      */
-    private extractMetric(text: string): {
+    private extractMetric(text: string, defaultUnit: 'F' | 'C' = 'F'): {
         metricType: ParsedWeatherMarket['metricType'];
         threshold?: number;
         thresholdUnit?: 'F' | 'C' | 'inches';
@@ -189,7 +198,7 @@ export class WeatherScanner {
             return {
                 metricType: 'temperature_high',
                 threshold: parseInt(highTempMatch[1], 10),
-                thresholdUnit: (highTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (highTempMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType,
             };
         }
@@ -200,7 +209,7 @@ export class WeatherScanner {
              return {
                 metricType: 'temperature_threshold',
                 threshold: parseInt(belowPrefixMatch[1], 10),
-                thresholdUnit: (belowPrefixMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (belowPrefixMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType: 'below',
             };
         }
@@ -211,7 +220,7 @@ export class WeatherScanner {
              return {
                 metricType: 'temperature_threshold',
                 threshold: parseInt(abovePrefixMatch[1], 10),
-                thresholdUnit: (abovePrefixMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (abovePrefixMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType: 'above',
             };
         }
@@ -222,7 +231,7 @@ export class WeatherScanner {
             return {
                 metricType: 'temperature_threshold',
                 threshold: parseInt(tempThresholdMatch[1], 10),
-                thresholdUnit: (tempThresholdMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (tempThresholdMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType: 'above',
             };
         }
@@ -233,7 +242,7 @@ export class WeatherScanner {
             return {
                 metricType: 'temperature_threshold',
                 threshold: parseInt(tempBelowMatch[1], 10),
-                thresholdUnit: (tempBelowMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (tempBelowMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType: 'below',
             };
         }
@@ -249,7 +258,7 @@ export class WeatherScanner {
             return {
                 metricType: 'temperature_high',
                 threshold: parseInt(simpleTempMatch[1], 10),
-                thresholdUnit: (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType: comparisonType,
             };
         }
