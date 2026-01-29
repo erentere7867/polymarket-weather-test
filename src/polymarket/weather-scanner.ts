@@ -175,6 +175,11 @@ export class WeatherScanner {
         thresholdUnit?: 'F' | 'C' | 'inches';
         comparisonType?: 'above' | 'below' | 'equals' | 'range';
     } {
+        // Range check (between X and Y) - unsupported currently
+        if (text.includes('between')) {
+            return { metricType: 'unknown' };
+        }
+
         // Temperature high patterns
         // Matches: 7°C, 7 C, 7 degrees C, 7 deg C, 7°
         const highTempMatch = text.match(/(?:highest|high|maximum|max)\s*(?:temp|temperature)?[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
