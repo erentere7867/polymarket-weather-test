@@ -186,9 +186,14 @@ export class WeatherScanner {
         if (highTempMatch) {
             // Check direction explicitly
             const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
-            const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least)\b/i);
+            const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least|reach|hit)\b/i);
             
-            // Default to 'above' (>=) if no direction specified, as "Will temp reach X" usually means X or higher
+            // STRICT MODE: Require explicit direction.
+            // If neither 'below' nor 'above/reach' is found, assume it's a specific bucket or ambiguous (return unknown).
+            if (!isBelow && !isAbove) {
+                return { metricType: 'unknown' };
+            }
+
             const comparisonType = isBelow ? 'below' : 'above';
 
             return {
@@ -224,11 +229,20 @@ export class WeatherScanner {
         // Just a temperature number
         const simpleTempMatch = text.match(/(?:temperature|temp)[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
         if (simpleTempMatch) {
+            // Check direction explicitly
+            const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
+            const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least|reach|hit)\b/i);
+
+            // STRICT MODE: Require explicit direction.
+            if (!isBelow && !isAbove) {
+                return { metricType: 'unknown' };
+            }
+
             return {
                 metricType: 'temperature_high',
                 threshold: parseInt(simpleTempMatch[1], 10),
                 thresholdUnit: (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
-                comparisonType: 'above',
+                comparisonType: isBelow ? 'below' : 'above',
             };
         }
 
