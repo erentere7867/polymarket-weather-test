@@ -117,8 +117,17 @@ export class WeatherScanner {
         // Extract city
         const city = this.extractCity(fullText);
 
+        // Determine default unit based on city/country
+        let defaultUnit: 'F' | 'C' = 'F';
+        if (city) {
+            const cityData = findCity(city);
+            if (cityData && cityData.country !== 'US') {
+                defaultUnit = 'C';
+            }
+        }
+
         // Extract metric type and threshold - use QUESTION only to avoid Date matching in Title
-        const { metricType, threshold, thresholdUnit, comparisonType } = this.extractMetric(question);
+        const { metricType, threshold, thresholdUnit, comparisonType } = this.extractMetric(question, defaultUnit);
 
         // Extract target date
         const targetDate = this.extractDate(fullText, event);
@@ -169,7 +178,7 @@ export class WeatherScanner {
     /**
      * Extract weather metric type and threshold
      */
-    private extractMetric(text: string): {
+    private extractMetric(text: string, defaultUnit: 'F' | 'C' = 'F'): {
         metricType: ParsedWeatherMarket['metricType'];
         threshold?: number;
         thresholdUnit?: 'F' | 'C' | 'inches';
@@ -189,8 +198,30 @@ export class WeatherScanner {
             return {
                 metricType: 'temperature_high',
                 threshold: parseInt(highTempMatch[1], 10),
-                thresholdUnit: (highTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (highTempMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType,
+            };
+        }
+
+        // "Below 30F" pattern (Prefix)
+        const belowPrefixMatch = text.match(/(?:below|under|less|lower)\s*(?:than\s*)?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
+        if (belowPrefixMatch) {
+             return {
+                metricType: 'temperature_threshold',
+                threshold: parseInt(belowPrefixMatch[1], 10),
+                thresholdUnit: (belowPrefixMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
+                comparisonType: 'below',
+            };
+        }
+
+        // "Above 30F" pattern (Prefix)
+        const abovePrefixMatch = text.match(/(?:above|higher|more|over|greater|exceeds?)\s*(?:than\s*)?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
+        if (abovePrefixMatch) {
+             return {
+                metricType: 'temperature_threshold',
+                threshold: parseInt(abovePrefixMatch[1], 10),
+                thresholdUnit: (abovePrefixMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
+                comparisonType: 'above',
             };
         }
 
@@ -200,7 +231,7 @@ export class WeatherScanner {
             return {
                 metricType: 'temperature_threshold',
                 threshold: parseInt(tempThresholdMatch[1], 10),
-                thresholdUnit: (tempThresholdMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (tempThresholdMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType: 'above',
             };
         }
@@ -211,7 +242,7 @@ export class WeatherScanner {
             return {
                 metricType: 'temperature_threshold',
                 threshold: parseInt(tempBelowMatch[1], 10),
-                thresholdUnit: (tempBelowMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (tempBelowMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType: 'below',
             };
         }
@@ -219,11 +250,16 @@ export class WeatherScanner {
         // Just a temperature number
         const simpleTempMatch = text.match(/(?:temperature|temp)[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
         if (simpleTempMatch) {
+            // Check direction explicitly in surrounding text
+            const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
+            // Default to 'above' (>=)
+            const comparisonType = isBelow ? 'below' : 'above';
+
             return {
                 metricType: 'temperature_high',
                 threshold: parseInt(simpleTempMatch[1], 10),
-                thresholdUnit: (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
-                comparisonType: 'above',
+                thresholdUnit: (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
+                comparisonType: comparisonType,
             };
         }
 
@@ -265,30 +301,44 @@ export class WeatherScanner {
     private extractDate(text: string, event: PolymarketEvent): Date | undefined {
         const now = new Date();
 
-        // Look for specific date mentions
-        // "January 24" or "Jan 24"
-        const monthDayMatch = text.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?/i);
+        const monthMap: { [key: string]: number } = {
+            'january': 0, 'jan': 0,
+            'february': 1, 'feb': 1,
+            'march': 2, 'mar': 2,
+            'april': 3, 'apr': 3,
+            'may': 4,
+            'june': 5, 'jun': 5,
+            'july': 6, 'jul': 6,
+            'august': 7, 'aug': 7,
+            'september': 8, 'sep': 8,
+            'october': 9, 'oct': 9,
+            'november': 10, 'nov': 10,
+            'december': 11, 'dec': 11,
+        };
+
+        const getMonthIndex = (s: string) => monthMap[s.toLowerCase().replace('.', '')];
+
+        // "January 24" or "Jan 24" or "Jan. 24"
+        const monthDayMatch = text.match(/(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?/i);
         if (monthDayMatch) {
-            const monthStr = monthDayMatch[1].toLowerCase();
+            const monthStr = monthDayMatch[1];
             const day = parseInt(monthDayMatch[2], 10);
             const year = monthDayMatch[3] ? parseInt(monthDayMatch[3], 10) : now.getFullYear();
 
-            const monthMap: { [key: string]: number } = {
-                'january': 0, 'jan': 0,
-                'february': 1, 'feb': 1,
-                'march': 2, 'mar': 2,
-                'april': 3, 'apr': 3,
-                'may': 4,
-                'june': 5, 'jun': 5,
-                'july': 6, 'jul': 6,
-                'august': 7, 'aug': 7,
-                'september': 8, 'sep': 8,
-                'october': 9, 'oct': 9,
-                'november': 10, 'nov': 10,
-                'december': 11, 'dec': 11,
-            };
+            const month = getMonthIndex(monthStr);
+            if (month !== undefined) {
+                return new Date(year, month, day);
+            }
+        }
 
-            const month = monthMap[monthStr];
+        // "24 Jan" or "24th of January"
+        const dayMonthMatch = text.match(/(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.?(?:\s*,?\s*(\d{4}))?/i);
+        if (dayMonthMatch) {
+            const day = parseInt(dayMonthMatch[1], 10);
+            const monthStr = dayMonthMatch[2];
+            const year = dayMonthMatch[3] ? parseInt(dayMonthMatch[3], 10) : now.getFullYear();
+
+            const month = getMonthIndex(monthStr);
             if (month !== undefined) {
                 return new Date(year, month, day);
             }
