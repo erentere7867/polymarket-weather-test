@@ -117,8 +117,8 @@ export class WeatherScanner {
         // Extract city
         const city = this.extractCity(fullText);
 
-        // Extract metric type and threshold
-        const { metricType, threshold, thresholdUnit, comparisonType } = this.extractMetric(fullText);
+        // Extract metric type and threshold - use QUESTION only to avoid Date matching in Title
+        const { metricType, threshold, thresholdUnit, comparisonType } = this.extractMetric(question);
 
         // Extract target date
         const targetDate = this.extractDate(fullText, event);
@@ -176,18 +176,26 @@ export class WeatherScanner {
         comparisonType?: 'above' | 'below' | 'equals' | 'range';
     } {
         // Temperature high patterns
-        const highTempMatch = text.match(/(?:highest|high|maximum|max)\s*(?:temp|temperature)?[^\d]*?(\d+)\s*°?([fc])?/i);
+        // Matches: 7°C, 7 C, 7 degrees C, 7 deg C, 7°
+        const highTempMatch = text.match(/(?:highest|high|maximum|max)\s*(?:temp|temperature)?[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
         if (highTempMatch) {
+            // Check direction explicitly
+            const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
+            const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least)\b/i);
+            
+            // Default to 'above' (>=) if no direction specified, as "Will temp reach X" usually means X or higher
+            const comparisonType = isBelow ? 'below' : 'above';
+
             return {
                 metricType: 'temperature_high',
                 threshold: parseInt(highTempMatch[1], 10),
                 thresholdUnit: (highTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
-                comparisonType: text.includes('above') || text.includes('exceed') || text.includes('over') ? 'above' : 'below',
+                comparisonType,
             };
         }
 
-        // Temperature threshold patterns
-        const tempThresholdMatch = text.match(/(\d+)\s*°?([fc])?\s*(?:or\s*)?(?:above|higher|more|over)/i);
+        // Temperature threshold patterns (e.g. "90°F or higher")
+        const tempThresholdMatch = text.match(/(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?\s*(?:or\s*)?(?:above|higher|more|over|greater)/i);
         if (tempThresholdMatch) {
             return {
                 metricType: 'temperature_threshold',
@@ -198,7 +206,7 @@ export class WeatherScanner {
         }
 
         // Temperature below patterns
-        const tempBelowMatch = text.match(/(\d+)\s*°?([fc])?\s*(?:or\s*)?(?:below|under|less)/i);
+        const tempBelowMatch = text.match(/(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?\s*(?:or\s*)?(?:below|under|less|lower)/i);
         if (tempBelowMatch) {
             return {
                 metricType: 'temperature_threshold',
@@ -209,7 +217,7 @@ export class WeatherScanner {
         }
 
         // Just a temperature number
-        const simpleTempMatch = text.match(/(?:temperature|temp)[^\d]*?(\d+)\s*°?([fc])?/i);
+        const simpleTempMatch = text.match(/(?:temperature|temp)[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
         if (simpleTempMatch) {
             return {
                 metricType: 'temperature_high',

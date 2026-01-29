@@ -1,10 +1,8 @@
 
 module.exports = {
     apps: [{
-        name: "polymarket-speed-bot",
-        script: "npx",
-        args: "tsx src/web/server.ts",
-        interpreter: "none", // Let npx handle execution
+        name: "polymarket-weather-bot",
+        script: "dist/index.js",
         instances: 1,
         autorestart: true,
         watch: false,

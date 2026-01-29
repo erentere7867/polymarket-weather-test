@@ -104,8 +104,12 @@ export class NOAAClient {
 
             logger.debug(`NOAA grid point resolved: ${locationName} -> ${gridId}/${gridX},${gridY}`);
             return result;
-        } catch (error) {
-            logger.error('Failed to get NOAA grid point', { coords, error: (error as Error).message });
+        } catch (error: any) {
+            if (error.response && error.response.status === 404) {
+                logger.warn(`Location not covered by NOAA (404): ${coords.lat}, ${coords.lon}`);
+            } else {
+                logger.error('Failed to get NOAA grid point', { coords, error: (error as Error).message });
+            }
             throw error;
         }
     }
@@ -124,6 +128,17 @@ export class NOAAClient {
                 const tempF = period.temperatureUnit === 'F' ? period.temperature : this.celsiusToFahrenheit(period.temperature);
                 const tempC = period.temperatureUnit === 'C' ? period.temperature : this.fahrenheitToCelsius(period.temperature);
 
+                const probPrecip = period.probabilityOfPrecipitation?.value ?? 0;
+                const precipType = this.detectPrecipType(period.shortForecast);
+                
+                // Estimate hourly snowfall if it's snowing
+                let snowfallInches = 0;
+                if (precipType === 'snow' && probPrecip > 30) {
+                    // Estimate rate then weight by probability (simple model)
+                    const rate = this.estimateSnowRate(period.shortForecast || '', tempF, probPrecip);
+                    snowfallInches = rate * (probPrecip / 100);
+                }
+
                 return {
                     timestamp: new Date(period.startTime),
                     temperatureF: tempF,
@@ -131,8 +146,9 @@ export class NOAAClient {
                     humidity: period.relativeHumidity?.value ?? undefined,
                     windSpeedMph: this.parseWindSpeed(period.windSpeed),
                     windDirection: period.windDirection,
-                    probabilityOfPrecipitation: period.probabilityOfPrecipitation?.value ?? 0,
-                    precipitationType: this.detectPrecipType(period.shortForecast),
+                    probabilityOfPrecipitation: probPrecip,
+                    precipitationType: precipType,
+                    snowfallInches: parseFloat(snowfallInches.toFixed(2)),
                     shortForecast: period.shortForecast,
                     isDaytime: period.isDaytime,
                 };

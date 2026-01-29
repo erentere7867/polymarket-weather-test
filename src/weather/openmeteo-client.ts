@@ -6,7 +6,7 @@
 
 import axios, { AxiosInstance } from 'axios';
 import { logger } from '../logger.js';
-import { Coordinates, WeatherData, HourlyForecast } from './types.js';
+import { Coordinates, WeatherData, HourlyForecast, IWeatherProvider } from './types.js';
 
 interface OpenMeteoResponse {
     latitude: number;
@@ -60,7 +60,8 @@ const WEATHER_CODE_MAP: { [key: number]: string } = {
     99: 'Thunderstorm with heavy hail',
 };
 
-export class OpenMeteoClient {
+export class OpenMeteoClient implements IWeatherProvider {
+    name = 'open-meteo';
     private client: AxiosInstance;
 
     constructor() {
@@ -68,6 +69,10 @@ export class OpenMeteoClient {
             baseURL: 'https://api.open-meteo.com/v1',
             timeout: 15000,
         });
+    }
+
+    isConfigured(): boolean {
+        return true; // No key required
     }
 
     /**
@@ -98,8 +103,23 @@ export class OpenMeteoClient {
             const data = response.data;
             const hourly: HourlyForecast[] = [];
 
+            // Debug log raw data
+            if (data.hourly && data.hourly.temperature_2m) {
+                logger.debug(`OpenMeteo Raw Data for ${coords.lat},${coords.lon}:`, {
+                    firstTime: data.hourly.time[0],
+                    firstTemp: data.hourly.temperature_2m[0],
+                    sampleTemps: data.hourly.temperature_2m.slice(0, 5),
+                    tempUnit: response.config.params.temperature_unit
+                });
+            } else {
+                logger.error(`OpenMeteo Raw Data Missing!`, { keys: Object.keys(data.hourly || {}) });
+            }
+
             for (let i = 0; i < data.hourly.time.length; i++) {
-                const timestamp = new Date(data.hourly.time[i]);
+                // Open-Meteo returns UTC by default (ISO 8601 without offset)
+                // We must append 'Z' to force UTC parsing, otherwise Date() assumes local time
+                const timeStr = data.hourly.time[i].endsWith('Z') ? data.hourly.time[i] : `${data.hourly.time[i]}Z`;
+                const timestamp = new Date(timeStr);
                 const hour = timestamp.getHours();
 
                 hourly.push({
@@ -118,11 +138,16 @@ export class OpenMeteoClient {
                 });
             }
 
+            // Debug log to verify time range
+            if (hourly.length > 0) {
+                logger.debug(`OpenMeteo fetched ${hourly.length} hours. Range: ${hourly[0].timestamp.toISOString()} to ${hourly[hourly.length-1].timestamp.toISOString()}`);
+            }
+
             return {
                 location: coords,
                 locationName: `${coords.lat.toFixed(2)}, ${coords.lon.toFixed(2)}`,
                 fetchedAt: new Date(),
-                source: 'openweather', // Using openweather as generic non-NOAA source
+                source: 'open-meteo',
                 hourly,
             };
         } catch (error) {
@@ -142,7 +167,10 @@ export class OpenMeteoClient {
             .filter(h => h.timestamp.toISOString().split('T')[0] === targetDate)
             .map(h => h.temperatureF);
 
-        if (dayTemps.length === 0) return null;
+        if (dayTemps.length === 0) {
+            logger.warn(`OpenMeteo: No temp data for ${targetDate} at ${coords.lat},${coords.lon}. Available range: ${weather.hourly[0]?.timestamp.toISOString()} - ${weather.hourly[weather.hourly.length-1]?.timestamp.toISOString()}`);
+            return null;
+        }
         return Math.max(...dayTemps);
     }
 
@@ -164,7 +192,10 @@ export class OpenMeteoClient {
             const data = response.data;
 
             for (let i = 0; i < data.hourly.time.length; i++) {
-                const timestamp = new Date(data.hourly.time[i]);
+                // Ensure UTC parsing here as well
+                const timeStr = data.hourly.time[i].endsWith('Z') ? data.hourly.time[i] : `${data.hourly.time[i]}Z`;
+                const timestamp = new Date(timeStr);
+                
                 if (timestamp >= startDate && timestamp <= endDate) {
                     // Snowfall is in cm, convert to inches
                     totalSnow += (data.hourly.snowfall[i] || 0) / 2.54;

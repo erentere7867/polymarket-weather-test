@@ -22,6 +22,11 @@ export interface Config {
 
     // Weather APIs
     openWeatherApiKey: string;
+    tomorrowApiKey: string;
+    weatherApiKey: string;
+    weatherbitApiKey: string;
+    visualCrossingApiKey: string;
+    meteosourceApiKey: string;
     noaaHost: string;
 
     // Bot settings
@@ -69,13 +74,18 @@ export const config: Config = {
 
     // Weather APIs
     openWeatherApiKey: getEnvVarOptional('OPENWEATHER_API_KEY', ''),
+    tomorrowApiKey: getEnvVarOptional('TOMORROW_API_KEY', ''),
+    weatherApiKey: getEnvVarOptional('WEATHERAPI_KEY', ''),
+    weatherbitApiKey: getEnvVarOptional('WEATHERBIT_API_KEY', ''),
+    visualCrossingApiKey: getEnvVarOptional('VISUALCROSSING_API_KEY', ''),
+    meteosourceApiKey: getEnvVarOptional('METEOSOURCE_API_KEY', ''),
     noaaHost: 'https://api.weather.gov',
 
     // Bot settings
     simulationMode: getEnvVarBool('SIMULATION_MODE', false),
     maxPositionSize: getEnvVarNumber('MAX_POSITION_SIZE', 10),
     minEdgeThreshold: getEnvVarNumber('MIN_EDGE_THRESHOLD', 0.10),
-    pollIntervalMs: getEnvVarNumber('POLL_INTERVAL_MS', 300000), // 5 minutes
+    pollIntervalMs: getEnvVarNumber('POLL_INTERVAL_MS', 60000), // 1 minute
     forecastPollIntervalMs: getEnvVarNumber('FORECAST_POLL_INTERVAL_MS', 30000), // 30 seconds for speed arbitrage
     logLevel: getEnvVarOptional('LOG_LEVEL', 'info'),
 

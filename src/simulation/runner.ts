@@ -31,6 +31,7 @@ export class SimulationRunner {
     private isRunning: boolean = false;
     private cycles: number = 0;
     private maxCycles: number;
+    private lastLogTime: number = 0;
 
     constructor(startingCapital: number = 1000000, maxCycles: number = 20) {
         // Initialize v2 Engine
@@ -69,8 +70,8 @@ export class SimulationRunner {
             this.store.addMarket(market);
         }
 
-        // 2. Connect to Real-Time Data (Polling)
-        await this.priceTracker.start(this.scanner, 3000); // 3s polling
+        // 2. Connect to Real-Time Data
+        await this.priceTracker.start(this.scanner, 60000); // 60s scan for new markets
         this.forecastMonitor.start();
 
         // Wait a bit for initial data to populate
@@ -163,10 +164,57 @@ export class SimulationRunner {
             }
         }
 
+        // 5. Log Forecast Status every 10 minutes
+        const now = Date.now();
+        if (now - this.lastLogTime >= 600000) { // 10 minutes
+            this.logForecastStatus();
+            this.lastLogTime = now;
+        }
+
+        /*
         // 5. Print Stats every 5 cycles
         if (this.cycles % 5 === 0) {
             this.simulator.printSummary();
         }
+        */
+    }
+
+    private logForecastStatus(): void {
+        const markets = this.store.getAllMarkets();
+        logger.info('--- ☁️ 10-Minute Forecast Update ☁️ ---');
+        
+        // Group by city for cleaner output
+        const cityGroups = new Map<string, Array<{metric: string, value: number, changed: Date, date: string, threshold?: number}>>();
+
+        for (const market of markets) {
+            const state = this.store.getMarketState(market.market.id);
+            if (!state?.lastForecast) continue;
+
+            const city = market.city;
+            if (!city) continue;
+
+            if (!cityGroups.has(city)) {
+                cityGroups.set(city, []);
+            }
+
+            const dateStr = market.targetDate ? new Date(market.targetDate).toLocaleDateString() : 'No Date';
+
+            cityGroups.get(city)?.push({
+                metric: market.metricType,
+                value: state.lastForecast.forecastValue,
+                changed: state.lastForecast.changeTimestamp,
+                date: dateStr,
+                threshold: market.threshold
+            });
+        }
+
+        for (const [city, items] of cityGroups) {
+            logger.info(`📍 ${city}:`);
+            for (const item of items) {
+                logger.info(`   - ${item.date} | ${item.metric}: ${item.value.toFixed(1)} (Threshold: ${item.threshold ?? 'N/A'}) (Last Change: ${item.changed.toLocaleTimeString()})`);
+            }
+        }
+        logger.info('----------------------------------------');
     }
 
     private updatePortfolioPrices(): void {

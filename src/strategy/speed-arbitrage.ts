@@ -94,29 +94,25 @@ export class SpeedArbitrageStrategy {
             // =====================================================
             // SPEED ARBITRAGE CHECK #1: Did forecast change recently?
             // =====================================================
+            // =====================================================
+            // STRATEGY BRANCHING: Speed vs Value
+            // =====================================================
             const forecast = state.lastForecast;
-
-            // Skip if forecast hasn't changed
-            if (!forecast.valueChanged) {
-                continue;
-            }
+            const changeAge = now - forecast.changeTimestamp.getTime();
+            const isSpeedArb = forecast.valueChanged && (changeAge <= MAX_CHANGE_AGE_MS);
 
             // =====================================================
-            // SPEED ARBITRAGE CHECK #1.5: Have we already captured this opportunity?
+            // CHECK #1: Have we already captured this opportunity?
             // =====================================================
             if (this.isOpportunityCaptured(market.market.id, forecast.forecastValue)) {
-                logger.debug(`⏭️ Skipping already captured: ${market.market.question.substring(0, 40)}...`);
-                continue;
-            }
-
-            // Skip if the change is too old (market has likely caught up)
-            const changeAge = now - forecast.changeTimestamp.getTime();
-            if (changeAge > MAX_CHANGE_AGE_MS) {
+                // If it's a speed arb (fresh change), maybe we want to double down? 
+                // For now, safety first: strictly respect capture flag.
+                // logger.debug(`⏭️ Skipping already captured: ${market.market.question.substring(0, 40)}...`);
                 continue;
             }
 
             // =====================================================
-            // SPEED ARBITRAGE CHECK #2: Is market price stale?
+            // CHECK #2: Market Reaction (Speed Arb only)
             // =====================================================
             const priceYesPoint = state.priceHistory.yes.history.length > 0
                 ? state.priceHistory.yes.history[state.priceHistory.yes.history.length - 1]
@@ -124,53 +120,47 @@ export class SpeedArbitrageStrategy {
 
             if (!priceYesPoint) continue;
 
-            // Check if price was updated AFTER the forecast change
-            // If price updated after change, market has already reacted - no edge
-            if (priceYesPoint.timestamp.getTime() > forecast.changeTimestamp.getTime()) {
-                // Price updated after forecast - check if it moved TOWARDS the new forecast probability
-                const priceBeforeChange = this.findPriceBeforeChange(state.priceHistory.yes.history, forecast.changeTimestamp);
-                const currentPrice = priceYesPoint.price;
+            const priceYes = priceYesPoint.price;
+            const priceNo = 1 - priceYes;
 
-                if (priceBeforeChange !== null) {
-                    // Determine expected direction: if forecast > threshold, price should go up (for 'above' markets)
-                    const diff = forecast.forecastValue - (market.threshold || 0);
-                    let expectedProbability: number;
-                    if (market.comparisonType === 'above') {
-                        expectedProbability = diff > 0 ? 1.0 : 0.0;
-                    } else {
-                        expectedProbability = diff < 0 ? 1.0 : 0.0;
-                    }
-
-                    const priceMovedTowards = (expectedProbability > 0.5 && currentPrice > priceBeforeChange) ||
-                        (expectedProbability < 0.5 && currentPrice < priceBeforeChange);
-                    const significantMove = Math.abs(currentPrice - priceBeforeChange) > 0.05;
-
-                    if (priceMovedTowards && significantMove) {
-                        // Market already reacted in the correct direction, skip
-                        continue;
+            if (isSpeedArb) {
+                // For speed arb, ensure market hasn't already reacted to THIS change
+                if (priceYesPoint.timestamp.getTime() > forecast.changeTimestamp.getTime()) {
+                    const priceBeforeChange = this.findPriceBeforeChange(state.priceHistory.yes.history, forecast.changeTimestamp);
+                    
+                    if (priceBeforeChange !== null) {
+                        const diff = forecast.forecastValue - (market.threshold || 0);
+                        const expectedProb = market.comparisonType === 'above' ? (diff > 0 ? 1 : 0) : (diff < 0 ? 1 : 0);
+                        const priceMovedTowards = (expectedProb > 0.5 && priceYes > priceBeforeChange) ||
+                                                (expectedProb < 0.5 && priceYes < priceBeforeChange);
+                        
+                        if (priceMovedTowards && Math.abs(priceYes - priceBeforeChange) > 0.05) {
+                            continue; // Market beat us
+                        }
                     }
                 }
             }
 
-            const priceYes = priceYesPoint.price;
-            const priceNo = 1 - priceYes;
-
             // =====================================================
-            // SPEED ARBITRAGE CHECK #3: Is this a guaranteed outcome?
+            // CHECK #3: Certainty Threshold (Dynamic Sigma)
             // =====================================================
-            // Calculate how far the new forecast is from the threshold
-            const threshold = market.threshold;
+            let threshold = market.threshold;
             if (threshold === undefined) continue;
+
+            // Normalize threshold to F if needed
+            if (market.thresholdUnit === 'C') {
+                threshold = (threshold * 9 / 5) + 32;
+            }
 
             let uncertainty: number;
             switch (market.metricType) {
                 case 'temperature_high':
                 case 'temperature_low':
                 case 'temperature_threshold':
-                    uncertainty = 3; // °F
+                    uncertainty = 3; 
                     break;
                 case 'snowfall':
-                    uncertainty = 2; // inches
+                    uncertainty = 2;
                     break;
                 default:
                     uncertainty = 5;
@@ -178,8 +168,12 @@ export class SpeedArbitrageStrategy {
 
             const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
 
-            // Only trade if forecast is strongly indicating one direction
-            if (sigma < MIN_SIGMA_FOR_ARBITRAGE) {
+            // DYNAMIC THRESHOLD:
+            // Speed Arb (Fresh News): Accept 1.5 sigma (aggressive)
+            // Value Arb (Stale News): Require 2.5 sigma (conservative, deep value)
+            const requiredSigma = isSpeedArb ? MIN_SIGMA_FOR_ARBITRAGE : 2.5;
+
+            if (sigma < requiredSigma) {
                 continue;
             }
 
@@ -203,16 +197,17 @@ export class SpeedArbitrageStrategy {
                 priceNo
             );
 
-            if (edge && Math.abs(edge.adjustedEdge) >= 0.05) {
-                // Log the speed arbitrage opportunity
-                logger.info(`🚀 SPEED ARBITRAGE OPPORTUNITY:`, {
+            // Require slightly higher edge for stale data to cover spread/risk
+            const minEdge = isSpeedArb ? 0.05 : 0.10;
+
+            if (edge && Math.abs(edge.adjustedEdge) >= minEdge) {
+                // Log the opportunity
+                logger.info(isSpeedArb ? `🚀 SPEED ARB OPPORTUNITY:` : `💎 VALUE ARB OPPORTUNITY:`, {
                     market: market.market.question.substring(0, 50),
-                    forecastChange: `${forecast.previousValue?.toFixed(1)} → ${forecast.forecastValue.toFixed(1)}`,
-                    changeAgeSeconds: (changeAge / 1000).toFixed(1),
+                    forecast: `${forecast.forecastValue.toFixed(1)} (Threshold: ${threshold})`,
                     sigma: sigma.toFixed(1),
                     edge: (edge.adjustedEdge * 100).toFixed(1) + '%',
-                    side: edge.side,
-                    marketPrice: (priceYes * 100).toFixed(1) + '%',
+                    price: (priceYes * 100).toFixed(1) + '%',
                 });
 
                 const signal = this.entryOptimizer.optimizeEntry(edge);

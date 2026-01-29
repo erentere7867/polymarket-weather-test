@@ -1,0 +1,47 @@
+# WebSocket Implementation Details in PolyWeather
+
+This project implements a WebSocket **client** to consume real-time market data from the Polymarket API. It does not currently implement a WebSocket server for the dashboard.
+
+## 1. Core Technology
+- **Library:** `ws` (Node.js WebSocket library)
+- **File:** `src/services/polymarket/polymarket-service.ts`
+- **Role:** Client (connects to external API)
+
+## 2. Connection Setup
+The `PolymarketService` class manages the WebSocket connection lifecycle.
+
+- **Initialization:** The `connectWs()` method creates a new `WebSocket` instance using the URL from the config (`wss://ws-subscriptions-clob.polymarket.com/ws/market`).
+- **Reconnection Logic:** If the connection closes (`close` event), the service waits 5 seconds and attempts to reconnect automatically.
+
+## 3. Keep-Alive Mechanism (Heartbeat)
+To prevent the connection from timing out, the service implements a dual ping/pong strategy:
+1.  **Frame-based:** Uses `ws.ping()` every 5 seconds to send standard WebSocket ping frames.
+2.  **Message-based:** Handles text-based "ping" messages from the server and responds with "pong" (and handles JSON-wrapped pings).
+
+## 4. Subscriptions
+The service dynamically subscribes to market data for specific assets (tokens).
+
+- **Method:** `subscribeToPrices(assetIds)`
+- **Payload:** Sends a JSON message:
+  ```json
+  {
+    "assets_ids": ["token_id_1", "token_id_2"],
+    "operation": "subscribe"
+  }
+  ```
+- **Trigger:** Subscriptions occur automatically after "market discovery" (finding relevant weather markets via HTTP API) or upon reconnection.
+
+## 5. Message Handling
+Incoming messages are processed in `handleMessage(data)`:
+
+1.  **Parsing:** Converts raw data to string/JSON.
+2.  **Filtering:** Ignores non-essential messages or errors (like "INVALID OPERATION").
+3.  **Event Parsing:** Listens specifically for `event_type === 'book'`.
+4.  **Internal Dispatch:** When a book update is received (bids/asks), it emits an internal `priceUpdate` event.
+
+## 6. Architecture Flow
+1.  `PolymarketService` connects to WebSocket.
+2.  It discovers markets via HTTP and subscribes to their IDs via WebSocket.
+3.  Polymarket sends real-time order book updates.
+4.  `PolymarketService` emits `priceUpdate`.
+5.  (Presumably) `TradingEngine` or other components listen to `priceUpdate` to make trading decisions.

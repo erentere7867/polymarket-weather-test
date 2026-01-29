@@ -7,7 +7,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { Coordinates, WeatherData, HourlyForecast, DailyForecast } from './types.js';
+import { Coordinates, WeatherData, HourlyForecast, IWeatherProvider } from './types.js';
 
 interface OWMCurrentResponse {
     coord: { lon: number; lat: number };
@@ -47,43 +47,8 @@ interface OWMForecastResponse {
     };
 }
 
-interface OWMOneCallResponse {
-    lat: number;
-    lon: number;
-    timezone: string;
-    current: {
-        dt: number;
-        temp: number;
-        feels_like: number;
-        humidity: number;
-        wind_speed: number;
-        weather: Array<{ id: number; main: string; description: string }>;
-    };
-    hourly: Array<{
-        dt: number;
-        temp: number;
-        feels_like: number;
-        humidity: number;
-        wind_speed: number;
-        weather: Array<{ id: number; main: string; description: string }>;
-        pop: number;
-        snow?: { '1h': number };
-        rain?: { '1h': number };
-    }>;
-    daily: Array<{
-        dt: number;
-        temp: { day: number; min: number; max: number; night: number };
-        feels_like: { day: number; night: number };
-        humidity: number;
-        wind_speed: number;
-        weather: Array<{ id: number; main: string; description: string }>;
-        pop: number;
-        snow?: number;
-        rain?: number;
-    }>;
-}
-
-export class OpenWeatherClient {
+export class OpenWeatherClient implements IWeatherProvider {
+    name = 'openweather';
     private client: AxiosInstance;
     private apiKey: string;
 
@@ -105,7 +70,7 @@ export class OpenWeatherClient {
     /**
      * Fetch 5-day/3-hour forecast (free tier)
      */
-    async getForecast(coords: Coordinates): Promise<WeatherData> {
+    async getHourlyForecast(coords: Coordinates): Promise<WeatherData> {
         if (!this.isConfigured()) {
             throw new Error('OpenWeatherMap API key not configured');
         }
@@ -124,6 +89,15 @@ export class OpenWeatherClient {
                 const timestamp = new Date(item.dt * 1000);
                 const hour = timestamp.getHours();
 
+                // 3h snow accumulation converted to hourly rate approx
+                const snow3h = item.snow?.['3h'] || 0; // mm? No, units=imperial means inches?
+                // OpenWeatherMap docs: "Precipitation volume for the last 3 hours, mm" even with units=imperial?
+                // Docs say: "Units of measurement: ... imperial: ... snow volume: mm".
+                // Wait, docs usually say mm for precip regardless of units in some versions, but let's check standard.
+                // Standard: "Precipitation volume ... mm".
+                // So snow is likely mm. Convert to inches. 1 inch = 25.4 mm.
+                const snowInches = (snow3h / 25.4) / 3; // inches per hour
+
                 return {
                     timestamp,
                     temperatureF: Math.round(item.main.temp),
@@ -134,6 +108,7 @@ export class OpenWeatherClient {
                     windSpeedMph: Math.round(item.wind.speed),
                     probabilityOfPrecipitation: Math.round(item.pop * 100),
                     precipitationType: this.detectPrecipType(item.weather[0]?.main, item.snow, item.rain),
+                    snowfallInches: parseFloat(snowInches.toFixed(2)),
                     shortForecast: item.weather[0]?.description || '',
                     isDaytime: hour >= 6 && hour < 18,
                 };
@@ -153,52 +128,10 @@ export class OpenWeatherClient {
     }
 
     /**
-     * Get expected high temperature for a specific date
+     * Alias for compatibility if needed, though interface uses getHourlyForecast
      */
-    async getExpectedHigh(coords: Coordinates, date: Date): Promise<number | null> {
-        const weather = await this.getForecast(coords);
-        const targetDate = date.toISOString().split('T')[0];
-
-        const dayTemps = weather.hourly
-            .filter(h => h.timestamp.toISOString().split('T')[0] === targetDate && h.isDaytime)
-            .map(h => h.temperatureF);
-
-        if (dayTemps.length === 0) return null;
-        return Math.max(...dayTemps);
-    }
-
-    /**
-     * Get expected low temperature for a specific date
-     */
-    async getExpectedLow(coords: Coordinates, date: Date): Promise<number | null> {
-        const weather = await this.getForecast(coords);
-        const targetDate = date.toISOString().split('T')[0];
-
-        const nightTemps = weather.hourly
-            .filter(h => h.timestamp.toISOString().split('T')[0] === targetDate && !h.isDaytime)
-            .map(h => h.temperatureF);
-
-        if (nightTemps.length === 0) return null;
-        return Math.min(...nightTemps);
-    }
-
-    /**
-     * Get expected snowfall for a date range (inches)
-     */
-    async getExpectedSnowfall(coords: Coordinates, startDate: Date, endDate: Date): Promise<number> {
-        const weather = await this.getForecast(coords);
-
-        let totalSnow = 0;
-        for (const hour of weather.hourly) {
-            if (hour.timestamp >= startDate && hour.timestamp <= endDate) {
-                if (hour.precipitationType === 'snow' && hour.probabilityOfPrecipitation > 50) {
-                    // Estimate based on precip probability and temp
-                    totalSnow += 0.5; // Rough estimate per 3-hour period
-                }
-            }
-        }
-
-        return totalSnow;
+    async getForecast(coords: Coordinates): Promise<WeatherData> {
+        return this.getHourlyForecast(coords);
     }
 
     private fahrenheitToCelsius(f: number): number {

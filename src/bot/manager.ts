@@ -7,6 +7,9 @@ import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { TradingClient } from '../polymarket/clob-client.js';
 import { OpportunityDetector } from './opportunity-detector.js';
 import { OrderExecutor } from './order-executor.js';
+import { DataStore } from '../realtime/data-store.js';
+import { PriceTracker } from '../realtime/price-tracker.js';
+import { ForecastMonitor } from '../realtime/forecast-monitor.js';
 import { config, validateConfig } from '../config.js';
 import { logger } from '../logger.js';
 import { TradingOpportunity, ParsedWeatherMarket } from '../polymarket/types.js';
@@ -26,15 +29,23 @@ export class BotManager {
     private tradingClient: TradingClient;
     private opportunityDetector: OpportunityDetector;
     private orderExecutor: OrderExecutor;
+    private dataStore: DataStore;
+    private priceTracker: PriceTracker;
+    private forecastMonitor: ForecastMonitor;
 
     private isRunning: boolean = false;
     private stats: BotStats;
+    private currentDelayTimeout: NodeJS.Timeout | null = null;
+    private delayResolve: (() => void) | null = null;
 
     constructor() {
         this.weatherScanner = new WeatherScanner();
         this.tradingClient = new TradingClient();
         this.opportunityDetector = new OpportunityDetector();
         this.orderExecutor = new OrderExecutor(this.tradingClient);
+        this.dataStore = new DataStore();
+        this.priceTracker = new PriceTracker(this.dataStore);
+        this.forecastMonitor = new ForecastMonitor(this.dataStore);
 
         this.stats = {
             startTime: new Date(),
@@ -64,6 +75,23 @@ export class BotManager {
         });
 
         await this.tradingClient.initialize();
+        
+        // Start PriceTracker (handles market scanning and WS updates)
+        await this.priceTracker.start(this.weatherScanner, 60000);
+
+        // Setup forecast monitor
+        this.forecastMonitor.onForecastChanged = (marketId, change) => {
+            logger.info(`🚨 INTERRUPT: Significant forecast change detected! Triggering immediate scan.`);
+            // Interrupt current delay to run cycle immediately
+            if (this.currentDelayTimeout) {
+                clearTimeout(this.currentDelayTimeout);
+                this.currentDelayTimeout = null;
+                if (this.delayResolve) {
+                    this.delayResolve();
+                    this.delayResolve = null;
+                }
+            }
+        };
 
         logger.info('Bot initialized successfully');
     }
@@ -76,14 +104,19 @@ export class BotManager {
         logger.info('Starting scan cycle...');
 
         try {
-            // Step 1: Scan for weather markets
-            logger.info('Scanning for weather markets...');
-            const allMarkets = await this.weatherScanner.scanForWeatherMarkets();
+            // Step 1: Get markets from DataStore (maintained by PriceTracker)
+            const allMarkets = this.dataStore.getAllMarkets();
+            
+            if (allMarkets.length === 0) {
+                 logger.info('No markets in store yet, waiting...');
+                 return;
+            }
+
             const actionableMarkets = this.weatherScanner.filterActionableMarkets(allMarkets);
 
             this.stats.marketsScanned += allMarkets.length;
 
-            logger.info(`Found ${allMarkets.length} weather markets, ${actionableMarkets.length} actionable`);
+            logger.info(`Analyzing ${allMarkets.length} weather markets, ${actionableMarkets.length} actionable`);
 
             if (actionableMarkets.length === 0) {
                 logger.info('No actionable markets found this cycle');
@@ -143,6 +176,7 @@ export class BotManager {
      */
     async start(): Promise<void> {
         this.isRunning = true;
+        this.forecastMonitor.start(); // Start forecast monitoring
         logger.info('Bot started - entering polling loop');
         logger.info(`Poll interval: ${config.pollIntervalMs / 1000}s`);
 
@@ -164,6 +198,18 @@ export class BotManager {
     stop(): void {
         logger.info('Stopping bot...');
         this.isRunning = false;
+        this.priceTracker.stop();
+        this.forecastMonitor.stop();
+        
+        // Interrupt delay if active
+        if (this.currentDelayTimeout) {
+            clearTimeout(this.currentDelayTimeout);
+            this.currentDelayTimeout = null;
+        }
+        if (this.delayResolve) {
+            this.delayResolve();
+            this.delayResolve = null;
+        }
     }
 
     /**
@@ -195,6 +241,13 @@ export class BotManager {
      * Delay helper
      */
     private delay(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms));
+        return new Promise(resolve => {
+            this.delayResolve = resolve;
+            this.currentDelayTimeout = setTimeout(() => {
+                this.currentDelayTimeout = null;
+                this.delayResolve = null;
+                resolve();
+            }, ms);
+        });
     }
 }

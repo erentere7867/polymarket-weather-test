@@ -17,10 +17,15 @@ export class ForecastMonitor {
     private isRunning: boolean = false;
     private pollTimeout: NodeJS.Timeout | null = null;
     private cityCache: Map<string, { data: WeatherData, timestamp: Date }> = new Map();
+    public cacheTtlMs: number = 15000;
+    private initializedMarkets: Set<string> = new Set();
+    
+    // Callback for significant changes
+    public onForecastChanged: ((marketId: string, changeAmount: number) => void) | null = null;
 
-    constructor(store: DataStore, pollIntervalMs?: number) {
+    constructor(store: DataStore, pollIntervalMs?: number, weatherService?: WeatherService) {
         this.store = store;
-        this.weatherService = new WeatherService();
+        this.weatherService = weatherService || new WeatherService();
         // Use config default (30s) for speed arbitrage, or allow override
         this.pollIntervalMs = pollIntervalMs ?? config.forecastPollIntervalMs;
         logger.info(`ForecastMonitor initialized with ${this.pollIntervalMs / 1000}s polling interval`);
@@ -85,7 +90,7 @@ export class ForecastMonitor {
             const cached = this.cityCache.get(city);
 
             // 15s cache to match MAX_CHANGE_AGE_MS in speed-arbitrage.ts
-            if (cached && (Date.now() - cached.timestamp.getTime() < 15000)) {
+            if (cached && (Date.now() - cached.timestamp.getTime() < this.cacheTtlMs)) {
                 weatherData = cached.data;
             } else {
                 weatherData = await this.weatherService.getForecastByCity(city);
@@ -97,14 +102,47 @@ export class ForecastMonitor {
 
                 let probability = 0;
                 let forecastValue = 0;
+                let hasValidForecast = false;
 
                 // Extract forecast value based on metric
-                if (market.metricType === 'temperature_high') {
-                    const high = await this.weatherService.getExpectedHigh(city, market.targetDate);
+                if (market.metricType === 'temperature_high' || market.metricType === 'temperature_threshold') {
+                    // Use static helper to avoid extra API call
+                    const high = WeatherService.calculateHigh(weatherData, market.targetDate);
                     if (high !== null && market.threshold !== undefined) {
                         forecastValue = high;
-                        probability = this.weatherService.calculateTempExceedsProbability(high, market.threshold);
+                        
+                        // Normalize threshold to F for comparison (forecast is always F)
+                        let thresholdF = market.threshold;
+                        if (market.thresholdUnit === 'C') {
+                            thresholdF = (market.threshold * 9 / 5) + 32;
+                        }
+
+                        probability = this.weatherService.calculateTempExceedsProbability(high, thresholdF);
                         if (market.comparisonType === 'below') probability = 1 - probability;
+                        hasValidForecast = true;
+                    }
+                } else if (market.metricType === 'temperature_low') {
+                    const low = WeatherService.calculateLow(weatherData, market.targetDate);
+                    if (low !== null && market.threshold !== undefined) {
+                        forecastValue = low;
+                        
+                        // Normalize threshold to F
+                        let thresholdF = market.threshold;
+                        if (market.thresholdUnit === 'C') {
+                            thresholdF = (market.threshold * 9 / 5) + 32;
+                        }
+
+                        probability = this.weatherService.calculateTempExceedsProbability(low, thresholdF);
+                        // For low temp, "below" usually means "colder than". 
+                        // Probability calculated is "exceeds" (warmer than).
+                        // If market is "Low < 30", and forecast is 25. Exceeds(25, 30) -> Low prob.
+                        // We want prob of being BELOW. So 1 - Exceeds.
+                        if (market.comparisonType === 'below') {
+                            probability = 1 - probability;
+                        } else {
+                            // Market "Low > 30". Forecast 35. Exceeds(35, 30) -> High prob. Correct.
+                        }
+                        hasValidForecast = true;
                     }
                 } else if (market.metricType === 'snowfall') {
                     // Assume 24h window around target date for simplicity
@@ -113,17 +151,35 @@ export class ForecastMonitor {
                     const end = new Date(market.targetDate);
                     end.setHours(23, 59, 59, 999);
 
-                    const snow = await this.weatherService.getExpectedSnowfall(city, start, end);
+                    // Use static helper
+                    const snow = WeatherService.calculateSnowfall(weatherData, start, end);
                     forecastValue = snow;
                     if (market.threshold !== undefined) {
                         probability = this.weatherService.calculateSnowExceedsProbability(snow, market.threshold);
                     }
                     if (market.comparisonType === 'below') probability = 1 - probability;
+                    hasValidForecast = true;
+                } else if (market.metricType === 'precipitation') {
+                     const targetDateStr = market.targetDate.toISOString().split('T')[0];
+                     const dayForecasts = weatherData.hourly.filter(h =>
+                         h.timestamp.toISOString().split('T')[0] === targetDateStr
+                     );
+                     
+                     if (dayForecasts.length > 0) {
+                         const maxPrecipProb = Math.max(...dayForecasts.map(h => h.probabilityOfPrecipitation));
+                         forecastValue = maxPrecipProb;
+                         probability = maxPrecipProb / 100; // 0-1
+                         if (market.comparisonType === 'below') probability = 1 - probability; // "Will it NOT rain?"
+                         hasValidForecast = true;
+                     }
                 }
+
+                if (!hasValidForecast) continue;
 
                 // SPEED ARBITRAGE: Detect if forecast value actually changed
                 const currentState = this.store.getMarketState(market.market.id);
                 const previousValue = currentState?.lastForecast?.forecastValue;
+                const previousSource = currentState?.lastForecast?.weatherData?.source;
                 const previousChangeTimestamp = currentState?.lastForecast?.changeTimestamp;
 
                 // Calculate change amount
@@ -145,20 +201,40 @@ export class ForecastMonitor {
                 }
 
                 // Did the value change significantly?
-                const valueChanged = changeAmount >= significantChangeThreshold;
+                // Only consider it a change if source is the same to avoid noise from provider rotation
+                const sourceChanged = previousSource !== undefined && previousSource !== weatherData.source;
+                const valueChanged = !sourceChanged && changeAmount >= significantChangeThreshold;
+                
                 const now = new Date();
 
                 // Track when the change occurred
                 // If changed now, use current time. Otherwise, keep previous change time
                 const changeTimestamp = valueChanged ? now : (previousChangeTimestamp || now);
 
-                if (valueChanged) {
+                // Initialize market if new
+                const isNew = !this.initializedMarkets.has(market.market.id);
+                if (isNew) {
+                    this.initializedMarkets.add(market.market.id);
+                }
+
+                // Prevent initial value from triggering change
+                const realChange = valueChanged && !isNew;
+
+                if (realChange) {
                     logger.info(`⚡ FORECAST CHANGED for ${city} (${market.metricType})`, {
                         previousValue: previousValue?.toFixed(1),
                         newValue: forecastValue.toFixed(1),
                         changeAmount: changeAmount.toFixed(1),
                         threshold: market.threshold,
+                        source: weatherData.source,
+                        prevSource: previousSource
                     });
+                    
+                    if (this.onForecastChanged) {
+                        this.onForecastChanged(market.market.id, changeAmount);
+                    }
+                } else if (valueChanged && isNew) {
+                    logger.debug(`Initialized baseline forecast for ${city}: ${forecastValue}`);
                 }
 
                 const snapshot: ForecastSnapshot = {
@@ -169,7 +245,7 @@ export class ForecastMonitor {
                     timestamp: now,
                     // Speed arbitrage fields
                     previousValue,
-                    valueChanged,
+                    valueChanged: realChange,
                     changeAmount,
                     changeTimestamp,
                 };

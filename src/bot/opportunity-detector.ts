@@ -9,10 +9,10 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 // Threshold for considering market "caught up" to the forecast
-const MARKET_CAUGHT_UP_THRESHOLD = 0.10; // If price within 10% of probability, market caught up
+const MARKET_CAUGHT_UP_THRESHOLD = 0.05; // If price within 5% of probability, market caught up
 
-// Minimum forecast change to allow re-entry on a captured opportunity
-const SIGNIFICANT_FORECAST_CHANGE = 1.0; // 1 degree or 1 inch
+// Default significant change (fallback)
+const DEFAULT_SIGNIFICANT_CHANGE = 1.0;
 
 interface CapturedOpportunity {
     forecastValue: number;
@@ -43,10 +43,28 @@ export class OpportunityDetector {
     }
 
     /**
+     * Get significant change threshold for a metric
+     */
+    private getSignificantChangeThreshold(metricType: string): number {
+        switch (metricType) {
+            case 'temperature_high':
+            case 'temperature_low':
+            case 'temperature_threshold':
+                return 1.0; // 1°F
+            case 'snowfall':
+                return 0.5; // 0.5 inches
+            case 'precipitation':
+                return 5; // 5% probability change
+            default:
+                return DEFAULT_SIGNIFICANT_CHANGE;
+        }
+    }
+
+    /**
      * Check if opportunity is already captured and whether market has caught up
      */
     private shouldSkipOpportunity(
-        marketId: string,
+        market: ParsedWeatherMarket,
         currentForecastValue: number | undefined,
         marketProbability: number,
         forecastProbability: number
@@ -56,28 +74,30 @@ export class OpportunityDetector {
         if (priceDiff < MARKET_CAUGHT_UP_THRESHOLD) {
             return {
                 skip: true,
-                reason: `Market caught up: price ${(marketProbability * 100).toFixed(1)}% ≈ forecast ${(forecastProbability * 100).toFixed(1)}%`
+                reason: `Market caught up: price ${(marketProbability * 100).toFixed(1)}% ≈ forecast ${(forecastProbability * 100).toFixed(1)}% (diff ${(priceDiff * 100).toFixed(1)}% < ${(MARKET_CAUGHT_UP_THRESHOLD * 100).toFixed(0)}%)`
             };
         }
 
         // Check 2: Have we already captured this opportunity?
-        const captured = this.capturedOpportunities.get(marketId);
+        const captured = this.capturedOpportunities.get(market.market.id);
         if (!captured || currentForecastValue === undefined) {
             return { skip: false, reason: '' };
         }
 
         // Allow re-entry only if forecast changed significantly (new opportunity)
+        const threshold = this.getSignificantChangeThreshold(market.metricType);
         const forecastDiff = Math.abs(currentForecastValue - captured.forecastValue);
-        if (forecastDiff >= SIGNIFICANT_FORECAST_CHANGE) {
+        
+        if (forecastDiff >= threshold) {
             // New forecast! Clear captured flag
-            this.capturedOpportunities.delete(marketId);
-            logger.info(`🔄 New forecast for ${marketId}: ${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)}, allowing re-entry`);
+            this.capturedOpportunities.delete(market.market.id);
+            logger.info(`🔄 New forecast for ${market.city} (${market.metricType}): ${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)} (diff ${forecastDiff.toFixed(1)} >= ${threshold}), allowing re-entry`);
             return { skip: false, reason: '' };
         }
 
         return {
             skip: true,
-            reason: `Already captured at forecast ${captured.forecastValue.toFixed(1)}, current ${currentForecastValue?.toFixed(1)}`
+            reason: `Already captured at forecast ${captured.forecastValue.toFixed(1)}, current ${currentForecastValue?.toFixed(1)} (diff ${forecastDiff.toFixed(1)} < ${threshold})`
         };
     }
 
@@ -160,10 +180,16 @@ export class OpportunityDetector {
             // Market implied probability (YES price = probability of YES outcome)
             const marketProbability = market.yesPrice;
 
+            // Normalize threshold to Fahrenheit if needed for guaranteed check
+            let normalizedThreshold = market.threshold;
+            if (market.threshold !== undefined && market.thresholdUnit === 'C') {
+                normalizedThreshold = (market.threshold * 9 / 5) + 32;
+            }
+
             // Check for guaranteed outcome (forecast far beyond threshold)
             const guaranteedResult = this.isGuaranteedOutcome(
                 forecastValue,
-                market.threshold,
+                normalizedThreshold,
                 market.metricType,
                 market.comparisonType
             );
@@ -189,7 +215,7 @@ export class OpportunityDetector {
 
             // Check if we should skip this opportunity (already captured or market caught up)
             const skipCheck = this.shouldSkipOpportunity(
-                market.market.id,
+                market,
                 forecastValue,
                 marketProbability,
                 finalProbability
@@ -277,18 +303,24 @@ export class OpportunityDetector {
             let probability: number;
             const uncertainty = 3; // Typical forecast uncertainty in °F
 
+            // Normalize threshold to F
+            let thresholdF = market.threshold;
+            if (market.thresholdUnit === 'C') {
+                thresholdF = (market.threshold * 9 / 5) + 32;
+            }
+
             if (market.comparisonType === 'above') {
                 // Probability that temp will be ABOVE threshold
                 probability = this.weatherService.calculateTempExceedsProbability(
                     forecastHigh,
-                    market.threshold,
+                    thresholdF,
                     uncertainty
                 );
             } else {
                 // Probability that temp will be BELOW threshold
                 probability = 1 - this.weatherService.calculateTempExceedsProbability(
                     forecastHigh,
-                    market.threshold,
+                    thresholdF,
                     uncertainty
                 );
             }
@@ -344,16 +376,22 @@ export class OpportunityDetector {
             let probability: number;
             const uncertainty = 3;
 
+            // Normalize threshold to F
+            let thresholdF = market.threshold;
+            if (market.thresholdUnit === 'C') {
+                thresholdF = (market.threshold * 9 / 5) + 32;
+            }
+
             if (market.comparisonType === 'below') {
                 probability = 1 - this.weatherService.calculateTempExceedsProbability(
                     forecastLow,
-                    market.threshold,
+                    thresholdF,
                     uncertainty
                 );
             } else {
                 probability = this.weatherService.calculateTempExceedsProbability(
                     forecastLow,
-                    market.threshold,
+                    thresholdF,
                     uncertainty
                 );
             }
@@ -473,7 +511,7 @@ export class OpportunityDetector {
             return {
                 probability,
                 forecastValue: maxPrecipProb,
-                source: forecast.source,
+                source: forecast.source as 'noaa' | 'openweather',
                 confidence,
             };
         } catch (error) {
@@ -539,6 +577,30 @@ export class OpportunityDetector {
         }
 
         // Calculate how many standard deviations the forecast is from threshold
+        let normalizedThreshold = threshold;
+        // We can't access thresholdUnit here easily without passing the whole market object or unit string.
+        // But the caller (analyzeMarket) has the unit. 
+        // Wait, isGuaranteedOutcome is private helper.
+        // It's better to pass normalized threshold to it?
+        // Or pass unit.
+        // Let's rely on the caller to pass 'forecastValue' and 'threshold' in SAME UNITS?
+        // No, 'forecastValue' is usually F (from code above). 'threshold' is raw.
+        
+        // Actually, in analyzeMarket, we determine forecastValue.
+        // But we didn't normalize threshold BEFORE calling isGuaranteedOutcome.
+        // We should fix this method to accept thresholdUnit OR ensure caller normalizes.
+        
+        // I will assume caller normalizes? No, existing calls pass 'market.threshold'.
+        // So I must normalize here. But I don't have unit.
+        // I need to change signature of isGuaranteedOutcome or guess.
+        // Guessing is bad.
+        
+        // I'll skip editing this file blindly and check analyzeMarket logic first.
+        // In analyzeMarket, we have 'result' which has 'forecastValue' (F).
+        // Then we call isGuaranteedOutcome(forecastValue, market.threshold, ...).
+        
+        // I need to normalize threshold inside analyzeMarket BEFORE calling isGuaranteedOutcome.
+        
         const diff = forecastValue - threshold;
         const sigma = Math.abs(diff) / uncertainty;
 
