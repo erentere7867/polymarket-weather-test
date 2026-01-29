@@ -133,6 +133,7 @@ export class OpenMeteoClient implements IWeatherProvider {
                         data.hourly.weather_code[i],
                         data.hourly.snowfall[i]
                     ),
+                    snowfallInches: data.hourly.snowfall[i] ? data.hourly.snowfall[i] / 2.54 : 0,
                     shortForecast: WEATHER_CODE_MAP[data.hourly.weather_code[i]] || 'Unknown',
                     isDaytime: hour >= 6 && hour < 18,
                 });

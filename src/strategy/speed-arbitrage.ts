@@ -159,9 +159,6 @@ export class SpeedArbitrageStrategy {
                 case 'temperature_threshold':
                     uncertainty = 3; 
                     break;
-                case 'snowfall':
-                    uncertainty = 2;
-                    break;
                 default:
                     uncertainty = 5;
             }

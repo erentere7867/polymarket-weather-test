@@ -131,13 +131,8 @@ export class NOAAClient {
                 const probPrecip = period.probabilityOfPrecipitation?.value ?? 0;
                 const precipType = this.detectPrecipType(period.shortForecast);
                 
-                // Estimate hourly snowfall if it's snowing
-                let snowfallInches = 0;
-                if (precipType === 'snow' && probPrecip > 30) {
-                    // Estimate rate then weight by probability (simple model)
-                    const rate = this.estimateSnowRate(period.shortForecast || '', tempF, probPrecip);
-                    snowfallInches = rate * (probPrecip / 100);
-                }
+                // Snowfall disabled/removed
+                const snowfallInches = 0;
 
                 return {
                     timestamp: new Date(period.startTime),
@@ -148,7 +143,7 @@ export class NOAAClient {
                     windDirection: period.windDirection,
                     probabilityOfPrecipitation: probPrecip,
                     precipitationType: precipType,
-                    snowfallInches: parseFloat(snowfallInches.toFixed(2)),
+                    snowfallInches: snowfallInches,
                     shortForecast: period.shortForecast,
                     isDaytime: period.isDaytime,
                 };

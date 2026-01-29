@@ -230,13 +230,7 @@ export class WeatherbitProvider extends BaseProvider {
                     windDirection: item.wind_cdir,
                     probabilityOfPrecipitation: item.pop,
                     precipitationType: precipType,
-                    snowfallInches: item.snow ? item.snow / 25.4 : 0, // item.snow is Accumulated snowfall in mm (default)? No, units=I => inches?
-                    // Docs: "snow": Accumulated snowfall (default mm). If units=I, likely inches?
-                    // Actually Weatherbit docs say snow is always mm usually unless specified? 
-                    // Let's assume inches if units=I, or convert. 
-                    // "snow": Accumulated snowfall in the last hour (mm).
-                    // Even with units=I, some fields might stay metric. Let's assume mm and convert to be safe or check docs.
-                    // Checking docs... "units=I: ... snow (mm)". It stays mm!
+                    snowfallInches: item.snow || 0, // Assuming units=I returns inches
                     shortForecast: item.weather.description,
                     isDaytime: item.pod === 'd',
                 };

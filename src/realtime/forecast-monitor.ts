@@ -144,21 +144,6 @@ export class ForecastMonitor {
                         }
                         hasValidForecast = true;
                     }
-                } else if (market.metricType === 'snowfall') {
-                    // Assume 24h window around target date for simplicity
-                    const start = new Date(market.targetDate);
-                    start.setHours(0, 0, 0, 0);
-                    const end = new Date(market.targetDate);
-                    end.setHours(23, 59, 59, 999);
-
-                    // Use static helper
-                    const snow = WeatherService.calculateSnowfall(weatherData, start, end);
-                    forecastValue = snow;
-                    if (market.threshold !== undefined) {
-                        probability = this.weatherService.calculateSnowExceedsProbability(snow, market.threshold);
-                    }
-                    if (market.comparisonType === 'below') probability = 1 - probability;
-                    hasValidForecast = true;
                 } else if (market.metricType === 'precipitation') {
                      const targetDateStr = market.targetDate.toISOString().split('T')[0];
                      const dayForecasts = weatherData.hourly.filter(h =>
@@ -191,10 +176,8 @@ export class ForecastMonitor {
                     case 'temperature_high':
                     case 'temperature_low':
                     case 'temperature_threshold':
+                    case 'temperature_range':
                         significantChangeThreshold = 1; // 1°F change is significant
-                        break;
-                    case 'snowfall':
-                        significantChangeThreshold = 0.5; // 0.5 inch change is significant
                         break;
                     default:
                         significantChangeThreshold = 1;

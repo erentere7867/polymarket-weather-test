@@ -60,8 +60,10 @@ export interface ParsedWeatherMarket {
 
     // Extracted info from question
     city: string | null;
-    metricType: 'temperature_high' | 'temperature_low' | 'temperature_threshold' | 'snowfall' | 'precipitation' | 'unknown';
+    metricType: 'temperature_high' | 'temperature_low' | 'temperature_threshold' | 'temperature_range' | 'precipitation' | 'unknown';
     threshold?: number;
+    minThreshold?: number;
+    maxThreshold?: number;
     thresholdUnit?: 'F' | 'C' | 'inches';
     comparisonType?: 'above' | 'below' | 'equals' | 'range';
     targetDate?: Date;

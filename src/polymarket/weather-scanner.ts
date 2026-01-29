@@ -11,7 +11,6 @@ import { logger } from '../logger.js';
 // Keywords that indicate a weather market
 const WEATHER_KEYWORDS = [
     'temperature', 'temp', 'degrees', '°f', '°c',
-    'snow', 'snowfall', 'inches of snow',
     'rain', 'rainfall', 'precipitation',
     'weather', 'forecast',
     'high of', 'low of', 'highest', 'lowest',
@@ -118,7 +117,7 @@ export class WeatherScanner {
         const city = this.extractCity(fullText);
 
         // Extract metric type and threshold - use QUESTION only to avoid Date matching in Title
-        const { metricType, threshold, thresholdUnit, comparisonType } = this.extractMetric(question);
+        const { metricType, threshold, minThreshold, maxThreshold, thresholdUnit, comparisonType } = this.extractMetric(question);
 
         // Extract target date
         const targetDate = this.extractDate(fullText, event);
@@ -138,6 +137,8 @@ export class WeatherScanner {
             city,
             metricType,
             threshold,
+            minThreshold,
+            maxThreshold,
             thresholdUnit,
             comparisonType,
             targetDate,
@@ -153,7 +154,11 @@ export class WeatherScanner {
      */
     private extractCity(text: string): string | null {
         for (const cityPattern of CITY_PATTERNS) {
-            if (text.includes(cityPattern)) {
+            // Escape special chars for regex if any (dots in d.c.)
+            const escapedPattern = cityPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`\\b${escapedPattern}\\b`, 'i');
+            
+            if (regex.test(text)) {
                 // Normalize city name
                 if (cityPattern === 'nyc' || cityPattern === 'ny') return 'New York City';
                 if (cityPattern === 'dc' || cityPattern === 'd.c.') return 'Washington DC';
@@ -172,9 +177,37 @@ export class WeatherScanner {
     private extractMetric(text: string): {
         metricType: ParsedWeatherMarket['metricType'];
         threshold?: number;
+        minThreshold?: number;
+        maxThreshold?: number;
         thresholdUnit?: 'F' | 'C' | 'inches';
         comparisonType?: 'above' | 'below' | 'equals' | 'range';
     } {
+        // Explicitly reject ALL snow-related markets
+        if (text.match(/snow|blizzard/i)) {
+            return { metricType: 'unknown' };
+        }
+
+        // Temperature range patterns: "Between 30 and 40", "30-40 degrees"
+        // MUST NOT contain precipitation/snow keywords to avoid false positives
+        if (!text.match(/precipitation|rain|inches|"/i)) {
+            const rangeMatch = text.match(/between\s*(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?\s*(?:and|to|-)\s*(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
+            if (rangeMatch) {
+                const val1 = parseInt(rangeMatch[1], 10);
+                const val2 = parseInt(rangeMatch[3], 10);
+                
+                // Determine unit (check both spots)
+                const unit = (rangeMatch[2] || rangeMatch[4] || 'F').toUpperCase() as 'F' | 'C';
+                
+                return {
+                    metricType: 'temperature_range',
+                    minThreshold: Math.min(val1, val2),
+                    maxThreshold: Math.max(val1, val2),
+                    thresholdUnit: unit,
+                    comparisonType: 'range',
+                };
+            }
+        }
+
         // Temperature high patterns
         // Matches: 7°C, 7 C, 7 degrees C, 7 deg C, 7°
         const highTempMatch = text.match(/(?:highest|high|maximum|max)\s*(?:temp|temperature)?[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
@@ -183,13 +216,30 @@ export class WeatherScanner {
             const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
             const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least)\b/i);
             
-            // Default to 'above' (>=) if no direction specified, as "Will temp reach X" usually means X or higher
+            const val = parseInt(highTempMatch[1], 10);
+            const unit = (highTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F';
+
+            if (!isBelow && !isAbove) {
+                // No direction specified -> Treat as exact bucket (e.g., "32" means 32 <= T < 33)
+                // We use temperature_range [val, val + 1]
+                return {
+                    metricType: 'temperature_range',
+                    minThreshold: val,
+                    maxThreshold: val + 1,
+                    thresholdUnit: unit,
+                    comparisonType: 'range',
+                };
+            }
+
+            // Default to 'above' (>=) if no direction specified (legacy behavior if fallthrough? No, handled above)
+            // Actually, if isAbove is true OR neither but some other context?
+            // "at least" matches isAbove.
             const comparisonType = isBelow ? 'below' : 'above';
 
             return {
                 metricType: 'temperature_high',
-                threshold: parseInt(highTempMatch[1], 10),
-                thresholdUnit: (highTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                threshold: val,
+                thresholdUnit: unit,
                 comparisonType,
             };
         }
@@ -216,35 +266,31 @@ export class WeatherScanner {
             };
         }
 
-        // Just a temperature number
+        // Just a temperature number (ambiguous context)
         const simpleTempMatch = text.match(/(?:temperature|temp)[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
         if (simpleTempMatch) {
+            const val = parseInt(simpleTempMatch[1], 10);
+            const unit = (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F';
+            
+            // Check direction again just in case simple match missed context
+            const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
+            const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least)\b/i);
+
+            if (!isBelow && !isAbove) {
+                 return {
+                    metricType: 'temperature_range',
+                    minThreshold: val,
+                    maxThreshold: val + 1,
+                    thresholdUnit: unit,
+                    comparisonType: 'range',
+                };
+            }
+
             return {
                 metricType: 'temperature_high',
-                threshold: parseInt(simpleTempMatch[1], 10),
-                thresholdUnit: (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
-                comparisonType: 'above',
-            };
-        }
-
-        // Snowfall patterns
-        const snowMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:inches?|in|")?\s*(?:of\s*)?snow/i);
-        if (snowMatch) {
-            return {
-                metricType: 'snowfall',
-                threshold: parseFloat(snowMatch[1]),
-                thresholdUnit: 'inches',
-                comparisonType: text.includes('less') || text.includes('under') ? 'below' : 'above',
-            };
-        }
-
-        // Snow yes/no (will it snow)
-        if (text.includes('snow') && !snowMatch) {
-            return {
-                metricType: 'snowfall',
-                threshold: 0.1, // Any snow
-                thresholdUnit: 'inches',
-                comparisonType: 'above',
+                threshold: val,
+                thresholdUnit: unit,
+                comparisonType: isBelow ? 'below' : 'above',
             };
         }
 

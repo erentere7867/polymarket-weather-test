@@ -22,7 +22,11 @@ async function main(): Promise<void> {
             console.log(`Event: ${market.eventTitle}`);
             console.log(`City: ${market.city || 'Unknown'}`);
             console.log(`Metric: ${market.metricType}`);
-            console.log(`Threshold: ${market.threshold || 'N/A'} ${market.thresholdUnit || ''}`);
+            if (market.metricType === 'temperature_range') {
+                console.log(`Range: ${market.minThreshold} - ${market.maxThreshold} ${market.thresholdUnit || ''}`);
+            } else {
+                console.log(`Threshold: ${market.threshold || 'N/A'} ${market.thresholdUnit || ''}`);
+            }
             console.log(`Comparison: ${market.comparisonType || 'N/A'}`);
             console.log(`Target Date: ${market.targetDate?.toISOString() || 'N/A'}`);
             console.log(`YES Price: ${(market.yesPrice * 100).toFixed(1)}%`);

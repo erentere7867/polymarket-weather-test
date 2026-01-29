@@ -50,9 +50,8 @@ export class OpportunityDetector {
             case 'temperature_high':
             case 'temperature_low':
             case 'temperature_threshold':
+            case 'temperature_range':
                 return 1.0; // 1°F
-            case 'snowfall':
-                return 0.5; // 0.5 inches
             case 'precipitation':
                 return 5; // 5% probability change
             default:
@@ -82,6 +81,22 @@ export class OpportunityDetector {
         const captured = this.capturedOpportunities.get(market.market.id);
         if (!captured || currentForecastValue === undefined) {
             return { skip: false, reason: '' };
+        }
+
+        // Special check for Range Markets: If forecast moved INTO the winning range, force re-entry
+        if (market.metricType === 'temperature_range' && market.minThreshold !== undefined && market.maxThreshold !== undefined) {
+            const min = market.thresholdUnit === 'C' ? (market.minThreshold * 9 / 5) + 32 : market.minThreshold;
+            const max = market.thresholdUnit === 'C' ? (market.maxThreshold * 9 / 5) + 32 : market.maxThreshold;
+
+            const wasIn = captured.forecastValue >= min && captured.forecastValue <= max;
+            const isIn = currentForecastValue >= min && currentForecastValue <= max;
+
+            if (!wasIn && isIn) {
+                // Forecast moved INTO range - Re-enter!
+                this.capturedOpportunities.delete(market.market.id);
+                logger.info(`🔄 New forecast for ${market.city} (Range): Moved INTO range [${min}, ${max}] (${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)}), forcing re-entry`);
+                return { skip: false, reason: '' };
+            }
         }
 
         // Allow re-entry only if forecast changed significantly (new opportunity)
@@ -146,15 +161,15 @@ export class OpportunityDetector {
                         confidence = lowResult.confidence;
                     }
                     break;
-
-                case 'snowfall':
-                    const snowResult = await this.analyzeSnowfallMarket(market);
-                    if (snowResult) {
-                        forecastProbability = snowResult.probability;
-                        forecastValue = snowResult.forecastValue;
-                        forecastValueUnit = 'inches';
-                        weatherDataSource = snowResult.source;
-                        confidence = snowResult.confidence;
+                
+                case 'temperature_range':
+                    const rangeResult = await this.analyzeTemperatureRangeMarket(market);
+                    if (rangeResult) {
+                        forecastProbability = rangeResult.probability;
+                        forecastValue = rangeResult.forecastValue;
+                        forecastValueUnit = '°F';
+                        weatherDataSource = rangeResult.source;
+                        confidence = rangeResult.confidence;
                     }
                     break;
 
@@ -185,13 +200,23 @@ export class OpportunityDetector {
             if (market.threshold !== undefined && market.thresholdUnit === 'C') {
                 normalizedThreshold = (market.threshold * 9 / 5) + 32;
             }
+            
+            // Normalize min/max for range
+            let normalizedMin = market.minThreshold;
+            let normalizedMax = market.maxThreshold;
+            if (market.thresholdUnit === 'C') {
+                if (normalizedMin !== undefined) normalizedMin = (normalizedMin * 9 / 5) + 32;
+                if (normalizedMax !== undefined) normalizedMax = (normalizedMax * 9 / 5) + 32;
+            }
 
             // Check for guaranteed outcome (forecast far beyond threshold)
             const guaranteedResult = this.isGuaranteedOutcome(
                 forecastValue,
                 normalizedThreshold,
                 market.metricType,
-                market.comparisonType
+                market.comparisonType,
+                normalizedMin,
+                normalizedMax
             );
 
             // If guaranteed, override probability to 1.0 or 0.0
@@ -207,6 +232,7 @@ export class OpportunityDetector {
                 logger.info(`🎯 GUARANTEED OUTCOME detected for ${market.city}`, {
                     forecastValue,
                     threshold: market.threshold,
+                    range: market.minThreshold ? `[${market.minThreshold}, ${market.maxThreshold}]` : undefined,
                     sigma: certaintySigma.toFixed(2),
                     guaranteedProbability: finalProbability,
                     marketProbability: marketProbability.toFixed(3),
@@ -272,6 +298,73 @@ export class OpportunityDetector {
             logger.error(`Failed to analyze market: ${market.market.question}`, {
                 error: (error as Error).message,
             });
+            return null;
+        }
+    }
+
+    /**
+     * Analyze a temperature range market (Between X and Y)
+     */
+    private async analyzeTemperatureRangeMarket(market: ParsedWeatherMarket): Promise<{
+        probability: number;
+        forecastValue: number;
+        source: 'noaa' | 'openweather';
+        confidence: number;
+    } | null> {
+        if (!market.city || market.minThreshold === undefined || market.maxThreshold === undefined) {
+            return null;
+        }
+
+        const targetDate = market.targetDate || new Date();
+
+        try {
+            // "Between X and Y" usually refers to the HIGH temperature unless specified otherwise
+            const forecastHigh = await this.weatherService.getExpectedHigh(market.city, targetDate);
+
+            if (forecastHigh === null) {
+                return null;
+            }
+
+            let probability: number;
+            const uncertainty = 3; // Typical forecast uncertainty in °F
+
+            // Normalize thresholds to F
+            let minF = market.minThreshold;
+            let maxF = market.maxThreshold;
+            if (market.thresholdUnit === 'C') {
+                minF = (market.minThreshold * 9 / 5) + 32;
+                maxF = (market.maxThreshold * 9 / 5) + 32;
+            }
+            
+            // Probability that temp is >= min AND <= max
+            // P(X >= min) - P(X > max)
+            const probAboveMin = this.weatherService.calculateTempExceedsProbability(
+                forecastHigh,
+                minF,
+                uncertainty
+            );
+            
+            const probAboveMax = this.weatherService.calculateTempExceedsProbability(
+                forecastHigh,
+                maxF,
+                uncertainty
+            );
+            
+            probability = probAboveMin - probAboveMax;
+            
+            // Ensure valid probability
+            probability = Math.max(0, Math.min(1, probability));
+
+            const daysAhead = (targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
+            const confidence = Math.max(0.3, 0.9 - daysAhead * 0.1);
+
+            return {
+                probability,
+                forecastValue: forecastHigh,
+                source: 'noaa',
+                confidence,
+            };
+        } catch (error) {
             return null;
         }
     }
@@ -411,67 +504,6 @@ export class OpportunityDetector {
     }
 
     /**
-     * Analyze a snowfall market
-     */
-    private async analyzeSnowfallMarket(market: ParsedWeatherMarket): Promise<{
-        probability: number;
-        forecastValue: number;
-        source: 'noaa' | 'openweather';
-        confidence: number;
-    } | null> {
-        if (!market.city) {
-            return null;
-        }
-
-        const threshold = market.threshold || 0.1;
-        const targetDate = market.targetDate || new Date();
-
-        // For snowfall, get range from target date to end of day or weekend
-        const startDate = new Date(targetDate);
-        startDate.setHours(0, 0, 0, 0);
-        const endDate = new Date(targetDate);
-        endDate.setHours(23, 59, 59, 999);
-
-        try {
-            const forecastSnow = await this.weatherService.getExpectedSnowfall(
-                market.city,
-                startDate,
-                endDate
-            );
-
-            const uncertainty = 2; // Snow forecast uncertainty in inches
-            let probability: number;
-
-            if (market.comparisonType === 'above') {
-                probability = this.weatherService.calculateSnowExceedsProbability(
-                    forecastSnow,
-                    threshold,
-                    uncertainty
-                );
-            } else {
-                probability = 1 - this.weatherService.calculateSnowExceedsProbability(
-                    forecastSnow,
-                    threshold,
-                    uncertainty
-                );
-            }
-
-            // Snow forecasts are less reliable
-            const daysAhead = (targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
-            const confidence = Math.max(0.2, 0.7 - daysAhead * 0.15);
-
-            return {
-                probability,
-                forecastValue: forecastSnow,
-                source: 'noaa',
-                confidence,
-            };
-        } catch (error) {
-            return null;
-        }
-    }
-
-    /**
      * Analyze a precipitation market
      */
     private async analyzePrecipitationMarket(market: ParsedWeatherMarket): Promise<{
@@ -552,9 +584,11 @@ export class OpportunityDetector {
         forecastValue: number | undefined,
         threshold: number | undefined,
         metricType: string,
-        comparisonType: string | undefined
+        comparisonType: string | undefined,
+        minThreshold?: number,
+        maxThreshold?: number
     ): { probability: number; sigma: number } | null {
-        if (forecastValue === undefined || threshold === undefined) {
+        if (forecastValue === undefined) {
             return null;
         }
 
@@ -564,10 +598,8 @@ export class OpportunityDetector {
             case 'temperature_high':
             case 'temperature_low':
             case 'temperature_threshold':
+            case 'temperature_range':
                 uncertainty = 3; // °F
-                break;
-            case 'snowfall':
-                uncertainty = 2; // inches
                 break;
             case 'precipitation':
                 uncertainty = 10; // percentage points
@@ -576,31 +608,48 @@ export class OpportunityDetector {
                 uncertainty = 5; // Generic fallback
         }
 
+        // Handle Range Markets
+        if (metricType === 'temperature_range') {
+            if (minThreshold === undefined || maxThreshold === undefined) {
+                return null;
+            }
+
+            // Guaranteed YES if min + sigma < forecast < max - sigma
+            // Guaranteed NO if forecast < min - sigma OR forecast > max + sigma
+            
+            // Check lower bound distance
+            const diffMin = forecastValue - minThreshold;
+            const sigmaMin = Math.abs(diffMin) / uncertainty;
+            
+            // Check upper bound distance
+            const diffMax = forecastValue - maxThreshold;
+            const sigmaMax = Math.abs(diffMax) / uncertainty;
+            
+            if (forecastValue > minThreshold && forecastValue < maxThreshold) {
+                // Inside range. Are we safely inside?
+                // We need to be > 3 sigma from min AND > 3 sigma from max
+                if (sigmaMin >= config.certaintySigmaThreshold && sigmaMax >= config.certaintySigmaThreshold) {
+                    return { probability: 1.0, sigma: Math.min(sigmaMin, sigmaMax) };
+                }
+            } else {
+                // Outside range. Are we safely outside?
+                // Either safely below min OR safely above max
+                if (forecastValue <= minThreshold && sigmaMin >= config.certaintySigmaThreshold) {
+                     return { probability: 0.0, sigma: sigmaMin };
+                }
+                if (forecastValue >= maxThreshold && sigmaMax >= config.certaintySigmaThreshold) {
+                     return { probability: 0.0, sigma: sigmaMax };
+                }
+            }
+            return null;
+        }
+
+        // For non-range markets, threshold is required
+        if (threshold === undefined) {
+            return null;
+        }
+
         // Calculate how many standard deviations the forecast is from threshold
-        let normalizedThreshold = threshold;
-        // We can't access thresholdUnit here easily without passing the whole market object or unit string.
-        // But the caller (analyzeMarket) has the unit. 
-        // Wait, isGuaranteedOutcome is private helper.
-        // It's better to pass normalized threshold to it?
-        // Or pass unit.
-        // Let's rely on the caller to pass 'forecastValue' and 'threshold' in SAME UNITS?
-        // No, 'forecastValue' is usually F (from code above). 'threshold' is raw.
-        
-        // Actually, in analyzeMarket, we determine forecastValue.
-        // But we didn't normalize threshold BEFORE calling isGuaranteedOutcome.
-        // We should fix this method to accept thresholdUnit OR ensure caller normalizes.
-        
-        // I will assume caller normalizes? No, existing calls pass 'market.threshold'.
-        // So I must normalize here. But I don't have unit.
-        // I need to change signature of isGuaranteedOutcome or guess.
-        // Guessing is bad.
-        
-        // I'll skip editing this file blindly and check analyzeMarket logic first.
-        // In analyzeMarket, we have 'result' which has 'forecastValue' (F).
-        // Then we call isGuaranteedOutcome(forecastValue, market.threshold, ...).
-        
-        // I need to normalize threshold inside analyzeMarket BEFORE calling isGuaranteedOutcome.
-        
         const diff = forecastValue - threshold;
         const sigma = Math.abs(diff) / uncertainty;
 
