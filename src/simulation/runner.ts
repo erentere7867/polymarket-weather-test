@@ -80,7 +80,7 @@ export class SimulationRunner {
 
         // 5. Main Loop
         // We run the loop faster (e.g. 5s) to simulate "Real-Time" without spamming logs
-        const loopInterval = 5000;
+        const loopInterval = 500;
 
         while (this.isRunning && this.cycles < this.maxCycles) {
             this.cycles++;
@@ -167,7 +167,7 @@ export class SimulationRunner {
         // 5. Log Forecast Status every 10 minutes
         const now = Date.now();
         if (now - this.lastLogTime >= 600000) { // 10 minutes
-            this.logForecastStatus();
+            // this.logForecastStatus();
             this.lastLogTime = now;
         }
 

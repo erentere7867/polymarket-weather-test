@@ -5,14 +5,7 @@
 
 import { BotManager } from './bot/manager.js';
 import { logger } from './logger.js';
-import fs from 'fs';
 import path from 'path';
-
-// Ensure logs directory exists
-const logsDir = path.join(process.cwd(), 'logs');
-if (!fs.existsSync(logsDir)) {
-    fs.mkdirSync(logsDir, { recursive: true });
-}
 
 async function main(): Promise<void> {
     const bot = new BotManager();

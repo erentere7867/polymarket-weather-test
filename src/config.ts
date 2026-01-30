@@ -86,7 +86,7 @@ export const config: Config = {
     maxPositionSize: getEnvVarNumber('MAX_POSITION_SIZE', 10),
     minEdgeThreshold: getEnvVarNumber('MIN_EDGE_THRESHOLD', 0.10),
     pollIntervalMs: getEnvVarNumber('POLL_INTERVAL_MS', 60000), // 1 minute
-    forecastPollIntervalMs: getEnvVarNumber('FORECAST_POLL_INTERVAL_MS', 30000), // 30 seconds for speed arbitrage
+    forecastPollIntervalMs: getEnvVarNumber('FORECAST_POLL_INTERVAL_MS', 10000), // 10 seconds for speed arbitrage
     logLevel: getEnvVarOptional('LOG_LEVEL', 'info'),
 
     // Guaranteed outcome detection

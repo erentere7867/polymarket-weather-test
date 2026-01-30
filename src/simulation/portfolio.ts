@@ -100,7 +100,7 @@ export class PortfolioSimulator {
         );
 
         if (positionValue < 10) {
-            logger.debug('Position size too small, skipping');
+            logger.warn(`Position size too small ($${positionValue.toFixed(2)}), skipping`);
             return null;
         }
 
@@ -116,6 +116,7 @@ export class PortfolioSimulator {
         const basePrice = isBuyYes ? opportunity.market.yesPrice : opportunity.market.noPrice;
 
         if (basePrice <= 0 || basePrice >= 1) {
+            logger.warn(`Invalid base price for execution: ${basePrice}, skipping`);
             return null;
         }
 

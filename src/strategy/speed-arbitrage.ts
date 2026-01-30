@@ -16,12 +16,12 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 // Maximum age of a forecast change before it's considered "stale" (market has caught up)
-// Aligned with cache TTL: 12 seconds to match forecast-monitor cache
-const MAX_CHANGE_AGE_MS = 12000;
+// Relaxed to 5 minutes to allow for more opportunities in testing
+const MAX_CHANGE_AGE_MS = 300000;
 
 // Minimum change threshold to trigger detection
-// AGGRESSIVE: 1.5 sigma = more opportunities, slightly lower confidence
-const MIN_SIGMA_FOR_ARBITRAGE = 1.5;
+// RELAXED: 1.0 sigma = more opportunities
+const MIN_SIGMA_FOR_ARBITRAGE = 1.0;
 
 export class SpeedArbitrageStrategy {
     private store: DataStore;
@@ -102,6 +102,10 @@ export class SpeedArbitrageStrategy {
             const forecast = state.lastForecast;
             const changeAge = now - forecast.changeTimestamp.getTime();
             const isSpeedArb = forecast.valueChanged && (changeAge <= MAX_CHANGE_AGE_MS);
+
+            if (isSpeedArb) {
+                 logger.info(`⚡ Analyzing fresh change for ${market.market.question.substring(0, 30)}... Age: ${changeAge}ms`);
+            }
 
             // =====================================================
             // CHECK #1: Have we already captured this opportunity?

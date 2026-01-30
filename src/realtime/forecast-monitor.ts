@@ -17,7 +17,7 @@ export class ForecastMonitor {
     private isRunning: boolean = false;
     private pollTimeout: NodeJS.Timeout | null = null;
     private cityCache: Map<string, { data: WeatherData, timestamp: Date }> = new Map();
-    public cacheTtlMs: number = 12000; // 12 seconds to stay under rate limits
+    public cacheTtlMs: number = 5000; // 5 seconds to stay under rate limits
     private initializedMarkets: Set<string> = new Set();
 
     // Callback for significant changes

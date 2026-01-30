@@ -25,20 +25,5 @@ export const logger = winston.createLogger({
                 logFormat
             ),
         }),
-        new winston.transports.File({
-            filename: 'logs/error.log',
-            level: 'error',
-            format: combine(
-                timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-                logFormat
-            ),
-        }),
-        new winston.transports.File({
-            filename: 'logs/combined.log',
-            format: combine(
-                timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-                logFormat
-            ),
-        }),
     ],
 });
