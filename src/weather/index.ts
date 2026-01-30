@@ -66,7 +66,7 @@ export class WeatherService {
                 lastError = error;
                 const providerName = this.providerManager.getCurrentProviderName();
                 logger.warn(`Provider '${providerName}' failed, skipping immediately.`, { error: (error as Error).message });
-                
+
                 // Skip to next provider immediately
                 this.providerManager.rotateNow();
             }
@@ -129,10 +129,16 @@ export class WeatherService {
     // --- Static Calculation Helpers (Efficient Processing) ---
 
     static calculateHigh(data: WeatherData, date: Date): number | null {
-        const targetDate = date.toISOString().split('T')[0];
-        
+        // Normalize the target date to midnight UTC for comparison
+        const targetDateObj = new Date(date);
+        targetDateObj.setUTCHours(0, 0, 0, 0);
+
         const dayTemps = data.hourly
-            .filter(h => h.timestamp.toISOString().split('T')[0] === targetDate)
+            .filter(h => {
+                const hourDate = new Date(h.timestamp);
+                hourDate.setUTCHours(0, 0, 0, 0);
+                return hourDate.getTime() === targetDateObj.getTime();
+            })
             .map(h => h.temperatureF);
 
         if (dayTemps.length === 0) return null;
@@ -140,10 +146,16 @@ export class WeatherService {
     }
 
     static calculateLow(data: WeatherData, date: Date): number | null {
-        const targetDate = date.toISOString().split('T')[0];
-        
+        // Normalize the target date to midnight UTC for comparison
+        const targetDateObj = new Date(date);
+        targetDateObj.setUTCHours(0, 0, 0, 0);
+
         const dayTemps = data.hourly
-            .filter(h => h.timestamp.toISOString().split('T')[0] === targetDate)
+            .filter(h => {
+                const hourDate = new Date(h.timestamp);
+                hourDate.setUTCHours(0, 0, 0, 0);
+                return hourDate.getTime() === targetDateObj.getTime();
+            })
             .map(h => h.temperatureF);
 
         if (dayTemps.length === 0) return null;
