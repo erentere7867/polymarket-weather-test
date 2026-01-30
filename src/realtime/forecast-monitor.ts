@@ -19,7 +19,7 @@ export class ForecastMonitor {
     private cityCache: Map<string, { data: WeatherData, timestamp: Date }> = new Map();
     public cacheTtlMs: number = 15000;
     private initializedMarkets: Set<string> = new Set();
-    
+
     // Callback for significant changes
     public onForecastChanged: ((marketId: string, changeAmount: number) => void) | null = null;
 
@@ -110,7 +110,7 @@ export class ForecastMonitor {
                     const high = WeatherService.calculateHigh(weatherData, market.targetDate);
                     if (high !== null && market.threshold !== undefined) {
                         forecastValue = high;
-                        
+
                         // Normalize threshold to F for comparison (forecast is always F)
                         let thresholdF = market.threshold;
                         if (market.thresholdUnit === 'C') {
@@ -125,7 +125,7 @@ export class ForecastMonitor {
                     const low = WeatherService.calculateLow(weatherData, market.targetDate);
                     if (low !== null && market.threshold !== undefined) {
                         forecastValue = low;
-                        
+
                         // Normalize threshold to F
                         let thresholdF = market.threshold;
                         if (market.thresholdUnit === 'C') {
@@ -145,18 +145,23 @@ export class ForecastMonitor {
                         hasValidForecast = true;
                     }
                 } else if (market.metricType === 'precipitation') {
-                     const targetDateStr = market.targetDate.toISOString().split('T')[0];
-                     const dayForecasts = weatherData.hourly.filter(h =>
-                         h.timestamp.toISOString().split('T')[0] === targetDateStr
-                     );
-                     
-                     if (dayForecasts.length > 0) {
-                         const maxPrecipProb = Math.max(...dayForecasts.map(h => h.probabilityOfPrecipitation));
-                         forecastValue = maxPrecipProb;
-                         probability = maxPrecipProb / 100; // 0-1
-                         if (market.comparisonType === 'below') probability = 1 - probability; // "Will it NOT rain?"
-                         hasValidForecast = true;
-                     }
+                    // Normalize target date for comparison
+                    const targetDateObj = new Date(market.targetDate);
+                    targetDateObj.setUTCHours(0, 0, 0, 0);
+
+                    const dayForecasts = weatherData.hourly.filter(h => {
+                        const hourDate = new Date(h.timestamp);
+                        hourDate.setUTCHours(0, 0, 0, 0);
+                        return hourDate.getTime() === targetDateObj.getTime();
+                    });
+
+                    if (dayForecasts.length > 0) {
+                        const maxPrecipProb = Math.max(...dayForecasts.map(h => h.probabilityOfPrecipitation));
+                        forecastValue = maxPrecipProb;
+                        probability = maxPrecipProb / 100; // 0-1
+                        if (market.comparisonType === 'below') probability = 1 - probability; // "Will it NOT rain?"
+                        hasValidForecast = true;
+                    }
                 }
 
                 if (!hasValidForecast) continue;
@@ -187,7 +192,7 @@ export class ForecastMonitor {
                 // Only consider it a change if source is the same to avoid noise from provider rotation
                 const sourceChanged = previousSource !== undefined && previousSource !== weatherData.source;
                 const valueChanged = !sourceChanged && changeAmount >= significantChangeThreshold;
-                
+
                 const now = new Date();
 
                 // Track when the change occurred
@@ -212,7 +217,7 @@ export class ForecastMonitor {
                         source: weatherData.source,
                         prevSource: previousSource
                     });
-                    
+
                     if (this.onForecastChanged) {
                         this.onForecastChanged(market.market.id, changeAmount);
                     }

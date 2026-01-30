@@ -158,7 +158,7 @@ export class WeatherScanner {
             // Escape special chars for regex if any (dots in d.c.)
             const escapedPattern = cityPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             const regex = new RegExp(`\\b${escapedPattern}\\b`, 'i');
-            
+
             if (regex.test(text)) {
                 // Normalize city name
                 if (cityPattern === 'nyc' || cityPattern === 'ny') return 'New York City';
@@ -204,7 +204,7 @@ export class WeatherScanner {
             if (rangeMatch) {
                 const val1 = parseInt(rangeMatch[1], 10);
                 const val2 = parseInt(rangeMatch[3], 10);
-                
+
                 // Determine unit (check both spots)
                 const unit = (rangeMatch[2] || rangeMatch[4] || defaultUnit).toUpperCase() as 'F' | 'C';
                 
@@ -225,7 +225,7 @@ export class WeatherScanner {
             // Check direction explicitly
             const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
             const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least)\b/i);
-            
+
             const val = parseInt(highTempMatch[1], 10);
             const unit = (highTempMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit;
 
@@ -287,7 +287,7 @@ export class WeatherScanner {
             const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least)\b/i);
 
             if (!isBelow && !isAbove) {
-                 return {
+                return {
                     metricType: 'temperature_range',
                     minThreshold: val,
                     maxThreshold: val + 1,
@@ -346,32 +346,40 @@ export class WeatherScanner {
 
             const month = monthMap[monthStr];
             if (month !== undefined) {
-                return new Date(year, month, day);
+                // Create date in UTC to avoid timezone issues
+                const date = new Date(Date.UTC(year, month, day));
+                return date;
             }
         }
 
         // "today"
         if (text.includes('today')) {
-            return now;
+            const today = new Date();
+            today.setUTCHours(0, 0, 0, 0);
+            return today;
         }
 
         // "tomorrow"
         if (text.includes('tomorrow')) {
-            const tomorrow = new Date(now);
-            tomorrow.setDate(tomorrow.getDate() + 1);
+            const tomorrow = new Date();
+            tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+            tomorrow.setUTCHours(0, 0, 0, 0);
             return tomorrow;
         }
 
         // "this weekend"
         if (text.includes('this weekend') || text.includes('weekend')) {
-            const saturday = new Date(now);
-            saturday.setDate(saturday.getDate() + (6 - saturday.getDay()));
+            const saturday = new Date();
+            saturday.setUTCDate(saturday.getUTCDate() + (6 - saturday.getDay()));
+            saturday.setUTCHours(0, 0, 0, 0);
             return saturday;
         }
 
         // Use event end date if available
         if (event.endDate) {
-            return new Date(event.endDate);
+            const date = new Date(event.endDate);
+            date.setUTCHours(0, 0, 0, 0);
+            return date;
         }
 
         return undefined;
@@ -411,7 +419,13 @@ export class WeatherScanner {
             // Must have target date within forecast range (7 days)
             if (m.targetDate) {
                 const now = new Date();
-                const daysUntil = (m.targetDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
+                // Normalize both dates to midnight UTC for comparison
+                const targetDate = new Date(m.targetDate);
+                targetDate.setUTCHours(0, 0, 0, 0);
+                const today = new Date(now);
+                today.setUTCHours(0, 0, 0, 0);
+
+                const daysUntil = (targetDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24);
                 if (daysUntil < -2 || daysUntil > 14) { // Relaxed window: -2 to +14 days
                     logger.debug(`Rejecting ${m.market.question}: Date out of range (${daysUntil.toFixed(1)} days)`);
                     return false;

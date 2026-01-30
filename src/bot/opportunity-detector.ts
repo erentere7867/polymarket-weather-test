@@ -102,7 +102,7 @@ export class OpportunityDetector {
         // Allow re-entry only if forecast changed significantly (new opportunity)
         const threshold = this.getSignificantChangeThreshold(market.metricType);
         const forecastDiff = Math.abs(currentForecastValue - captured.forecastValue);
-        
+
         if (forecastDiff >= threshold) {
             // New forecast! Clear captured flag
             this.capturedOpportunities.delete(market.market.id);
@@ -161,7 +161,7 @@ export class OpportunityDetector {
                         confidence = lowResult.confidence;
                     }
                     break;
-                
+
                 case 'temperature_range':
                     const rangeResult = await this.analyzeTemperatureRangeMarket(market);
                     if (rangeResult) {
@@ -200,7 +200,7 @@ export class OpportunityDetector {
             if (market.threshold !== undefined && market.thresholdUnit === 'C') {
                 normalizedThreshold = (market.threshold * 9 / 5) + 32;
             }
-            
+
             // Normalize min/max for range
             let normalizedMin = market.minThreshold;
             let normalizedMax = market.maxThreshold;
@@ -335,7 +335,7 @@ export class OpportunityDetector {
                 minF = (market.minThreshold * 9 / 5) + 32;
                 maxF = (market.maxThreshold * 9 / 5) + 32;
             }
-            
+
             // Probability that temp is >= min AND <= max
             // P(X >= min) - P(X > max)
             const probAboveMin = this.weatherService.calculateTempExceedsProbability(
@@ -343,15 +343,15 @@ export class OpportunityDetector {
                 minF,
                 uncertainty
             );
-            
+
             const probAboveMax = this.weatherService.calculateTempExceedsProbability(
                 forecastHigh,
                 maxF,
                 uncertainty
             );
-            
+
             probability = probAboveMin - probAboveMax;
-            
+
             // Ensure valid probability
             probability = Math.max(0, Math.min(1, probability));
 
@@ -520,12 +520,17 @@ export class OpportunityDetector {
 
         try {
             const forecast = await this.weatherService.getForecastByCity(market.city);
-            const targetDateStr = targetDate.toISOString().split('T')[0];
+
+            // Normalize target date for comparison
+            const targetDateObj = new Date(targetDate);
+            targetDateObj.setUTCHours(0, 0, 0, 0);
 
             // Find precipitation probability for target date
-            const dayForecasts = forecast.hourly.filter(h =>
-                h.timestamp.toISOString().split('T')[0] === targetDateStr
-            );
+            const dayForecasts = forecast.hourly.filter(h => {
+                const hourDate = new Date(h.timestamp);
+                hourDate.setUTCHours(0, 0, 0, 0);
+                return hourDate.getTime() === targetDateObj.getTime();
+            });
 
             if (dayForecasts.length === 0) {
                 return null;
@@ -616,15 +621,15 @@ export class OpportunityDetector {
 
             // Guaranteed YES if min + sigma < forecast < max - sigma
             // Guaranteed NO if forecast < min - sigma OR forecast > max + sigma
-            
+
             // Check lower bound distance
             const diffMin = forecastValue - minThreshold;
             const sigmaMin = Math.abs(diffMin) / uncertainty;
-            
+
             // Check upper bound distance
             const diffMax = forecastValue - maxThreshold;
             const sigmaMax = Math.abs(diffMax) / uncertainty;
-            
+
             if (forecastValue > minThreshold && forecastValue < maxThreshold) {
                 // Inside range. Are we safely inside?
                 // We need to be > 3 sigma from min AND > 3 sigma from max
@@ -635,10 +640,10 @@ export class OpportunityDetector {
                 // Outside range. Are we safely outside?
                 // Either safely below min OR safely above max
                 if (forecastValue <= minThreshold && sigmaMin >= config.certaintySigmaThreshold) {
-                     return { probability: 0.0, sigma: sigmaMin };
+                    return { probability: 0.0, sigma: sigmaMin };
                 }
                 if (forecastValue >= maxThreshold && sigmaMax >= config.certaintySigmaThreshold) {
-                     return { probability: 0.0, sigma: sigmaMax };
+                    return { probability: 0.0, sigma: sigmaMax };
                 }
             }
             return null;
