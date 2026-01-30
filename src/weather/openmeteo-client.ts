@@ -67,7 +67,7 @@ export class OpenMeteoClient implements IWeatherProvider {
     constructor() {
         this.client = axios.create({
             baseURL: 'https://api.open-meteo.com/v1',
-            timeout: 15000,
+            timeout: 8000,
         });
     }
 

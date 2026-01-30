@@ -16,12 +16,12 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 // Maximum age of a forecast change before it's considered "stale" (market has caught up)
-// Relaxed to 5 minutes to allow for more opportunities in testing
-const MAX_CHANGE_AGE_MS = 300000;
+// Tightened to 30 seconds - strictly fresh news only
+const MAX_CHANGE_AGE_MS = 30000;
 
 // Minimum change threshold to trigger detection
-// RELAXED: 1.0 sigma = more opportunities
-const MIN_SIGMA_FOR_ARBITRAGE = 1.0;
+// RELAXED: 0.0 sigma = trade on ANY deviation (Maximum Aggression)
+const MIN_SIGMA_FOR_ARBITRAGE = 0.0;
 
 export class SpeedArbitrageStrategy {
     private store: DataStore;
@@ -33,6 +33,9 @@ export class SpeedArbitrageStrategy {
     // Track opportunities we've already captured - prevents re-buying at higher prices
     // Key: marketId, Value: { forecastValue we traded on, when we captured it }
     private capturedOpportunities: Map<string, { forecastValue: number; capturedAt: Date }> = new Map();
+
+    // Track forecasts we've already analyzed (traded OR skipped) to prevent loop spam
+    private processedForecasts: Map<string, number> = new Map();
 
     constructor(store: DataStore) {
         this.store = store;
@@ -103,9 +106,18 @@ export class SpeedArbitrageStrategy {
             const changeAge = now - forecast.changeTimestamp.getTime();
             const isSpeedArb = forecast.valueChanged && (changeAge <= MAX_CHANGE_AGE_MS);
 
+            // Check if we've already processed this specific forecast update
+            const lastProcessed = this.processedForecasts.get(market.market.id);
+            if (lastProcessed === forecast.changeTimestamp.getTime()) {
+                continue; // Already analyzed this update
+            }
+
             if (isSpeedArb) {
                  logger.info(`⚡ Analyzing fresh change for ${market.market.question.substring(0, 30)}... Age: ${changeAge}ms`);
             }
+
+            // Mark as processed immediately (we will analyze it now, don't repeat)
+            this.processedForecasts.set(market.market.id, forecast.changeTimestamp.getTime());
 
             // =====================================================
             // CHECK #1: Have we already captured this opportunity?
@@ -141,7 +153,8 @@ export class SpeedArbitrageStrategy {
                             (expectedProb < 0.5 && priceYes < priceBeforeChange);
 
                         if (priceMovedTowards && Math.abs(priceYes - priceBeforeChange) > 0.05) {
-                            continue; // Market beat us
+                            // logger.debug(`Skipping ${market.market.question}: Market beat us`);
+                            // continue; // Market beat us (DISABLED for aggressive mode)
                         }
                     }
                 }
@@ -171,12 +184,23 @@ export class SpeedArbitrageStrategy {
 
             const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
 
+            if (sigma < 0.1) {
+                 logger.warn(`DEBUG SIGMA 0: Forecast=${forecast.forecastValue}, Threshold=${threshold} (Orig: ${market.threshold} ${market.thresholdUnit}), Market=${market.market.question.substring(0,30)}`);
+            }
+
             // DYNAMIC THRESHOLD:
-            // Speed Arb (Fresh News): Accept 1.5 sigma (aggressive)
-            // Value Arb (Stale News): Require 2.5 sigma (conservative, deep value)
-            const requiredSigma = isSpeedArb ? MIN_SIGMA_FOR_ARBITRAGE : 2.5;
+            // Speed Arb (Fresh News): Accept 1.0 sigma
+            // Value Arb (Stale News): DISABLED per user request (was 2.5)
+            
+            if (!isSpeedArb) {
+                // Strictly enforce speed arbitrage only - no trading on stale data
+                continue;
+            }
+
+            const requiredSigma = MIN_SIGMA_FOR_ARBITRAGE;
 
             if (sigma < requiredSigma) {
+                logger.info(`Skipping ${market.market.question.substring(0, 30)}...: Sigma ${sigma.toFixed(2)} < ${requiredSigma}`);
                 continue;
             }
 
@@ -201,7 +225,7 @@ export class SpeedArbitrageStrategy {
             );
 
             // Require slightly higher edge for stale data to cover spread/risk
-            const minEdge = isSpeedArb ? 0.05 : 0.10;
+            const minEdge = isSpeedArb ? 0.00 : 0.10;
 
             if (edge && Math.abs(edge.adjustedEdge) >= minEdge) {
                 // Log the opportunity - forecast values disabled per user request

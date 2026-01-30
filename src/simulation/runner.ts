@@ -108,35 +108,54 @@ export class SimulationRunner {
 
         // 3. Execute Trades (Simulated)
         for (const signal of signals) {
+            logger.info(`Processing signal for ${signal.marketId} (Size: ${signal.size})`);
 
             const state = this.store.getMarketState(signal.marketId);
-            if (!state) continue;
+            if (!state) {
+                logger.error(`State missing for ${signal.marketId}`);
+                continue;
+            }
 
             const size = signal.size;
 
-            if (size < 10) continue; // Too small
+            if (size < 10) {
+                logger.warn(`Size too small: ${size}`);
+                continue; 
+            }
 
             // Check if we already have a position
-            // Ideally the strategy handles this, but for now strict check
             const existingPos = this.simulator.getAllPositions().find(p => p.marketId === signal.marketId && p.side === signal.side);
-            if (existingPos) continue;
+            if (existingPos) {
+                logger.info(`Existing position found for ${signal.marketId}`);
+                continue;
+            }
 
             // Execute
-            const position = this.simulator.openPosition({
-                market: state.market,
-                forecastProbability: 0,
-                marketProbability: 0,
-                edge: signal.estimatedEdge,
-                action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
-                confidence: signal.confidence,
-                reason: signal.reason,
-                weatherDataSource: 'noaa',
-                isGuaranteed: signal.isGuaranteed || false
-            }, size);
+            try {
+                const position = this.simulator.openPosition({
+                    market: state.market,
+                    forecastProbability: 0,
+                    marketProbability: 0,
+                    edge: signal.estimatedEdge,
+                    action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
+                    confidence: signal.confidence,
+                    reason: signal.reason,
+                    weatherDataSource: 'noaa',
+                    isGuaranteed: signal.isGuaranteed || false
+                }, size);
 
-            // Mark this opportunity as captured to prevent re-buying at higher prices
-            if (position && state.lastForecast) {
-                this.strategy.markOpportunityCaptured(signal.marketId, state.lastForecast.forecastValue);
+                if (!position) {
+                    logger.warn(`openPosition returned null for ${signal.marketId}`);
+                } else {
+                    logger.info(`Trade executed successfully: ${position.id}`);
+                }
+            
+                // Mark this opportunity as captured to prevent re-buying at higher prices
+                if (position && state.lastForecast) {
+                    this.strategy.markOpportunityCaptured(signal.marketId, state.lastForecast.forecastValue);
+                }
+            } catch (e) {
+                logger.error(`Exception in openPosition: ${(e as Error).message}`);
             }
         }
 

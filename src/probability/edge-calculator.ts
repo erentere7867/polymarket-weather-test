@@ -71,8 +71,8 @@ export class EdgeCalculator {
         }
 
         // 3. Risk gating
-        // For guaranteed outcomes, use lower threshold (5%)
-        const effectiveThreshold = isGuaranteed ? 0.05 : this.minEdgeThreshold;
+        // For guaranteed outcomes, allow ANY positive edge (0%)
+        const effectiveThreshold = isGuaranteed ? 0.00 : this.minEdgeThreshold;
         if (adjustedEdge < effectiveThreshold) {
             return null;
         }
