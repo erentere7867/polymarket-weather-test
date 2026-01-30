@@ -80,7 +80,7 @@ export class BotManager {
         await this.priceTracker.start(this.weatherScanner, 60000);
 
         // Setup forecast monitor
-        this.forecastMonitor.onForecastChanged = (marketId, change) => {
+        this.forecastMonitor.onForecastChanged = async (marketId, change) => {
             logger.info(`🚨 INTERRUPT: Significant forecast change detected! Triggering immediate scan.`);
             // Interrupt current delay to run cycle immediately
             if (this.currentDelayTimeout) {
@@ -90,6 +90,15 @@ export class BotManager {
                     this.delayResolve();
                     this.delayResolve = null;
                 }
+            }
+            // Also trigger an immediate cycle run if not already running
+            if (!this.isRunning) {
+                return;
+            }
+            try {
+                await this.runCycle();
+            } catch (error) {
+                logger.error('Error in forecast-triggered cycle', { error: (error as Error).message });
             }
         };
 
