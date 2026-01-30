@@ -118,9 +118,10 @@ export class SimulationRunner {
 
             const size = signal.size;
 
-            if (size < 10) {
+            // Lower minimum size threshold to match portfolio.ts (was 10, now 5)
+            if (size < 5) {
                 logger.warn(`Size too small: ${size}`);
-                continue; 
+                continue;
             }
 
             // Check if we already have a position
@@ -149,7 +150,7 @@ export class SimulationRunner {
                 } else {
                     logger.info(`Trade executed successfully: ${position.id}`);
                 }
-            
+
                 // Mark this opportunity as captured to prevent re-buying at higher prices
                 if (position && state.lastForecast) {
                     this.strategy.markOpportunityCaptured(signal.marketId, state.lastForecast.forecastValue);
@@ -201,9 +202,9 @@ export class SimulationRunner {
     private logForecastStatus(): void {
         const markets = this.store.getAllMarkets();
         logger.info('--- ☁️ 10-Minute Forecast Update ☁️ ---');
-        
+
         // Group by city for cleaner output
-        const cityGroups = new Map<string, Array<{metric: string, value: number, changed: Date, date: string, threshold?: number}>>();
+        const cityGroups = new Map<string, Array<{ metric: string, value: number, changed: Date, date: string, threshold?: number }>>();
 
         for (const market of markets) {
             const state = this.store.getMarketState(market.market.id);
