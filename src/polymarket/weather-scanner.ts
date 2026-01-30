@@ -117,7 +117,8 @@ export class WeatherScanner {
         const city = this.extractCity(fullText);
 
         // Extract metric type and threshold - use QUESTION only to avoid Date matching in Title
-        const { metricType, threshold, minThreshold, maxThreshold, thresholdUnit, comparisonType } = this.extractMetric(question);
+        // Pass city to help infer units (e.g. Buenos Aires -> C, New York -> F)
+        const { metricType, threshold, minThreshold, maxThreshold, thresholdUnit, comparisonType } = this.extractMetric(question, city);
 
         // Extract target date
         const targetDate = this.extractDate(fullText, event);
@@ -174,7 +175,7 @@ export class WeatherScanner {
     /**
      * Extract weather metric type and threshold
      */
-    private extractMetric(text: string): {
+    private extractMetric(text: string, city: string | null): {
         metricType: ParsedWeatherMarket['metricType'];
         threshold?: number;
         minThreshold?: number;
@@ -187,6 +188,15 @@ export class WeatherScanner {
             return { metricType: 'unknown' };
         }
 
+        // Determine default unit based on city location
+        let defaultUnit: 'F' | 'C' = 'F';
+        if (city) {
+            const location = findCity(city);
+            if (location && location.country !== 'US') {
+                defaultUnit = 'C';
+            }
+        }
+
         // Temperature range patterns: "Between 30 and 40", "30-40 degrees"
         // MUST NOT contain precipitation/snow keywords to avoid false positives
         if (!text.match(/precipitation|rain|inches|"/i)) {
@@ -196,8 +206,13 @@ export class WeatherScanner {
                 const val2 = parseInt(rangeMatch[3], 10);
 
                 // Determine unit (check both spots)
+<<<<<<< HEAD
                 const unit = (rangeMatch[2] || rangeMatch[4] || 'F').toUpperCase() as 'F' | 'C';
 
+=======
+                const unit = (rangeMatch[2] || rangeMatch[4] || defaultUnit).toUpperCase() as 'F' | 'C';
+                
+>>>>>>> 374b043699c911e8a6fd2eec6958f6d817ebe6a8
                 return {
                     metricType: 'temperature_range',
                     minThreshold: Math.min(val1, val2),
@@ -217,7 +232,7 @@ export class WeatherScanner {
             const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least)\b/i);
 
             const val = parseInt(highTempMatch[1], 10);
-            const unit = (highTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F';
+            const unit = (highTempMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit;
 
             if (!isBelow && !isAbove) {
                 // No direction specified -> Treat as exact bucket (e.g., "32" means 32 <= T < 33)
@@ -250,7 +265,7 @@ export class WeatherScanner {
             return {
                 metricType: 'temperature_threshold',
                 threshold: parseInt(tempThresholdMatch[1], 10),
-                thresholdUnit: (tempThresholdMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (tempThresholdMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType: 'above',
             };
         }
@@ -261,7 +276,7 @@ export class WeatherScanner {
             return {
                 metricType: 'temperature_threshold',
                 threshold: parseInt(tempBelowMatch[1], 10),
-                thresholdUnit: (tempBelowMatch[2]?.toUpperCase() as 'F' | 'C') || 'F',
+                thresholdUnit: (tempBelowMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
                 comparisonType: 'below',
             };
         }
@@ -270,8 +285,13 @@ export class WeatherScanner {
         const simpleTempMatch = text.match(/(?:temperature|temp)[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
         if (simpleTempMatch) {
             const val = parseInt(simpleTempMatch[1], 10);
+<<<<<<< HEAD
             const unit = (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F';
 
+=======
+            const unit = (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit;
+            
+>>>>>>> 374b043699c911e8a6fd2eec6958f6d817ebe6a8
             // Check direction again just in case simple match missed context
             const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
             const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least)\b/i);
