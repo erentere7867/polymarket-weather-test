@@ -16,8 +16,8 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 // Maximum age of a forecast change before it's considered "stale" (market has caught up)
-// AGGRESSIVE: 15 seconds - act fast before market reacts
-const MAX_CHANGE_AGE_MS = 15000;
+// Aligned with cache TTL: 12 seconds to match forecast-monitor cache
+const MAX_CHANGE_AGE_MS = 12000;
 
 // Minimum change threshold to trigger detection
 // AGGRESSIVE: 1.5 sigma = more opportunities, slightly lower confidence
@@ -50,7 +50,8 @@ export class SpeedArbitrageStrategy {
             forecastValue,
             capturedAt: new Date()
         });
-        logger.info(`📌 Marked opportunity captured: ${marketId} at forecast ${forecastValue.toFixed(1)}`);
+        // Forecast values disabled per user request
+        logger.info(`📌 Marked opportunity captured: ${marketId}`);
     }
 
     /**
@@ -67,7 +68,8 @@ export class SpeedArbitrageStrategy {
         if (significantChange) {
             // New forecast value! Clear the captured flag
             this.capturedOpportunities.delete(marketId);
-            logger.info(`🔄 New forecast for ${marketId}: ${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)}, allowing re-entry`);
+            // Forecast values disabled per user request
+            logger.info(`🔄 New forecast for ${marketId}: allowing re-entry`);
             return false;
         }
 
@@ -127,13 +129,13 @@ export class SpeedArbitrageStrategy {
                 // For speed arb, ensure market hasn't already reacted to THIS change
                 if (priceYesPoint.timestamp.getTime() > forecast.changeTimestamp.getTime()) {
                     const priceBeforeChange = this.findPriceBeforeChange(state.priceHistory.yes.history, forecast.changeTimestamp);
-                    
+
                     if (priceBeforeChange !== null) {
                         const diff = forecast.forecastValue - (market.threshold || 0);
                         const expectedProb = market.comparisonType === 'above' ? (diff > 0 ? 1 : 0) : (diff < 0 ? 1 : 0);
                         const priceMovedTowards = (expectedProb > 0.5 && priceYes > priceBeforeChange) ||
-                                                (expectedProb < 0.5 && priceYes < priceBeforeChange);
-                        
+                            (expectedProb < 0.5 && priceYes < priceBeforeChange);
+
                         if (priceMovedTowards && Math.abs(priceYes - priceBeforeChange) > 0.05) {
                             continue; // Market beat us
                         }
@@ -157,7 +159,7 @@ export class SpeedArbitrageStrategy {
                 case 'temperature_high':
                 case 'temperature_low':
                 case 'temperature_threshold':
-                    uncertainty = 3; 
+                    uncertainty = 3;
                     break;
                 default:
                     uncertainty = 5;
@@ -198,10 +200,9 @@ export class SpeedArbitrageStrategy {
             const minEdge = isSpeedArb ? 0.05 : 0.10;
 
             if (edge && Math.abs(edge.adjustedEdge) >= minEdge) {
-                // Log the opportunity
+                // Log the opportunity - forecast values disabled per user request
                 logger.info(isSpeedArb ? `🚀 SPEED ARB OPPORTUNITY:` : `💎 VALUE ARB OPPORTUNITY:`, {
                     market: market.market.question.substring(0, 50),
-                    forecast: `${forecast.forecastValue.toFixed(1)} (Threshold: ${threshold})`,
                     sigma: sigma.toFixed(1),
                     edge: (edge.adjustedEdge * 100).toFixed(1) + '%',
                     price: (priceYes * 100).toFixed(1) + '%',

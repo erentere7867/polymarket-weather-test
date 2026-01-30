@@ -39,7 +39,8 @@ export class OpportunityDetector {
             capturedAt: new Date(),
             side
         });
-        logger.info(`📌 Opportunity captured: ${marketId} at forecast ${forecastValue.toFixed(1)} (${side})`);
+        // Forecast values disabled per user request
+        logger.info(`📌 Opportunity captured: ${marketId} (${side})`);
     }
 
     /**
@@ -94,7 +95,8 @@ export class OpportunityDetector {
             if (!wasIn && isIn) {
                 // Forecast moved INTO range - Re-enter!
                 this.capturedOpportunities.delete(market.market.id);
-                logger.info(`🔄 New forecast for ${market.city} (Range): Moved INTO range [${min}, ${max}] (${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)}), forcing re-entry`);
+                // Forecast values disabled per user request
+                logger.info(`🔄 New forecast for ${market.city} (Range): Moved INTO range, forcing re-entry`);
                 return { skip: false, reason: '' };
             }
         }
@@ -106,13 +108,14 @@ export class OpportunityDetector {
         if (forecastDiff >= threshold) {
             // New forecast! Clear captured flag
             this.capturedOpportunities.delete(market.market.id);
-            logger.info(`🔄 New forecast for ${market.city} (${market.metricType}): ${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)} (diff ${forecastDiff.toFixed(1)} >= ${threshold}), allowing re-entry`);
+            // Forecast values disabled per user request
+            logger.info(`🔄 New forecast for ${market.city} (${market.metricType}): allowing re-entry`);
             return { skip: false, reason: '' };
         }
 
         return {
             skip: true,
-            reason: `Already captured at forecast ${captured.forecastValue.toFixed(1)}, current ${currentForecastValue?.toFixed(1)} (diff ${forecastDiff.toFixed(1)} < ${threshold})`
+            reason: `Already captured - forecast change below threshold`
         };
     }
 

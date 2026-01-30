@@ -75,7 +75,7 @@ export class BotManager {
         });
 
         await this.tradingClient.initialize();
-        
+
         // Start PriceTracker (handles market scanning and WS updates)
         await this.priceTracker.start(this.weatherScanner, 60000);
 
@@ -106,10 +106,10 @@ export class BotManager {
         try {
             // Step 1: Get markets from DataStore (maintained by PriceTracker)
             const allMarkets = this.dataStore.getAllMarkets();
-            
+
             if (allMarkets.length === 0) {
-                 logger.info('No markets in store yet, waiting...');
-                 return;
+                logger.info('No markets in store yet, waiting...');
+                return;
             }
 
             const actionableMarkets = this.weatherScanner.filterActionableMarkets(allMarkets);
@@ -200,7 +200,7 @@ export class BotManager {
         this.isRunning = false;
         this.priceTracker.stop();
         this.forecastMonitor.stop();
-        
+
         // Interrupt delay if active
         if (this.currentDelayTimeout) {
             clearTimeout(this.currentDelayTimeout);
@@ -225,13 +225,13 @@ export class BotManager {
     private logOpportunities(opportunities: TradingOpportunity[]): void {
         for (const opp of opportunities) {
             const marketQuestion = opp.market.market.question.substring(0, 60);
+            // Forecast values disabled per user request
             logger.info(`Opportunity: ${marketQuestion}...`, {
                 action: opp.action,
                 edge: `${(opp.edge * 100).toFixed(1)}%`,
                 marketPrice: `${(opp.marketProbability * 100).toFixed(1)}%`,
                 forecastProb: `${(opp.forecastProbability * 100).toFixed(1)}%`,
                 confidence: `${(opp.confidence * 100).toFixed(0)}%`,
-                forecastValue: opp.forecastValue ? `${opp.forecastValue}${opp.forecastValueUnit || ''}` : 'N/A',
                 reason: opp.reason,
             });
         }

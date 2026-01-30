@@ -17,7 +17,7 @@ export class ForecastMonitor {
     private isRunning: boolean = false;
     private pollTimeout: NodeJS.Timeout | null = null;
     private cityCache: Map<string, { data: WeatherData, timestamp: Date }> = new Map();
-    public cacheTtlMs: number = 15000;
+    public cacheTtlMs: number = 12000; // 12 seconds to stay under rate limits
     private initializedMarkets: Set<string> = new Set();
 
     // Callback for significant changes
@@ -69,9 +69,13 @@ export class ForecastMonitor {
                 }
             }
 
-            for (const [city, cityMarkets] of cityGroups) {
-                await this.updateCityForecasts(city, cityMarkets);
-            }
+            // Process cities in parallel for faster detection
+            const updatePromises = Array.from(cityGroups.entries()).map(([city, cityMarkets]) =>
+                this.updateCityForecasts(city, cityMarkets).catch(error => {
+                    logger.error(`Failed to update forecasts for ${city}`, { error: (error as Error).message });
+                })
+            );
+            await Promise.all(updatePromises);
 
         } catch (error) {
             logger.error('Forecast poll failed', { error: (error as Error).message });
@@ -85,11 +89,11 @@ export class ForecastMonitor {
 
     private async updateCityForecasts(city: string, markets: ParsedWeatherMarket[]): Promise<void> {
         try {
-            // Check cache (1 min validity)
+            // Check cache validity
             let weatherData: WeatherData;
             const cached = this.cityCache.get(city);
 
-            // 15s cache to match MAX_CHANGE_AGE_MS in speed-arbitrage.ts
+            // 12s cache to balance speed and rate limits
             if (cached && (Date.now() - cached.timestamp.getTime() < this.cacheTtlMs)) {
                 weatherData = cached.data;
             } else {
@@ -209,20 +213,12 @@ export class ForecastMonitor {
                 const realChange = valueChanged && !isNew;
 
                 if (realChange) {
-                    logger.info(`⚡ FORECAST CHANGED for ${city} (${market.metricType})`, {
-                        previousValue: previousValue?.toFixed(1),
-                        newValue: forecastValue.toFixed(1),
-                        changeAmount: changeAmount.toFixed(1),
-                        threshold: market.threshold,
-                        source: weatherData.source,
-                        prevSource: previousSource
-                    });
+                    // Log only minimal info - forecast values disabled per user request
+                    logger.info(`⚡ FORECAST CHANGED for ${city} (${market.metricType})`);
 
                     if (this.onForecastChanged) {
                         this.onForecastChanged(market.market.id, changeAmount);
                     }
-                } else if (valueChanged && isNew) {
-                    logger.debug(`Initialized baseline forecast for ${city}: ${forecastValue}`);
                 }
 
                 const snapshot: ForecastSnapshot = {
@@ -242,7 +238,8 @@ export class ForecastMonitor {
             }
 
         } catch (error) {
-            logger.error(`Failed to update forecasts for ${city}`, { error: (error as Error).message });
+            // Error already logged in poll() for parallel execution
+            throw error;
         }
     }
 }
