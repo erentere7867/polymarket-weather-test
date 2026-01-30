@@ -206,13 +206,7 @@ export class WeatherScanner {
                 const val2 = parseInt(rangeMatch[3], 10);
 
                 // Determine unit (check both spots)
-<<<<<<< HEAD
                 const unit = (rangeMatch[2] || rangeMatch[4] || 'F').toUpperCase() as 'F' | 'C';
-
-=======
-                const unit = (rangeMatch[2] || rangeMatch[4] || defaultUnit).toUpperCase() as 'F' | 'C';
-                
->>>>>>> 374b043699c911e8a6fd2eec6958f6d817ebe6a8
                 return {
                     metricType: 'temperature_range',
                     minThreshold: Math.min(val1, val2),
@@ -285,13 +279,7 @@ export class WeatherScanner {
         const simpleTempMatch = text.match(/(?:temperature|temp)[^\d]*?(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
         if (simpleTempMatch) {
             const val = parseInt(simpleTempMatch[1], 10);
-<<<<<<< HEAD
             const unit = (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || 'F';
-
-=======
-            const unit = (simpleTempMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit;
-            
->>>>>>> 374b043699c911e8a6fd2eec6958f6d817ebe6a8
             // Check direction again just in case simple match missed context
             const isBelow = text.match(/\b(below|under|less|lower|fewer)\b/i);
             const isAbove = text.match(/\b(above|exceeds?|over|higher|greater|more|at least)\b/i);
