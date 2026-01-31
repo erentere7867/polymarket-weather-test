@@ -185,13 +185,23 @@ export const KNOWN_CITIES: CityLocation[] = [
 /**
  * Find city coordinates from name or alias
  */
-export function findCity(query: string): CityLocation | undefined {
-    const normalizedQuery = query.toLowerCase().trim();
+// Build a lookup map for O(1) city lookups
+const CITY_LOOKUP_MAP: Map<string, CityLocation> = new Map();
 
-    return KNOWN_CITIES.find(city => {
-        if (city.name.toLowerCase() === normalizedQuery) return true;
-        return city.aliases.some(alias => alias.toLowerCase() === normalizedQuery);
-    });
+// Initialize the lookup map
+(function initCityLookup() {
+    for (const city of KNOWN_CITIES) {
+        // Index by name
+        CITY_LOOKUP_MAP.set(city.name.toLowerCase().trim(), city);
+        // Index by aliases
+        for (const alias of city.aliases) {
+            CITY_LOOKUP_MAP.set(alias.toLowerCase().trim(), city);
+        }
+    }
+})();
+
+export function findCity(query: string): CityLocation | undefined {
+    return CITY_LOOKUP_MAP.get(query.toLowerCase().trim());
 }
 
 /**

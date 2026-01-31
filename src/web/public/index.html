@@ -85,11 +85,42 @@
                     <input type="number" id="sl-input" value="-10" step="0.5"
                         class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-rose-400 w-32 focus:outline-none focus:border-rose-500 transition-colors">
                 </div>
+                <div class="flex items-center space-x-3">
+                    <input type="checkbox" id="skip-price-check" class="w-5 h-5 rounded border-white/10 bg-slate-800/50 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 cursor-pointer">
+                    <label for="skip-price-check" class="text-slate-400 text-sm cursor-pointer select-none">
+                        <span class="block text-xs uppercase tracking-wider text-slate-500">Fast Execution</span>
+                        Skip price checks on forecast changes
+                    </label>
+                </div>
                 <button onclick="saveSettings()"
                     class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded font-medium transition-colors flex items-center space-x-2">
                     <span>Save Configuration</span>
                 </button>
                 <div id="save-msg" class="text-sm opacity-0 transition-opacity"></div>
+            </div>
+        </div>
+
+        <!-- Speed Settings Card -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4">Speed Settings</h3>
+            <div class="flex flex-wrap gap-6 items-end">
+                <div>
+                    <label class="block text-slate-400 text-xs uppercase tracking-wider mb-2">Forecast Poll Interval (ms)</label>
+                    <input type="number" id="poll-interval-input" value="5000" step="500" min="1000" max="60000"
+                        class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-blue-400 w-40 focus:outline-none focus:border-blue-500 transition-colors">
+                    <p class="text-xs text-slate-500 mt-1">How often to check weather APIs</p>
+                </div>
+                <div>
+                    <label class="block text-slate-400 text-xs uppercase tracking-wider mb-2">Cache TTL (ms)</label>
+                    <input type="number" id="cache-ttl-input" value="2000" step="500" min="0" max="30000"
+                        class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-purple-400 w-40 focus:outline-none focus:border-purple-500 transition-colors">
+                    <p class="text-xs text-slate-500 mt-1">How long to cache weather data</p>
+                </div>
+                <button onclick="saveSpeedSettings()"
+                    class="bg-purple-600 hover:bg-purple-500 text-white px-6 py-2 rounded font-medium transition-colors flex items-center space-x-2">
+                    <span>Save Speed Settings</span>
+                </button>
+                <div id="speed-save-msg" class="text-sm opacity-0 transition-opacity"></div>
             </div>
         </div>
 
@@ -293,10 +324,13 @@
             try {
                 const res = await fetch(`${API_BASE}/settings`);
                 const data = await res.json();
-                
+
                 if (res.ok) {
                     document.getElementById('tp-input').value = data.takeProfit;
                     document.getElementById('sl-input').value = data.stopLoss;
+                    document.getElementById('skip-price-check').checked = data.skipPriceCheck || false;
+                    document.getElementById('poll-interval-input').value = data.pollIntervalMs || 5000;
+                    document.getElementById('cache-ttl-input').value = data.cacheTtlMs || 2000;
                 }
             } catch (err) {
                 console.error('Failed to fetch settings:', err);
@@ -306,16 +340,18 @@
         async function saveSettings() {
             const tpInput = document.getElementById('tp-input');
             const slInput = document.getElementById('sl-input');
+            const skipPriceCheckInput = document.getElementById('skip-price-check');
             const msgEl = document.getElementById('save-msg');
 
             const takeProfit = parseFloat(tpInput.value);
             const stopLoss = parseFloat(slInput.value);
+            const skipPriceCheck = skipPriceCheckInput.checked;
 
             try {
                 const res = await fetch(`${API_BASE}/settings`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ takeProfit, stopLoss })
+                    body: JSON.stringify({ takeProfit, stopLoss, skipPriceCheck })
                 });
 
                 if (res.ok) {
@@ -333,6 +369,50 @@
 
             } catch (err) {
                 console.error('Save error:', err);
+                msgEl.innerText = '❌ Network Error';
+                msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
+            }
+        }
+
+        async function saveSpeedSettings() {
+            const pollIntervalInput = document.getElementById('poll-interval-input');
+            const cacheTtlInput = document.getElementById('cache-ttl-input');
+            const msgEl = document.getElementById('speed-save-msg');
+
+            const intervalMs = parseInt(pollIntervalInput.value);
+            const ttlMs = parseInt(cacheTtlInput.value);
+
+            try {
+                // Update poll interval
+                const pollRes = await fetch(`${API_BASE}/settings/poll-interval`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ intervalMs })
+                });
+
+                // Update cache TTL
+                const cacheRes = await fetch(`${API_BASE}/settings/cache-ttl`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ttlMs })
+                });
+
+                if (pollRes.ok && cacheRes.ok) {
+                    msgEl.innerText = '✅ Speed Settings Saved!';
+                    msgEl.className = 'text-sm text-emerald-400 opacity-100 transition-opacity';
+                } else {
+                    const pollData = await pollRes.json().catch(() => ({}));
+                    const cacheData = await cacheRes.json().catch(() => ({}));
+                    msgEl.innerText = '❌ Error: ' + (pollData.message || cacheData.message || 'Failed');
+                    msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
+                }
+
+                setTimeout(() => {
+                    msgEl.className = 'text-sm opacity-0 transition-opacity';
+                }, 3000);
+
+            } catch (err) {
+                console.error('Save speed settings error:', err);
                 msgEl.innerText = '❌ Network Error';
                 msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
             }

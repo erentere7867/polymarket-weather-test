@@ -34,53 +34,32 @@ export class EntryOptimizer {
      * Optimize entry for a detected edge
      */
     optimizeEntry(edge: CalculatedEdge): EntrySignal {
-        // 1. Determine base size using Kelly Fraction
-        // Kelly provides % of bankroll. Here we use it to scale max position.
-        // For guaranteed outcomes, use higher position multiplier
-
-        let effectiveMaxPosition = this.maxPositionSize;
-        if (edge.isGuaranteed) {
-            // Use configurable multiplier for guaranteed outcomes (default 2x)
-            effectiveMaxPosition = this.maxPositionSize * config.guaranteedPositionMultiplier;
-            logger.info(`🎯 GUARANTEED trade: Using ${config.guaranteedPositionMultiplier}x position size ($${effectiveMaxPosition.toFixed(2)})`);
-        }
-
-        let targetSize = effectiveMaxPosition * edge.KellyFraction * edge.confidence;
-
-        // Clamp properties
-        targetSize = Math.max(5, targetSize); // Min $5
-        targetSize = Math.min(effectiveMaxPosition, targetSize); // Cap at effective max
-
-        // 2. Determine Order Type & Urgency
-        // For guaranteed outcomes: ALWAYS HIGH urgency + MARKET order
-        // We need to capture the opportunity before market catches up
-
-        let urgency: 'LOW' | 'MEDIUM' | 'HIGH' = 'MEDIUM';
-        let orderType: 'MARKET' | 'LIMIT' = 'LIMIT';
-        let priceLimit: number | undefined = undefined;
+        // Fast path: For speed arbitrage, use max position size directly
+        // Skip complex Kelly calculation for guaranteed outcomes
+        let targetSize: number;
 
         if (edge.isGuaranteed) {
-            // Guaranteed outcomes need maximum speed
-            urgency = 'HIGH';
-            orderType = 'MARKET';
-            logger.info(`🎯 GUARANTEED: Using MARKET order with HIGH urgency for speed arbitrage`);
-        } else if (edge.adjustedEdge > 0.15) {
-            // Big edge (>15%) - hit it fast
-            urgency = 'HIGH';
-            orderType = 'MARKET';
+            // Use max position for guaranteed outcomes (fastest path)
+            targetSize = this.maxPositionSize * config.guaranteedPositionMultiplier;
         } else {
-            // Smaller edges - still use MARKET for speed arbitrage strategy
-            orderType = 'MARKET';
+            // Quick Kelly approximation for non-guaranteed
+            targetSize = this.maxPositionSize * edge.KellyFraction * edge.confidence;
         }
+
+        // Clamp to min/max
+        targetSize = Math.max(5, Math.min(this.maxPositionSize * config.guaranteedPositionMultiplier, targetSize));
+
+        // Always use MARKET orders for speed arbitrage
+        // Skip logging to reduce latency
 
         return {
             marketId: edge.marketId,
             side: edge.side,
             size: parseFloat(targetSize.toFixed(2)),
-            orderType,
-            priceLimit,
-            urgency,
-            reason: `${edge.reason} | Kelly: ${edge.KellyFraction.toFixed(2)}`,
+            orderType: 'MARKET',
+            priceLimit: undefined,
+            urgency: edge.isGuaranteed ? 'HIGH' : 'MEDIUM',
+            reason: `${edge.reason} | Edge: ${(edge.adjustedEdge * 100).toFixed(1)}%`,
             confidence: edge.confidence,
             estimatedEdge: edge.adjustedEdge,
             isGuaranteed: edge.isGuaranteed

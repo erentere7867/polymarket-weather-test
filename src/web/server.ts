@@ -83,7 +83,7 @@ app.get('/api/positions/closed', (req, res) => {
 
 // 5. Settings Update
 app.post('/api/settings', (req, res) => {
-    const { takeProfit, stopLoss } = req.body;
+    const { takeProfit, stopLoss, skipPriceCheck } = req.body;
 
     if (typeof takeProfit !== 'number' || typeof stopLoss !== 'number') {
         return res.status(400).json({ error: 'Invalid settings format. Expected numbers for takeProfit and stopLoss (percentages).' });
@@ -93,7 +93,8 @@ app.post('/api/settings', (req, res) => {
     // The UI sends 5 for 5%, -10 for -10%
     runner.updateSettings({
         takeProfit: takeProfit / 100,
-        stopLoss: stopLoss / 100
+        stopLoss: stopLoss / 100,
+        skipPriceCheck: typeof skipPriceCheck === 'boolean' ? skipPriceCheck : undefined
     });
 
     res.json({ success: true, message: 'Settings updated' });
@@ -104,8 +105,41 @@ app.get('/api/settings', (req, res) => {
     // Return as percentages for UI
     res.json({
         takeProfit: settings.takeProfit * 100,
-        stopLoss: settings.stopLoss * 100
+        stopLoss: settings.stopLoss * 100,
+        skipPriceCheck: settings.skipPriceCheck,
+        cacheTtlMs: runner.getCacheTtl(),
+        pollIntervalMs: runner.getPollInterval()
     });
+});
+
+// 7. Cache TTL Control (Dynamic adjustment)
+app.post('/api/settings/cache-ttl', (req, res) => {
+    const { ttlMs } = req.body;
+    if (typeof ttlMs !== 'number' || ttlMs < 0 || ttlMs > 60000) {
+        res.status(400).json({ success: false, message: 'Invalid TTL. Must be between 0 and 60000ms' });
+        return;
+    }
+    runner.updateCacheTtl(ttlMs);
+    res.json({ success: true, message: `Cache TTL updated to ${ttlMs}ms`, cacheTtlMs: ttlMs });
+});
+
+app.get('/api/settings/cache-ttl', (req, res) => {
+    res.json({ cacheTtlMs: runner.getCacheTtl() });
+});
+
+// 8. Poll Interval Control (Dynamic adjustment)
+app.post('/api/settings/poll-interval', (req, res) => {
+    const { intervalMs } = req.body;
+    if (typeof intervalMs !== 'number' || intervalMs < 1000 || intervalMs > 60000) {
+        res.status(400).json({ success: false, message: 'Invalid interval. Must be between 1000 and 60000ms' });
+        return;
+    }
+    runner.updatePollInterval(intervalMs);
+    res.json({ success: true, message: `Poll interval updated to ${intervalMs}ms`, pollIntervalMs: intervalMs });
+});
+
+app.get('/api/settings/poll-interval', (req, res) => {
+    res.json({ pollIntervalMs: runner.getPollInterval() });
 });
 
 // 6. Opportunities (Signals)

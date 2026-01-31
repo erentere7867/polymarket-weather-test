@@ -39,7 +39,8 @@ export class OpportunityDetector {
             capturedAt: new Date(),
             side
         });
-        logger.info(`📌 Opportunity captured: ${marketId} at forecast ${forecastValue.toFixed(1)} (${side})`);
+        // Forecast values disabled per user request
+        logger.info(`📌 Opportunity captured: ${marketId} (${side})`);
     }
 
     /**
@@ -94,7 +95,8 @@ export class OpportunityDetector {
             if (!wasIn && isIn) {
                 // Forecast moved INTO range - Re-enter!
                 this.capturedOpportunities.delete(market.market.id);
-                logger.info(`🔄 New forecast for ${market.city} (Range): Moved INTO range [${min}, ${max}] (${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)}), forcing re-entry`);
+                // Forecast values disabled per user request
+                logger.info(`🔄 New forecast for ${market.city} (Range): Moved INTO range, forcing re-entry`);
                 return { skip: false, reason: '' };
             }
         }
@@ -106,13 +108,14 @@ export class OpportunityDetector {
         if (forecastDiff >= threshold) {
             // New forecast! Clear captured flag
             this.capturedOpportunities.delete(market.market.id);
-            logger.info(`🔄 New forecast for ${market.city} (${market.metricType}): ${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)} (diff ${forecastDiff.toFixed(1)} >= ${threshold}), allowing re-entry`);
+            // Forecast values disabled per user request
+            logger.info(`🔄 New forecast for ${market.city} (${market.metricType}): allowing re-entry`);
             return { skip: false, reason: '' };
         }
 
         return {
             skip: true,
-            reason: `Already captured at forecast ${captured.forecastValue.toFixed(1)}, current ${currentForecastValue?.toFixed(1)} (diff ${forecastDiff.toFixed(1)} < ${threshold})`
+            reason: `Already captured - forecast change below threshold`
         };
     }
 
@@ -247,8 +250,21 @@ export class OpportunityDetector {
                 finalProbability
             );
             if (skipCheck.skip) {
-                logger.debug(`⏭️ Skipping ${market.market.question.substring(0, 40)}...: ${skipCheck.reason}`);
-                return null;
+                // Return a non-trade opportunity with the skip reason for debugging
+                return {
+                    market,
+                    forecastProbability: finalProbability,
+                    marketProbability,
+                    edge: finalProbability - marketProbability,
+                    action: 'none',
+                    confidence,
+                    reason: `Skipped: ${skipCheck.reason}`,
+                    weatherDataSource,
+                    forecastValue,
+                    forecastValueUnit,
+                    isGuaranteed,
+                    certaintySigma,
+                };
             }
 
             // Edge calculation: positive = market underprices YES, negative = market overprices YES
@@ -260,21 +276,26 @@ export class OpportunityDetector {
             let reason = '';
 
             // For guaranteed outcomes, always trade if there's meaningful edge
+            // For regular opportunities, use the configured threshold
             const effectiveThreshold = isGuaranteed ? 0.05 : config.minEdgeThreshold;
+
+            // Additional check: for fresh forecast changes, be more aggressive
+            // This helps capture opportunities right after a forecast update
+            const isFreshChange = market.yesPrice > 0 && market.noPrice > 0; // Basic check that market has data
 
             if (absEdge >= effectiveThreshold) {
                 if (edge > 0) {
                     // Forecast says higher probability than market -> buy YES
                     action = 'buy_yes';
                     reason = isGuaranteed
-                        ? `🎯 GUARANTEED: Forecast ${forecastValue}${forecastValueUnit} vs threshold ${market.threshold}${forecastValueUnit} (${certaintySigma?.toFixed(1)}σ)`
-                        : `Forecast (${(finalProbability * 100).toFixed(1)}%) higher than market (${(marketProbability * 100).toFixed(1)}%)`;
+                        ? `🎯 GUARANTEED: ${certaintySigma?.toFixed(1)}σ confidence`
+                        : `Forecast higher than market by ${(absEdge * 100).toFixed(1)}%`;
                 } else {
                     // Forecast says lower probability than market -> buy NO
                     action = 'buy_no';
                     reason = isGuaranteed
-                        ? `🎯 GUARANTEED: Forecast ${forecastValue}${forecastValueUnit} vs threshold ${market.threshold}${forecastValueUnit} (${certaintySigma?.toFixed(1)}σ)`
-                        : `Forecast (${(finalProbability * 100).toFixed(1)}%) lower than market (${(marketProbability * 100).toFixed(1)}%)`;
+                        ? `🎯 GUARANTEED: ${certaintySigma?.toFixed(1)}σ confidence`
+                        : `Forecast lower than market by ${(absEdge * 100).toFixed(1)}%`;
                 }
             } else {
                 reason = `Edge ${(absEdge * 100).toFixed(1)}% below threshold ${(effectiveThreshold * 100).toFixed(0)}%`;
@@ -562,11 +583,25 @@ export class OpportunityDetector {
     async analyzeMarkets(markets: ParsedWeatherMarket[]): Promise<TradingOpportunity[]> {
         const opportunities: TradingOpportunity[] = [];
 
-        for (const market of markets) {
+        // Process markets in parallel for faster analysis
+        const analysisPromises = markets.map(async (market) => {
             const opportunity = await this.analyzeMarket(market);
-            if (opportunity && opportunity.action !== 'none') {
-                opportunities.push(opportunity);
+            // Include opportunities even with action='none' if they have significant edge
+            // This ensures forecast changes that don't meet threshold are still logged
+            if (opportunity) {
+                if (opportunity.action !== 'none') {
+                    return opportunity;
+                } else {
+                    // Log why we're not trading - helps debug edge cases
+                    logger.debug(`No trade for ${market.market.question.substring(0, 40)}: ${opportunity.reason}`);
+                }
             }
+            return null;
+        });
+
+        const results = await Promise.all(analysisPromises);
+        for (const opp of results) {
+            if (opp) opportunities.push(opp);
         }
 
         // Sort: guaranteed first, then by edge (highest first)

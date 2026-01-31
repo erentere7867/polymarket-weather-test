@@ -8,7 +8,7 @@ import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { GammaClient } from '../polymarket/gamma-client.js';
 import { PortfolioSimulator } from './portfolio.js';
 import { logger } from '../logger.js';
-import { config } from '../config.js';
+import { config, getEnvVarNumber } from '../config.js';
 
 // v2 Engine Components
 import { DataStore } from '../realtime/data-store.js';
@@ -74,13 +74,20 @@ export class SimulationRunner {
         await this.priceTracker.start(this.scanner, 60000); // 60s scan for new markets
         this.forecastMonitor.start();
 
+        // 3. Wire up immediate execution on forecast changes
+        this.forecastMonitor.onForecastChanged = (marketId: string, changeAmount: number) => {
+            logger.info(`⚡ Immediate execution triggered for ${marketId} (change: ${changeAmount.toFixed(2)})`);
+            this.executeImmediateOpportunity(marketId);
+        };
+
         // Wait a bit for initial data to populate
-        logger.info('Waiting 5s for initial data...');
-        await new Promise(r => setTimeout(r, 5000));
+        const startupDelayMs = getEnvVarNumber('STARTUP_DELAY_MS', 1000);
+        logger.info(`Waiting ${startupDelayMs}ms for initial data...`);
+        await new Promise(r => setTimeout(r, startupDelayMs));
 
         // 5. Main Loop
-        // We run the loop faster (e.g. 5s) to simulate "Real-Time" without spamming logs
-        const loopInterval = 5000;
+        // We run the loop faster (e.g. 250ms) to simulate "Real-Time" without spamming logs
+        const loopInterval = 250;
 
         while (this.isRunning && this.cycles < this.maxCycles) {
             this.cycles++;
@@ -108,35 +115,55 @@ export class SimulationRunner {
 
         // 3. Execute Trades (Simulated)
         for (const signal of signals) {
+            logger.info(`Processing signal for ${signal.marketId} (Size: ${signal.size})`);
 
             const state = this.store.getMarketState(signal.marketId);
-            if (!state) continue;
+            if (!state) {
+                logger.error(`State missing for ${signal.marketId}`);
+                continue;
+            }
 
             const size = signal.size;
 
-            if (size < 10) continue; // Too small
+            // Lower minimum size threshold to match portfolio.ts (was 10, now 5)
+            if (size < 5) {
+                logger.warn(`Size too small: ${size}`);
+                continue;
+            }
 
             // Check if we already have a position
-            // Ideally the strategy handles this, but for now strict check
             const existingPos = this.simulator.getAllPositions().find(p => p.marketId === signal.marketId && p.side === signal.side);
-            if (existingPos) continue;
+            if (existingPos) {
+                logger.info(`Existing position found for ${signal.marketId}`);
+                continue;
+            }
 
             // Execute
-            const position = this.simulator.openPosition({
-                market: state.market,
-                forecastProbability: 0,
-                marketProbability: 0,
-                edge: signal.estimatedEdge,
-                action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
-                confidence: signal.confidence,
-                reason: signal.reason,
-                weatherDataSource: 'noaa',
-                isGuaranteed: signal.isGuaranteed || false
-            }, size);
+            try {
+                const position = this.simulator.openPosition({
+                    market: state.market,
+                    forecastProbability: 0,
+                    marketProbability: 0,
+                    edge: signal.estimatedEdge,
+                    action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
+                    confidence: signal.confidence,
+                    reason: signal.reason,
+                    weatherDataSource: 'noaa',
+                    isGuaranteed: signal.isGuaranteed || false
+                }, size);
 
-            // Mark this opportunity as captured to prevent re-buying at higher prices
-            if (position && state.lastForecast) {
-                this.strategy.markOpportunityCaptured(signal.marketId, state.lastForecast.forecastValue);
+                if (!position) {
+                    logger.warn(`openPosition returned null for ${signal.marketId}`);
+                } else {
+                    logger.info(`Trade executed successfully: ${position.id}`);
+                }
+
+                // Mark this opportunity as captured to prevent re-buying at higher prices
+                if (position && state.lastForecast) {
+                    this.strategy.markOpportunityCaptured(signal.marketId, state.lastForecast.forecastValue);
+                }
+            } catch (e) {
+                logger.error(`Exception in openPosition: ${(e as Error).message}`);
             }
         }
 
@@ -167,7 +194,7 @@ export class SimulationRunner {
         // 5. Log Forecast Status every 10 minutes
         const now = Date.now();
         if (now - this.lastLogTime >= 600000) { // 10 minutes
-            this.logForecastStatus();
+            // this.logForecastStatus();
             this.lastLogTime = now;
         }
 
@@ -182,9 +209,9 @@ export class SimulationRunner {
     private logForecastStatus(): void {
         const markets = this.store.getAllMarkets();
         logger.info('--- ☁️ 10-Minute Forecast Update ☁️ ---');
-        
+
         // Group by city for cleaner output
-        const cityGroups = new Map<string, Array<{metric: string, value: number, changed: Date, date: string, threshold?: number}>>();
+        const cityGroups = new Map<string, Array<{ metric: string, value: number, changed: Date, date: string, threshold?: number }>>();
 
         for (const market of markets) {
             const state = this.store.getMarketState(market.market.id);
@@ -262,7 +289,7 @@ export class SimulationRunner {
         return this.isRunning;
     }
 
-    updateSettings(settings: { takeProfit: number; stopLoss: number }): void {
+    updateSettings(settings: { takeProfit: number; stopLoss: number; skipPriceCheck?: boolean }): void {
         // Convert percentage (e.g. 5) to fraction (0.05) if needed, but assuming input is fraction or %?
         // Let's assume input is raw number from UI (e.g. 5 for 5%) -> div 100
         // OR input is already fraction.
@@ -270,11 +297,20 @@ export class SimulationRunner {
         // Wait, standard is fraction in optimizer. I'll document input as fraction.
 
         this.exitOptimizer.updateConfig(settings.takeProfit, settings.stopLoss);
+
+        // Update skipPriceCheck if provided
+        if (settings.skipPriceCheck !== undefined) {
+            this.strategy.setSkipPriceCheck(settings.skipPriceCheck);
+        }
+
         logger.info('Simulation settings updated');
     }
 
-    getSettings(): { takeProfit: number; stopLoss: number } {
-        return this.exitOptimizer.getConfig();
+    getSettings(): { takeProfit: number; stopLoss: number; skipPriceCheck: boolean } {
+        return {
+            ...this.exitOptimizer.getConfig(),
+            skipPriceCheck: this.strategy.getSkipPriceCheck()
+        };
     }
 
     stop(): void {
@@ -282,5 +318,112 @@ export class SimulationRunner {
         // this.priceTracker.disconnect(); // Removed in v2 optimization
         this.forecastMonitor.stop();
         this.simulator.printSummary();
+    }
+
+    /**
+     * Execute opportunity immediately when forecast changes (bypass cycle loop)
+     */
+    private async executeImmediateOpportunity(marketId: string): Promise<void> {
+        const state = this.store.getMarketState(marketId);
+        if (!state) return;
+
+        // Update prices first to get latest market data
+        this.updatePortfolioPrices();
+
+        // Get signals for this specific market
+        const allSignals = this.strategy.detectOpportunities();
+        const marketSignals = allSignals.filter(s => s.marketId === marketId);
+
+        for (const signal of marketSignals) {
+            // Check if we already have a position
+            const existingPos = this.simulator.getAllPositions().find(p => p.marketId === signal.marketId && p.side === signal.side);
+            if (existingPos) continue;
+
+            const size = signal.size;
+            if (size < 5) continue;
+
+            try {
+                const position = this.simulator.openPosition({
+                    market: state.market,
+                    forecastProbability: 0,
+                    marketProbability: 0,
+                    edge: signal.estimatedEdge,
+                    action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
+                    confidence: signal.confidence,
+                    reason: signal.reason + ' (IMMEDIATE)',
+                    weatherDataSource: 'noaa',
+                    isGuaranteed: signal.isGuaranteed || false
+                }, size);
+
+                if (position && state.lastForecast) {
+                    this.strategy.markOpportunityCaptured(signal.marketId, state.lastForecast.forecastValue);
+                    logger.info(`⚡ IMMEDIATE trade executed: ${position.id}`);
+                }
+            } catch (e) {
+                logger.error(`Exception in immediate execution: ${(e as Error).message}`);
+            }
+        }
+    }
+
+    /**
+     * Update cache TTL for forecast monitoring (dashboard control)
+     */
+    updateCacheTtl(newTtlMs: number): void {
+        this.forecastMonitor.cacheTtlMs = newTtlMs;
+        logger.info(`Cache TTL updated to ${newTtlMs}ms`);
+    }
+
+    /**
+     * Get current cache TTL
+     */
+    getCacheTtl(): number {
+        return this.forecastMonitor.cacheTtlMs;
+    }
+
+    /**
+     * Update forecast poll interval dynamically (dashboard control)
+     * Updates both regular and high priority intervals proportionally
+     */
+    updatePollInterval(newIntervalMs: number): void {
+        // Keep the ratio between high priority and regular intervals
+        const currentIntervals = this.forecastMonitor.getPollIntervals();
+        const ratio = currentIntervals.highPriority / currentIntervals.regular;
+        const newHighPriorityMs = Math.round(newIntervalMs * ratio);
+        this.forecastMonitor.updatePollIntervals(newIntervalMs, newHighPriorityMs);
+    }
+
+    /**
+     * Get current poll interval (returns regular interval for backward compatibility)
+     */
+    getPollInterval(): number {
+        return this.forecastMonitor.getPollIntervals().regular;
+    }
+
+    /**
+     * Get detailed poll intervals for both priority levels
+     */
+    getPollIntervals(): { regular: number; highPriority: number } {
+        return this.forecastMonitor.getPollIntervals();
+    }
+
+    /**
+     * Add a city to high priority list
+     */
+    addHighPriorityCity(city: string): void {
+        this.forecastMonitor.addHighPriorityCity(city);
+    }
+
+    /**
+     * Remove a city from high priority list
+     */
+    removeHighPriorityCity(city: string): void {
+        this.forecastMonitor.removeHighPriorityCity(city);
+    }
+
+    /**
+     * Get all high priority cities
+     */
+    getHighPriorityCities(): string[] {
+        return this.forecastMonitor.getHighPriorityCities();
     }
 }

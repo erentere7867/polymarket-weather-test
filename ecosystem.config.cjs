@@ -9,7 +9,8 @@ module.exports = {
         max_memory_restart: "1G",
         env: {
             NODE_ENV: "production",
-            LOG_LEVEL: "info"
+            LOG_LEVEL: "info",
+            SIMULATION_MODE: "true"
         }
     }]
 }

@@ -16,12 +16,12 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 // Maximum age of a forecast change before it's considered "stale" (market has caught up)
-// AGGRESSIVE: 15 seconds - act fast before market reacts
-const MAX_CHANGE_AGE_MS = 15000;
+// Tightened to 30 seconds - strictly fresh news only
+const MAX_CHANGE_AGE_MS = 30000;
 
 // Minimum change threshold to trigger detection
-// AGGRESSIVE: 1.5 sigma = more opportunities, slightly lower confidence
-const MIN_SIGMA_FOR_ARBITRAGE = 1.5;
+// RELAXED: 0.0 sigma = trade on ANY deviation (Maximum Aggression)
+const MIN_SIGMA_FOR_ARBITRAGE = 0.0;
 
 export class SpeedArbitrageStrategy {
     private store: DataStore;
@@ -34,12 +34,32 @@ export class SpeedArbitrageStrategy {
     // Key: marketId, Value: { forecastValue we traded on, when we captured it }
     private capturedOpportunities: Map<string, { forecastValue: number; capturedAt: Date }> = new Map();
 
+    // Track forecasts we've already analyzed (traded OR skipped) to prevent loop spam
+    private processedForecasts: Map<string, number> = new Map();
+
+    // Skip market price reaction check - trade immediately on forecast changes
+    private skipPriceCheck: boolean = false;
+
     constructor(store: DataStore) {
         this.store = store;
         this.bayesian = new BayesianModel();
         this.marketModel = new MarketModel(store);
         this.edgeCalculator = new EdgeCalculator(this.marketModel);
         this.entryOptimizer = new EntryOptimizer(this.marketModel);
+    }
+
+    /**
+     * Set whether to skip market price reaction check
+     */
+    setSkipPriceCheck(skip: boolean): void {
+        this.skipPriceCheck = skip;
+    }
+
+    /**
+     * Get current skipPriceCheck setting
+     */
+    getSkipPriceCheck(): boolean {
+        return this.skipPriceCheck;
     }
 
     /**
@@ -50,7 +70,8 @@ export class SpeedArbitrageStrategy {
             forecastValue,
             capturedAt: new Date()
         });
-        logger.info(`📌 Marked opportunity captured: ${marketId} at forecast ${forecastValue.toFixed(1)}`);
+        // Forecast values disabled per user request
+        logger.info(`📌 Marked opportunity captured: ${marketId}`);
     }
 
     /**
@@ -67,7 +88,8 @@ export class SpeedArbitrageStrategy {
         if (significantChange) {
             // New forecast value! Clear the captured flag
             this.capturedOpportunities.delete(marketId);
-            logger.info(`🔄 New forecast for ${marketId}: ${captured.forecastValue.toFixed(1)} → ${currentForecastValue.toFixed(1)}, allowing re-entry`);
+            // Forecast values disabled per user request
+            logger.info(`🔄 New forecast for ${marketId}: allowing re-entry`);
             return false;
         }
 

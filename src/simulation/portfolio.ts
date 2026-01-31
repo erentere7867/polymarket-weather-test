@@ -86,21 +86,32 @@ export class PortfolioSimulator {
             return null;
         }
 
-        // Calculate position size (% of portfolio based on edge)
+        // Calculate position size - prioritize the provided maxPositionSize (which comes from signal size)
+        // This ensures we use the EntryOptimizer's calculated size
         const edge = Math.abs(opportunity.edge);
         const confidence = opportunity.confidence;
 
-        // Kelly-inspired sizing: edge * confidence * scale factor
-        const sizingFactor = Math.min(edge * confidence * 2, 0.05); // Max 5% of portfolio per trade
-        const portfolioValue = this.getTotalValue();
-        const positionValue = Math.min(
-            portfolioValue * sizingFactor,
-            maxPositionSize,
-            this.cash * 0.2 // Max 20% of available cash per trade
-        );
+        // Use the provided maxPositionSize as the target (from EntryOptimizer)
+        // But also apply Kelly-inspired scaling for very small edges
+        let positionValue: number;
 
-        if (positionValue < 10) {
-            logger.debug('Position size too small, skipping');
+        if (maxPositionSize > 0 && maxPositionSize < 100000) {
+            // Use the signal size directly if it seems reasonable (from EntryOptimizer)
+            positionValue = Math.min(maxPositionSize, this.cash * 0.5); // Max 50% of cash
+        } else {
+            // Fallback to Kelly calculation
+            const sizingFactor = Math.min(edge * confidence * 2, 0.05); // Max 5% of portfolio per trade
+            const portfolioValue = this.getTotalValue();
+            positionValue = Math.min(
+                portfolioValue * sizingFactor,
+                maxPositionSize,
+                this.cash * 0.2 // Max 20% of available cash per trade
+            );
+        }
+
+        // Lower minimum position size to $5 (was $10) to capture more opportunities
+        if (positionValue < 5) {
+            logger.warn(`Position size too small ($${positionValue.toFixed(2)}), skipping`);
             return null;
         }
 
@@ -116,6 +127,7 @@ export class PortfolioSimulator {
         const basePrice = isBuyYes ? opportunity.market.yesPrice : opportunity.market.noPrice;
 
         if (basePrice <= 0 || basePrice >= 1) {
+            logger.warn(`Invalid base price for execution: ${basePrice}, skipping`);
             return null;
         }
 
