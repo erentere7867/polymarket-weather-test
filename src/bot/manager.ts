@@ -7,6 +7,8 @@ import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { TradingClient } from '../polymarket/clob-client.js';
 import { OpportunityDetector } from './opportunity-detector.js';
 import { OrderExecutor } from './order-executor.js';
+import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
+import { EntrySignal } from '../strategy/entry-optimizer.js';
 import { DataStore } from '../realtime/data-store.js';
 import { PriceTracker } from '../realtime/price-tracker.js';
 import { ForecastMonitor } from '../realtime/forecast-monitor.js';
@@ -28,6 +30,7 @@ export class BotManager {
     private weatherScanner: WeatherScanner;
     private tradingClient: TradingClient;
     private opportunityDetector: OpportunityDetector;
+    private speedStrategy: SpeedArbitrageStrategy;
     private orderExecutor: OrderExecutor;
     private dataStore: DataStore;
     private priceTracker: PriceTracker;
@@ -42,8 +45,9 @@ export class BotManager {
         this.weatherScanner = new WeatherScanner();
         this.tradingClient = new TradingClient();
         this.opportunityDetector = new OpportunityDetector();
-        this.orderExecutor = new OrderExecutor(this.tradingClient);
         this.dataStore = new DataStore();
+        this.speedStrategy = new SpeedArbitrageStrategy(this.dataStore);
+        this.orderExecutor = new OrderExecutor(this.tradingClient);
         this.priceTracker = new PriceTracker(this.dataStore);
         this.forecastMonitor = new ForecastMonitor(this.dataStore);
 
@@ -81,7 +85,10 @@ export class BotManager {
 
         // Setup forecast monitor
         this.forecastMonitor.onForecastChanged = async (marketId, change) => {
-            logger.info(`🚨 INTERRUPT: Significant forecast change detected! Triggering immediate scan.`);
+            // FAST PATH: Handle specific change immediately
+            await this.handleForecastChange(marketId, change);
+
+            logger.info(`🚨 INTERRUPT: Significant forecast change detected! Triggering full scan.`);
             // Interrupt current delay to run cycle immediately
             if (this.currentDelayTimeout) {
                 clearTimeout(this.currentDelayTimeout);
@@ -103,6 +110,34 @@ export class BotManager {
         };
 
         logger.info('Bot initialized successfully');
+    }
+
+    /**
+     * Handle a specific forecast change event (Fast Path)
+     */
+    async handleForecastChange(marketId: string, changeAmount: number): Promise<void> {
+        try {
+            logger.info(`⚡ FAST PATH: Checking speed arbitrage for ${marketId} (change: ${changeAmount.toFixed(1)})`);
+            
+            const signal = this.speedStrategy.detectOpportunity(marketId);
+            
+            if (signal) {
+                const opp = this.convertSignalToOpportunity(signal);
+                if (opp) {
+                    logger.info(`🚀 FAST PATH: Executing Speed Arb trade for ${opp.market.market.question.substring(0, 40)}...`);
+                    
+                    const result = await this.orderExecutor.executeOpportunity(opp);
+                    
+                    if (result.executed && opp.forecastValue !== undefined && opp.action !== 'none') {
+                        this.stats.tradesExecuted++;
+                        this.speedStrategy.markOpportunityCaptured(marketId, opp.forecastValue);
+                        this.opportunityDetector.markOpportunityCaptured(marketId, opp.forecastValue, opp.action);
+                    }
+                }
+            }
+        } catch (error) {
+            logger.error(`Error in fast path execution for ${marketId}`, { error: (error as Error).message });
+        }
     }
 
     /**
@@ -133,39 +168,57 @@ export class BotManager {
             }
 
             // Step 2: Analyze markets for opportunities
+            // Run both strategies: Standard Value Arb (OpportunityDetector) AND Speed Arb (SpeedArbitrageStrategy)
             logger.info('Analyzing markets for opportunities...');
-            const opportunities = await this.opportunityDetector.analyzeMarkets(actionableMarkets);
+            
+            const [valueOpportunities, speedSignals] = await Promise.all([
+                this.opportunityDetector.analyzeMarkets(actionableMarkets),
+                Promise.resolve(this.speedStrategy.detectOpportunities()) // Synchronous but run in flow
+            ]);
 
-            this.stats.opportunitiesFound += opportunities.length;
+            // Convert speed signals to TradingOpportunities
+            const speedOpportunities = speedSignals
+                .map(signal => this.convertSignalToOpportunity(signal))
+                .filter((opp): opp is TradingOpportunity => opp !== null);
 
-            if (opportunities.length === 0) {
+            // Merge opportunities, prioritizing Speed Arb
+            const mergedOpportunities = this.mergeOpportunities(valueOpportunities, speedOpportunities);
+
+            this.stats.opportunitiesFound += mergedOpportunities.length;
+
+            if (mergedOpportunities.length === 0) {
                 logger.info('No trading opportunities found this cycle');
             } else {
-                logger.info(`Found ${opportunities.length} trading opportunities`);
-                this.logOpportunities(opportunities);
+                logger.info(`Found ${mergedOpportunities.length} trading opportunities (${speedOpportunities.length} Speed Arb, ${valueOpportunities.length} Value Arb)`);
+                this.logOpportunities(mergedOpportunities);
             }
 
             // Step 3: Execute trades
-            if (opportunities.length > 0) {
+            if (mergedOpportunities.length > 0) {
                 logger.info('Executing trades...');
-                const results = await this.orderExecutor.executeOpportunities(opportunities);
+                const results = await this.orderExecutor.executeOpportunities(mergedOpportunities);
 
                 const successfulTrades = results.filter(r => r.executed);
                 this.stats.tradesExecuted += successfulTrades.length;
 
-                // Mark successful trades as captured to prevent re-buying at higher prices
+                // Mark successful trades as captured
                 for (const result of successfulTrades) {
                     const opp = result.opportunity;
                     if (opp.forecastValue !== undefined && (opp.action === 'buy_yes' || opp.action === 'buy_no')) {
+                        // Notify both strategies
                         this.opportunityDetector.markOpportunityCaptured(
                             opp.market.market.id,
                             opp.forecastValue,
                             opp.action
                         );
+                        this.speedStrategy.markOpportunityCaptured(
+                            opp.market.market.id,
+                            opp.forecastValue
+                        );
                     }
                 }
 
-                logger.info(`Executed ${successfulTrades.length}/${opportunities.length} trades`);
+                logger.info(`Executed ${successfulTrades.length}/${mergedOpportunities.length} trades`);
             }
 
         } catch (error) {
@@ -178,6 +231,55 @@ export class BotManager {
 
         const cycleDuration = Date.now() - cycleStart.getTime();
         logger.info(`Cycle completed in ${(cycleDuration / 1000).toFixed(1)}s`);
+    }
+
+    /**
+     * Merge opportunities from different strategies, removing duplicates
+     */
+    private mergeOpportunities(valueArb: TradingOpportunity[], speedArb: TradingOpportunity[]): TradingOpportunity[] {
+        const map = new Map<string, TradingOpportunity>();
+
+        // Add Value Arb first
+        for (const opp of valueArb) {
+            map.set(opp.market.market.id, opp);
+        }
+
+        // Add Speed Arb (overwriting Value Arb if duplicate - assume Speed is fresher/better)
+        for (const opp of speedArb) {
+            if (map.has(opp.market.market.id)) {
+                logger.info(`⚡ Upgrading opportunity to SPEED ARB: ${opp.market.market.question.substring(0, 40)}...`);
+            }
+            map.set(opp.market.market.id, opp);
+        }
+
+        return Array.from(map.values());
+    }
+
+    /**
+     * Convert EntrySignal (from Speed Arb) to TradingOpportunity (for OrderExecutor)
+     */
+    private convertSignalToOpportunity(signal: EntrySignal): TradingOpportunity | null {
+        const marketState = this.dataStore.getMarketState(signal.marketId);
+        if (!marketState) return null;
+
+        const market = marketState.market;
+        const forecast = marketState.lastForecast;
+
+        return {
+            market: market,
+            forecastProbability: signal.side === 'yes' 
+                ? market.yesPrice + signal.estimatedEdge 
+                : 1 - (market.noPrice + signal.estimatedEdge), // Approx
+            marketProbability: signal.side === 'yes' ? market.yesPrice : market.noPrice,
+            edge: signal.estimatedEdge * (signal.side === 'yes' ? 1 : -1), // Positive edge = Buy YES
+            action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
+            confidence: signal.confidence,
+            reason: `⚡ SPEED ARB: ${signal.reason}`,
+            weatherDataSource: 'noaa', // Default assumption for speed arb
+            forecastValue: forecast?.forecastValue,
+            forecastValueUnit: market.thresholdUnit || '°F',
+            isGuaranteed: signal.isGuaranteed
+        };
     }
 
     /**
