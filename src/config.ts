@@ -47,6 +47,14 @@ export interface Config {
 
     // Speed arbitrage settings
     skipPriceCheck: boolean;              // Skip market price reaction check on forecast changes (trade immediately)
+
+    // Webhook-based forecast detection settings
+    TOMORROW_WEBHOOK_SECRET: string;      // Secret for validating Tomorrow.io webhooks
+    FETCH_MODE_TIMEOUT_MINUTES: number;   // Hard timeout for FETCH_MODE (default: 10)
+    NO_CHANGE_EXIT_MINUTES: number;       // Exit FETCH_MODE after no changes for N minutes (default: 5)
+    PROVIDER_POLL_INTERVAL_MS: number;    // Interval between provider polls in FETCH_MODE (default: 5000)
+    IDLE_POLL_INTERVAL_MINUTES: number;   // Interval for IDLE mode polling (default: 5)
+    USE_WEBHOOK_MODE: boolean;            // Enable webhook-based forecast detection (default: true)
 }
 
 function getEnvVarOptional(name: string, defaultValue: string): string {
@@ -106,6 +114,14 @@ export const config: Config = {
 
     // Speed arbitrage settings
     skipPriceCheck: getEnvVarBool('SKIP_PRICE_CHECK', false), // Skip market price reaction check on forecast changes
+
+    // Webhook-based forecast detection settings
+    TOMORROW_WEBHOOK_SECRET: getEnvVarOptional('TOMORROW_WEBHOOK_SECRET', ''),
+    FETCH_MODE_TIMEOUT_MINUTES: getEnvVarNumber('FETCH_MODE_TIMEOUT_MINUTES', 10),
+    NO_CHANGE_EXIT_MINUTES: getEnvVarNumber('NO_CHANGE_EXIT_MINUTES', 5),
+    PROVIDER_POLL_INTERVAL_MS: getEnvVarNumber('PROVIDER_POLL_INTERVAL_MS', 5000),
+    IDLE_POLL_INTERVAL_MINUTES: getEnvVarNumber('IDLE_POLL_INTERVAL_MINUTES', 5),
+    USE_WEBHOOK_MODE: getEnvVarBool('USE_WEBHOOK_MODE', true),
 };
 
 /**

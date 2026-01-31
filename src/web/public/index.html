@@ -19,6 +19,75 @@
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.1);
         }
+
+        .state-idle {
+            background: rgba(59, 130, 246, 0.2);
+            border-color: rgba(59, 130, 246, 0.5);
+            color: #60a5fa;
+        }
+
+        .state-fetch-mode {
+            background: rgba(245, 158, 11, 0.2);
+            border-color: rgba(245, 158, 11, 0.5);
+            color: #fbbf24;
+            animation: pulse-amber 2s infinite;
+        }
+
+        @keyframes pulse-amber {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); }
+            50% { box-shadow: 0 0 0 10px rgba(245, 158, 11, 0); }
+        }
+
+        .webhook-active {
+            animation: pulse-green 2s infinite;
+        }
+
+        @keyframes pulse-green {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+            50% { box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+        }
+
+        .provider-healthy {
+            color: #10b981;
+        }
+
+        .provider-error {
+            color: #ef4444;
+        }
+
+        .provider-rate-limited {
+            color: #f59e0b;
+        }
+
+        .timeline-item {
+            position: relative;
+            padding-left: 24px;
+        }
+
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: 6px;
+            top: 8px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        .timeline-item::after {
+            content: '';
+            position: absolute;
+            left: 9px;
+            top: 20px;
+            width: 2px;
+            height: calc(100% - 12px);
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .timeline-item:last-child::after {
+            display: none;
+        }
     </style>
 </head>
 
@@ -31,11 +100,25 @@
                     class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">
                     Polymarket Speed Bot
                 </h1>
-                <p class="text-slate-400 text-sm">v2.0.0 • Speed Arbitrage Engine</p>
+                <p class="text-slate-400 text-sm">v3.0.0 • Webhook-Driven Architecture</p>
             </div>
-            <div class="flex items-center space-x-4">
+            <div class="flex items-center space-x-6">
+                <!-- Mode Indicator -->
                 <div class="text-right">
-                    <p class="text-xs text-slate-500">STATUS</p>
+                    <p class="text-xs text-slate-500 uppercase tracking-wider">Mode</p>
+                    <p id="mode-text" class="text-blue-400 font-mono font-bold">IDLE POLLING</p>
+                </div>
+                <!-- Webhook Status -->
+                <div class="text-right">
+                    <p class="text-xs text-slate-500 uppercase tracking-wider">Webhook</p>
+                    <div class="flex items-center space-x-2">
+                        <p id="webhook-status-text" class="text-emerald-400 font-mono font-bold">ACTIVE</p>
+                        <div id="webhook-indicator" class="h-3 w-3 rounded-full bg-emerald-500 webhook-active"></div>
+                    </div>
+                </div>
+                <!-- Overall Status -->
+                <div class="text-right">
+                    <p class="text-xs text-slate-500 uppercase tracking-wider">Status</p>
                     <p id="status-text" class="text-emerald-400 font-mono font-bold">ONLINE</p>
                 </div>
                 <div class="h-3 w-3 rounded-full bg-emerald-500 animate-pulse"></div>
@@ -57,17 +140,93 @@
                 <h2 id="cash-balance" class="text-2xl font-bold mt-1">$0.00</h2>
             </div>
 
-            <!-- Cycles Card -->
+            <!-- Webhook Stats Card -->
             <div class="glass p-6 rounded-xl">
-                <p class="text-slate-500 text-xs uppercase tracking-wider">Uptime / Cycles</p>
-                <h2 id="uptime" class="text-2xl font-bold mt-1">0s</h2>
-                <p id="cycle-count" class="text-sm mt-2 text-blue-400">Cycle #0</p>
+                <p class="text-slate-500 text-xs uppercase tracking-wider">Webhooks / Cycles</p>
+                <h2 id="webhook-count" class="text-2xl font-bold mt-1">0</h2>
+                <p id="fetch-cycles" class="text-sm mt-2 text-blue-400">0 fetch cycles</p>
             </div>
 
             <!-- Open Pos Card -->
             <div class="glass p-6 rounded-xl">
                 <p class="text-slate-500 text-xs uppercase tracking-wider">Open Positions</p>
                 <h2 id="open-positions-count" class="text-2xl font-bold mt-1">0</h2>
+            </div>
+        </div>
+
+        <!-- Architecture Overview -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                </svg>
+                Webhook-Driven Architecture
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <!-- Webhook Trigger -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-white/5">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-sm font-medium text-slate-300">Tomorrow.io Webhook</span>
+                        <span id="webhook-badge" class="px-2 py-0.5 text-xs rounded-full bg-emerald-500/20 text-emerald-400">Active</span>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-2">Triggers FETCH_MODE on forecast updates</p>
+                    <div class="text-xs text-slate-400">
+                        <span class="text-slate-500">Last received:</span>
+                        <span id="last-webhook-time">Never</span>
+                    </div>
+                </div>
+
+                <!-- FETCH_MODE -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-white/5">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-sm font-medium text-slate-300">FETCH_MODE</span>
+                        <span id="fetch-mode-badge" class="px-2 py-0.5 text-xs rounded-full bg-slate-600 text-slate-400">0 cities</span>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-2">10 min max • 5-sec provider polling</p>
+                    <div class="text-xs text-slate-400">
+                        <span class="text-slate-500">Timeout:</span>
+                        <span id="fetch-mode-timeout">10 min</span>
+                    </div>
+                </div>
+
+                <!-- IDLE Mode -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-white/5">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-sm font-medium text-slate-300">IDLE Mode</span>
+                        <span id="idle-badge" class="px-2 py-0.5 text-xs rounded-full bg-blue-500/20 text-blue-400">Fallback</span>
+                    </div>
+                    <p class="text-xs text-slate-500 mb-2">5-min fallback polling for missed webhooks</p>
+                    <div class="text-xs text-slate-400">
+                        <span class="text-slate-500">Poll interval:</span>
+                        <span id="idle-poll-interval">5 min</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- City States -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"></path>
+                </svg>
+                City State Monitor
+            </h3>
+            <div id="city-states-container" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                <div class="text-slate-500 text-sm italic">No cities monitored yet...</div>
+            </div>
+        </div>
+
+        <!-- Provider Health -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                </svg>
+                Provider Health
+            </h3>
+            <div id="provider-health-container" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+                <div class="text-slate-500 text-sm italic">Loading providers...</div>
             </div>
         </div>
 
@@ -97,30 +256,6 @@
                     <span>Save Configuration</span>
                 </button>
                 <div id="save-msg" class="text-sm opacity-0 transition-opacity"></div>
-            </div>
-        </div>
-
-        <!-- Speed Settings Card -->
-        <div class="glass p-6 rounded-xl">
-            <h3 class="text-xl font-bold mb-4">Speed Settings</h3>
-            <div class="flex flex-wrap gap-6 items-end">
-                <div>
-                    <label class="block text-slate-400 text-xs uppercase tracking-wider mb-2">Forecast Poll Interval (ms)</label>
-                    <input type="number" id="poll-interval-input" value="5000" step="500" min="1000" max="60000"
-                        class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-blue-400 w-40 focus:outline-none focus:border-blue-500 transition-colors">
-                    <p class="text-xs text-slate-500 mt-1">How often to check weather APIs</p>
-                </div>
-                <div>
-                    <label class="block text-slate-400 text-xs uppercase tracking-wider mb-2">Cache TTL (ms)</label>
-                    <input type="number" id="cache-ttl-input" value="2000" step="500" min="0" max="30000"
-                        class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-purple-400 w-40 focus:outline-none focus:border-purple-500 transition-colors">
-                    <p class="text-xs text-slate-500 mt-1">How long to cache weather data</p>
-                </div>
-                <button onclick="saveSpeedSettings()"
-                    class="bg-purple-600 hover:bg-purple-500 text-white px-6 py-2 rounded font-medium transition-colors flex items-center space-x-2">
-                    <span>Save Speed Settings</span>
-                </button>
-                <div id="speed-save-msg" class="text-sm opacity-0 transition-opacity"></div>
             </div>
         </div>
 
@@ -195,9 +330,6 @@
                 const statusRes = await fetch(`${API_BASE}/status`);
                 const statusData = await statusRes.json();
 
-                document.getElementById('cycle-count').innerText = `Cycle #${statusData.cycles}`;
-                document.getElementById('uptime').innerText = formatTime(statusData.uptime);
-
                 // 2. Portfolio
                 const portRes = await fetch(`${API_BASE}/portfolio`);
                 const portData = await portRes.json();
@@ -205,7 +337,7 @@
                 document.getElementById('total-equity').innerText = formatCurrency(portData.totalValue);
                 document.getElementById('cash-balance').innerText = formatCurrency(portData.currentCash);
 
-                const pnl = portData.unrealizedPnL + portData.realizedPnL; // Simplified
+                const pnl = portData.unrealizedPnL + portData.realizedPnL;
                 const pnlEl = document.getElementById('total-pnl');
                 pnlEl.innerText = `${pnl >= 0 ? '+' : ''}${formatCurrency(pnl)}`;
                 pnlEl.className = `text-sm mt-2 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
@@ -238,9 +370,209 @@
                 console.error('Fetch error:', err);
                 document.getElementById('status-text').innerText = 'OFFLINE';
                 document.getElementById('status-text').className = 'text-rose-500 font-bold font-mono';
-                // Show error details in cycle count for debugging
-                document.getElementById('cycle-count').innerText = `Err: ${err.message}`;
             }
+        }
+
+        async function fetchWebhookStats() {
+            try {
+                // Webhook Status
+                const webhookRes = await fetch(`${API_BASE}/webhook/status`);
+                const webhookData = await webhookRes.json();
+
+                document.getElementById('webhook-count').innerText = webhookData.webhooksReceived || 0;
+                
+                const webhookStatusEl = document.getElementById('webhook-status-text');
+                const webhookIndicator = document.getElementById('webhook-indicator');
+                
+                if (webhookData.webhookMode) {
+                    webhookStatusEl.innerText = 'ACTIVE';
+                    webhookStatusEl.className = 'text-emerald-400 font-mono font-bold';
+                    webhookIndicator.className = 'h-3 w-3 rounded-full bg-emerald-500 webhook-active';
+                } else {
+                    webhookStatusEl.innerText = 'DISABLED';
+                    webhookStatusEl.className = 'text-slate-500 font-mono font-bold';
+                    webhookIndicator.className = 'h-3 w-3 rounded-full bg-slate-500';
+                }
+
+                // Update mode text
+                const modeText = document.getElementById('mode-text');
+                if (webhookData.webhookMode) {
+                    modeText.innerText = 'WEBHOOK-DRIVEN';
+                    modeText.className = 'text-emerald-400 font-mono font-bold';
+                } else {
+                    modeText.innerText = 'POLLING-ONLY';
+                    modeText.className = 'text-blue-400 font-mono font-bold';
+                }
+
+                // Update webhook badge
+                const webhookBadge = document.getElementById('webhook-badge');
+                if (webhookData.webhookSecretConfigured) {
+                    webhookBadge.innerText = 'Configured';
+                    webhookBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-emerald-500/20 text-emerald-400';
+                } else {
+                    webhookBadge.innerText = 'No Secret';
+                    webhookBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400';
+                }
+
+                // Update last webhook time
+                const lastWebhookEl = document.getElementById('last-webhook-time');
+                if (webhookData.lastWebhookTime) {
+                    const date = new Date(webhookData.lastWebhookTime);
+                    lastWebhookEl.innerText = formatTimeAgo(date);
+                } else {
+                    lastWebhookEl.innerText = 'Never';
+                }
+
+            } catch (err) {
+                console.error('Webhook stats error:', err);
+            }
+        }
+
+        async function fetchStateMachineStats() {
+            try {
+                const res = await fetch(`${API_BASE}/state-machine/stats`);
+                const data = await res.json();
+
+                // Update FETCH_MODE badge
+                const fetchModeBadge = document.getElementById('fetch-mode-badge');
+                const fetchModeCount = data.citiesInFetchMode?.length || 0;
+                fetchModeBadge.innerText = `${fetchModeCount} city${fetchModeCount !== 1 ? 'ies' : ''}`;
+                
+                if (fetchModeCount > 0) {
+                    fetchModeBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400';
+                } else {
+                    fetchModeBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-slate-600 text-slate-400';
+                }
+
+                // Update timeout display
+                document.getElementById('fetch-mode-timeout').innerText = `${data.fetchModeTimeoutMinutes || 10} min`;
+                document.getElementById('idle-poll-interval').innerText = `${data.idlePollIntervalMinutes || 5} min`;
+
+                // Render city states
+                renderCityStates(data.cities || []);
+
+            } catch (err) {
+                console.error('State machine stats error:', err);
+            }
+        }
+
+        async function fetchProviderHealth() {
+            try {
+                const res = await fetch(`${API_BASE}/providers/health`);
+                const data = await res.json();
+
+                renderProviderHealth(data.providers || []);
+
+            } catch (err) {
+                console.error('Provider health error:', err);
+            }
+        }
+
+        async function fetchForecastTriggers() {
+            try {
+                const res = await fetch(`${API_BASE}/forecast/triggers`);
+                const data = await res.json();
+
+                document.getElementById('fetch-cycles').innerText = `${data.fetchCyclesCompleted || 0} fetch cycles`;
+
+            } catch (err) {
+                console.error('Forecast triggers error:', err);
+            }
+        }
+
+        function renderCityStates(cities) {
+            const container = document.getElementById('city-states-container');
+            
+            if (cities.length === 0) {
+                container.innerHTML = '<div class="text-slate-500 text-sm italic">No cities monitored yet...</div>';
+                return;
+            }
+
+            container.innerHTML = cities.map(city => {
+                const isFetchMode = city.state === 'FETCH_MODE';
+                const stateClass = isFetchMode ? 'state-fetch-mode' : 'state-idle';
+                const stateLabel = isFetchMode ? 'FETCH' : 'IDLE';
+                const entryTime = city.fetchModeEntryTime 
+                    ? formatTimeAgo(new Date(city.fetchModeEntryTime))
+                    : '-';
+                
+                // Calculate error indicators
+                const errorCount = Object.values(city.providerErrorCounts || {}).reduce((a, b) => a + b, 0);
+                const errorIndicator = errorCount > 0 
+                    ? `<span class="text-rose-400 text-xs">${errorCount} errors</span>` 
+                    : '';
+
+                return `
+                    <div class="${stateClass} rounded-lg p-3 border transition-all">
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="font-medium text-sm truncate" title="${city.cityId}">${formatCityName(city.cityId)}</span>
+                            <span class="text-xs font-bold">${stateLabel}</span>
+                        </div>
+                        <div class="text-xs opacity-75">
+                            ${isFetchMode ? `Since: ${entryTime}` : 'Waiting for webhook...'}
+                        </div>
+                        ${errorIndicator}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderProviderHealth(providers) {
+            const container = document.getElementById('provider-health-container');
+            
+            if (providers.length === 0) {
+                container.innerHTML = '<div class="text-slate-500 text-sm italic">No providers configured</div>';
+                return;
+            }
+
+            container.innerHTML = providers.map(provider => {
+                let statusClass = 'provider-healthy';
+                let statusText = 'OK';
+                let statusIcon = '✓';
+
+                if (!provider.isConfigured) {
+                    statusClass = 'text-slate-500';
+                    statusText = 'Not Config';
+                    statusIcon = '−';
+                } else if (provider.isRateLimited) {
+                    statusClass = 'provider-rate-limited';
+                    statusText = 'Rate Limited';
+                    statusIcon = '!';
+                }
+
+                return `
+                    <div class="bg-slate-800/50 rounded-lg p-3 border border-white/5 ${provider.isRateLimited ? 'border-amber-500/30' : ''}">
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="font-medium text-sm capitalize">${provider.name}</span>
+                            <span class="${statusClass} text-xs font-bold">${statusIcon}</span>
+                        </div>
+                        <div class="text-xs ${statusClass}">${statusText}</div>
+                        ${provider.isRateLimited && provider.rateLimitResetTime > 0 ? `
+                            <div class="text-xs text-amber-400 mt-1">Reset in ${Math.ceil(provider.rateLimitResetTime / 1000)}s</div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function formatCityName(cityId) {
+            return cityId
+                .replace(/_/g, ' ')
+                .replace(/\b\w/g, l => l.toUpperCase())
+                .substring(0, 20);
+        }
+
+        function formatTimeAgo(date) {
+            const now = new Date();
+            const diffMs = now - date;
+            const diffSecs = Math.floor(diffMs / 1000);
+            const diffMins = Math.floor(diffSecs / 60);
+            const diffHours = Math.floor(diffMins / 60);
+
+            if (diffSecs < 60) return `${diffSecs}s ago`;
+            if (diffMins < 60) return `${diffMins}m ago`;
+            if (diffHours < 24) return `${diffHours}h ago`;
+            return date.toLocaleDateString();
         }
 
         function renderPositions(positions) {
@@ -294,7 +626,7 @@
         }
 
         function formatPrice(num) {
-            return '$' + num.toFixed(3); // Polymarket cents
+            return '$' + num.toFixed(3);
         }
 
         function formatDuration(seconds) {
@@ -317,8 +649,17 @@
 
         // Poll every 3 seconds
         fetchStats();
+        fetchWebhookStats();
+        fetchStateMachineStats();
+        fetchProviderHealth();
+        fetchForecastTriggers();
         fetchSettings();
+
         setInterval(fetchStats, 3000);
+        setInterval(fetchWebhookStats, 3000);
+        setInterval(fetchStateMachineStats, 3000);
+        setInterval(fetchProviderHealth, 10000);
+        setInterval(fetchForecastTriggers, 3000);
 
         async function fetchSettings() {
             try {
@@ -329,8 +670,6 @@
                     document.getElementById('tp-input').value = data.takeProfit;
                     document.getElementById('sl-input').value = data.stopLoss;
                     document.getElementById('skip-price-check').checked = data.skipPriceCheck || false;
-                    document.getElementById('poll-interval-input').value = data.pollIntervalMs || 5000;
-                    document.getElementById('cache-ttl-input').value = data.cacheTtlMs || 2000;
                 }
             } catch (err) {
                 console.error('Failed to fetch settings:', err);
@@ -369,50 +708,6 @@
 
             } catch (err) {
                 console.error('Save error:', err);
-                msgEl.innerText = '❌ Network Error';
-                msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
-            }
-        }
-
-        async function saveSpeedSettings() {
-            const pollIntervalInput = document.getElementById('poll-interval-input');
-            const cacheTtlInput = document.getElementById('cache-ttl-input');
-            const msgEl = document.getElementById('speed-save-msg');
-
-            const intervalMs = parseInt(pollIntervalInput.value);
-            const ttlMs = parseInt(cacheTtlInput.value);
-
-            try {
-                // Update poll interval
-                const pollRes = await fetch(`${API_BASE}/settings/poll-interval`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ intervalMs })
-                });
-
-                // Update cache TTL
-                const cacheRes = await fetch(`${API_BASE}/settings/cache-ttl`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ttlMs })
-                });
-
-                if (pollRes.ok && cacheRes.ok) {
-                    msgEl.innerText = '✅ Speed Settings Saved!';
-                    msgEl.className = 'text-sm text-emerald-400 opacity-100 transition-opacity';
-                } else {
-                    const pollData = await pollRes.json().catch(() => ({}));
-                    const cacheData = await cacheRes.json().catch(() => ({}));
-                    msgEl.innerText = '❌ Error: ' + (pollData.message || cacheData.message || 'Failed');
-                    msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
-                }
-
-                setTimeout(() => {
-                    msgEl.className = 'text-sm opacity-0 transition-opacity';
-                }, 3000);
-
-            } catch (err) {
-                console.error('Save speed settings error:', err);
                 msgEl.innerText = '❌ Network Error';
                 msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
             }

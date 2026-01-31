@@ -2,6 +2,12 @@
  * Forecast Monitor
  * Polls weather APIs and updates DataStore with latest forecasts
  * Supports city priority system for high-volatility markets
+ * 
+ * Webhook Integration:
+ * - Integrates with event bus to listen for FORECAST_TRIGGER events
+ * - Delegates to FetchModeController when entering FETCH_MODE
+ * - Uses IdlePollingService when in IDLE mode
+ * - Maintains backward compatibility with existing polling
  */
 
 import { WeatherService } from '../weather/index.js';
@@ -11,6 +17,10 @@ import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { ForecastSnapshot } from './types.js';
 import { logger } from '../logger.js';
 import { config } from '../config.js';
+import { eventBus, ForecastTriggerEvent, FetchModeEnterEvent, FetchModeExitEvent } from './event-bus.js';
+import { ForecastStateMachine, forecastStateMachine } from './forecast-state-machine.js';
+import { FetchModeController } from './fetch-mode-controller.js';
+import { IdlePollingService } from './idle-polling-service.js';
 
 interface CityPriority {
     city: string;
@@ -43,6 +53,13 @@ export class ForecastMonitor {
     // Callback for significant changes
     public onForecastChanged: ((marketId: string, changeAmount: number) => void) | null = null;
 
+    // Webhook integration components
+    private stateMachine: ForecastStateMachine;
+    private fetchModeController: FetchModeController | null = null;
+    private idlePollingService: IdlePollingService | null = null;
+    private eventBusUnsubscribers: Array<() => void> = [];
+    private useWebhookMode: boolean;
+
     constructor(store: DataStore, pollIntervalMs?: number, weatherService?: WeatherService) {
         this.store = store;
         this.weatherService = weatherService || new WeatherService();
@@ -52,9 +69,101 @@ export class ForecastMonitor {
         
         // Initialize high priority cities from config
         this.initializeHighPriorityCities();
+
+        // Initialize webhook mode
+        this.useWebhookMode = config.USE_WEBHOOK_MODE;
+        this.stateMachine = forecastStateMachine;
+        
+        // Setup event bus listeners if webhook mode is enabled
+        if (this.useWebhookMode) {
+            this.setupEventBusListeners();
+            this.initializeWebhookComponents();
+        }
         
         logger.info(`ForecastMonitor initialized with ${this.regularPollIntervalMs / 1000}s regular interval, ${this.highPriorityPollIntervalMs / 1000}s high priority interval`);
         logger.info(`High priority cities: ${Array.from(this.highPriorityCities).join(', ') || 'none'}`);
+        logger.info(`Webhook mode: ${this.useWebhookMode ? 'enabled' : 'disabled'}`);
+    }
+
+    /**
+     * Setup event bus listeners for webhook integration
+     */
+    private setupEventBusListeners(): void {
+        // Listen for FORECAST_TRIGGER events from webhooks
+        const unsubscribeTrigger = eventBus.on('FORECAST_TRIGGER', (event: ForecastTriggerEvent) => {
+            this.handleForecastTrigger(event);
+        });
+        this.eventBusUnsubscribers.push(unsubscribeTrigger);
+
+        // Listen for FETCH_MODE_ENTER events
+        const unsubscribeEnter = eventBus.on('FETCH_MODE_ENTER', (event: FetchModeEnterEvent) => {
+            this.handleFetchModeEnter(event);
+        });
+        this.eventBusUnsubscribers.push(unsubscribeEnter);
+
+        // Listen for FETCH_MODE_EXIT events
+        const unsubscribeExit = eventBus.on('FETCH_MODE_EXIT', (event: FetchModeExitEvent) => {
+            this.handleFetchModeExit(event);
+        });
+        this.eventBusUnsubscribers.push(unsubscribeExit);
+    }
+
+    /**
+     * Initialize webhook-based components
+     */
+    private initializeWebhookComponents(): void {
+        // Create fetch mode controller
+        this.fetchModeController = new FetchModeController(
+            this.stateMachine,
+            this.store,
+            undefined,
+            this.weatherService
+        );
+
+        // Create idle polling service
+        this.idlePollingService = new IdlePollingService(
+            this.stateMachine,
+            this.store,
+            undefined,
+            this.weatherService
+        );
+    }
+
+    /**
+     * Handle FORECAST_TRIGGER event from webhook
+     */
+    private handleForecastTrigger(event: ForecastTriggerEvent): void {
+        const { cityId, provider, triggerTimestamp } = event.payload;
+        
+        logger.info(`🎯 Forecast trigger received from ${provider} for ${cityId}`, {
+            timestamp: triggerTimestamp.toISOString(),
+        });
+
+        // Enter FETCH_MODE for the city (idempotent - will reset if already in FETCH_MODE)
+        this.stateMachine.enterFetchMode(cityId, 'webhook');
+    }
+
+    /**
+     * Handle FETCH_MODE_ENTER event
+     */
+    private handleFetchModeEnter(event: FetchModeEnterEvent): void {
+        const { cityId, reason } = event.payload;
+        
+        logger.debug(`Fetch mode entered for ${cityId}`, { reason });
+
+        // In webhook mode, we rely on the FetchModeController for active polling
+        // The IdlePollingService will automatically skip cities in FETCH_MODE
+    }
+
+    /**
+     * Handle FETCH_MODE_EXIT event
+     */
+    private handleFetchModeExit(event: FetchModeExitEvent): void {
+        const { cityId, reason } = event.payload;
+        
+        logger.debug(`Fetch mode exited for ${cityId}`, { reason });
+
+        // The IdlePollingService will automatically resume polling for this city
     }
 
     /**
@@ -105,9 +214,21 @@ export class ForecastMonitor {
         if (this.isRunning) return;
         this.isRunning = true;
         
-        // Start both polling loops
-        this.scheduleRegularPoll();
-        this.scheduleHighPriorityPoll();
+        if (this.useWebhookMode) {
+            // In webhook mode, start the idle polling service
+            // The FetchModeController is event-driven and starts automatically
+            this.idlePollingService?.start();
+            
+            // Still run regular polling as a fallback, but less frequently
+            // This maintains backward compatibility
+            this.scheduleRegularPoll();
+            
+            logger.info('ForecastMonitor started in webhook mode with idle polling');
+        } else {
+            // Legacy mode: Start both polling loops
+            this.scheduleRegularPoll();
+            this.scheduleHighPriorityPoll();
+        }
         
         // Start automatic priority evaluation
         this.schedulePriorityEvaluation();
@@ -132,6 +253,17 @@ export class ForecastMonitor {
             clearTimeout(this.priorityEvaluationTimeout);
             this.priorityEvaluationTimeout = null;
         }
+        
+        // Stop webhook mode components
+        this.idlePollingService?.stop();
+        this.fetchModeController?.dispose();
+        
+        // Unsubscribe from event bus
+        for (const unsubscribe of this.eventBusUnsubscribers) {
+            unsubscribe();
+        }
+        this.eventBusUnsubscribers = [];
+        
         logger.info('ForecastMonitor stopped');
     }
 
@@ -220,8 +352,16 @@ export class ForecastMonitor {
             const regularCities = this.getCitiesByPriority(markets, false);
             
             if (regularCities.size > 0) {
-                logger.debug(`Polling ${regularCities.size} regular priority cities`);
-                await this.pollCities(regularCities);
+                // In webhook mode, skip cities that are in FETCH_MODE
+                // (they're being handled by FetchModeController)
+                const citiesToPoll = this.useWebhookMode
+                    ? this.filterOutFetchModeCities(regularCities)
+                    : regularCities;
+                
+                if (citiesToPoll.size > 0) {
+                    logger.debug(`Polling ${citiesToPoll.size} regular priority cities`);
+                    await this.pollCities(citiesToPoll);
+                }
             }
         } catch (error) {
             logger.error('Regular priority poll failed', { error: (error as Error).message });
@@ -229,6 +369,24 @@ export class ForecastMonitor {
 
         // Schedule next regular poll
         this.scheduleRegularPoll();
+    }
+
+    /**
+     * Filter out cities that are currently in FETCH_MODE
+     */
+    private filterOutFetchModeCities(cities: Map<string, ParsedWeatherMarket[]>): Map<string, ParsedWeatherMarket[]> {
+        const filtered = new Map<string, ParsedWeatherMarket[]>();
+        
+        for (const [cityId, markets] of cities.entries()) {
+            const normalizedCityId = cityId.toLowerCase().replace(/\s+/g, '_');
+            if (!this.stateMachine.isInFetchMode(normalizedCityId)) {
+                filtered.set(cityId, markets);
+            } else {
+                logger.debug(`Skipping ${cityId} in regular poll: in FETCH_MODE`);
+            }
+        }
+        
+        return filtered;
     }
 
     /**
@@ -242,8 +400,15 @@ export class ForecastMonitor {
             const highPriorityCities = this.getCitiesByPriority(markets, true);
             
             if (highPriorityCities.size > 0) {
-                logger.debug(`Polling ${highPriorityCities.size} high priority cities`);
-                await this.pollCities(highPriorityCities);
+                // In webhook mode, skip cities that are in FETCH_MODE
+                const citiesToPoll = this.useWebhookMode
+                    ? this.filterOutFetchModeCities(highPriorityCities)
+                    : highPriorityCities;
+                
+                if (citiesToPoll.size > 0) {
+                    logger.debug(`Polling ${citiesToPoll.size} high priority cities`);
+                    await this.pollCities(citiesToPoll);
+                }
             }
         } catch (error) {
             logger.error('High priority poll failed', { error: (error as Error).message });
@@ -251,6 +416,41 @@ export class ForecastMonitor {
 
         // Schedule next high priority poll
         this.scheduleHighPriorityPoll();
+    }
+
+    /**
+     * Get webhook mode status
+     */
+    isWebhookModeEnabled(): boolean {
+        return this.useWebhookMode;
+    }
+
+    /**
+     * Get state machine stats (for monitoring)
+     */
+    getStateMachineStats() {
+        return this.stateMachine.getStats();
+    }
+
+    /**
+     * Get idle polling service stats (for monitoring)
+     */
+    getIdlePollingStats() {
+        return this.idlePollingService?.getStats();
+    }
+
+    /**
+     * Manually enter FETCH_MODE for a city (for testing or manual override)
+     */
+    enterFetchMode(cityId: string): void {
+        this.stateMachine.enterFetchMode(cityId, 'manual');
+    }
+
+    /**
+     * Manually exit FETCH_MODE for a city (for testing or manual override)
+     */
+    exitFetchMode(cityId: string): void {
+        this.stateMachine.exitFetchMode(cityId, 'manual');
     }
 
     /**
