@@ -583,18 +583,25 @@ export class OpportunityDetector {
     async analyzeMarkets(markets: ParsedWeatherMarket[]): Promise<TradingOpportunity[]> {
         const opportunities: TradingOpportunity[] = [];
 
-        for (const market of markets) {
+        // Process markets in parallel for faster analysis
+        const analysisPromises = markets.map(async (market) => {
             const opportunity = await this.analyzeMarket(market);
             // Include opportunities even with action='none' if they have significant edge
             // This ensures forecast changes that don't meet threshold are still logged
             if (opportunity) {
                 if (opportunity.action !== 'none') {
-                    opportunities.push(opportunity);
+                    return opportunity;
                 } else {
                     // Log why we're not trading - helps debug edge cases
                     logger.debug(`No trade for ${market.market.question.substring(0, 40)}: ${opportunity.reason}`);
                 }
             }
+            return null;
+        });
+
+        const results = await Promise.all(analysisPromises);
+        for (const opp of results) {
+            if (opp) opportunities.push(opp);
         }
 
         // Sort: guaranteed first, then by edge (highest first)

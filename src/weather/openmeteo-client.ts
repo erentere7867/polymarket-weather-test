@@ -32,6 +32,10 @@ interface OpenMeteoResponse {
     };
 }
 
+interface OpenMeteoBatchResponse {
+    results: OpenMeteoResponse[];
+}
+
 // Weather codes from Open-Meteo
 const WEATHER_CODE_MAP: { [key: number]: string } = {
     0: 'Clear sky',
@@ -100,61 +104,179 @@ export class OpenMeteoClient implements IWeatherProvider {
                 },
             });
 
-            const data = response.data;
-            const hourly: HourlyForecast[] = [];
-
-            // Debug log raw data
-            if (data.hourly && data.hourly.temperature_2m) {
-                logger.debug(`OpenMeteo Raw Data for ${coords.lat},${coords.lon}:`, {
-                    firstTime: data.hourly.time[0],
-                    firstTemp: data.hourly.temperature_2m[0],
-                    sampleTemps: data.hourly.temperature_2m.slice(0, 5),
-                    tempUnit: response.config.params.temperature_unit
-                });
-            } else {
-                logger.error(`OpenMeteo Raw Data Missing!`, { keys: Object.keys(data.hourly || {}) });
-            }
-
-            for (let i = 0; i < data.hourly.time.length; i++) {
-                // Open-Meteo returns UTC by default (ISO 8601 without offset)
-                // We must append 'Z' to force UTC parsing, otherwise Date() assumes local time
-                const timeStr = data.hourly.time[i].endsWith('Z') ? data.hourly.time[i] : `${data.hourly.time[i]}Z`;
-                const timestamp = new Date(timeStr);
-                const hour = timestamp.getHours();
-
-                hourly.push({
-                    timestamp,
-                    temperatureF: Math.round(data.hourly.temperature_2m[i]),
-                    temperatureC: this.fahrenheitToCelsius(data.hourly.temperature_2m[i]),
-                    humidity: data.hourly.relative_humidity_2m[i],
-                    windSpeedMph: Math.round(data.hourly.wind_speed_10m[i]),
-                    probabilityOfPrecipitation: data.hourly.precipitation_probability[i],
-                    precipitationType: this.getPrecipType(
-                        data.hourly.weather_code[i],
-                        data.hourly.snowfall[i]
-                    ),
-                    snowfallInches: data.hourly.snowfall[i] ? data.hourly.snowfall[i] / 2.54 : 0,
-                    shortForecast: WEATHER_CODE_MAP[data.hourly.weather_code[i]] || 'Unknown',
-                    isDaytime: hour >= 6 && hour < 18,
-                });
-            }
-
-            // Debug log to verify time range
-            if (hourly.length > 0) {
-                logger.debug(`OpenMeteo fetched ${hourly.length} hours. Range: ${hourly[0].timestamp.toISOString()} to ${hourly[hourly.length-1].timestamp.toISOString()}`);
-            }
-
-            return {
-                location: coords,
-                locationName: `${coords.lat.toFixed(2)}, ${coords.lon.toFixed(2)}`,
-                fetchedAt: new Date(),
-                source: 'open-meteo',
-                hourly,
-            };
+            return this.parseWeatherResponse(response.data, coords);
         } catch (error) {
             logger.error('Failed to fetch Open-Meteo forecast', { coords, error: (error as Error).message });
             throw error;
         }
+    }
+
+    /**
+     * Get hourly forecasts for multiple coordinates in a single API call
+     * Open-Meteo supports batch requests via the /forecast endpoint with multiple lat/lon pairs
+     * 
+     * Note: OpenMeteo has rate limits. Large batch requests may trigger 429 errors.
+     * If batch fails, we fall back to sequential requests with delays.
+     */
+    async getHourlyForecastBatch(locations: Array<{ coords: Coordinates; locationName?: string }>): Promise<WeatherData[]> {
+        if (locations.length === 0) {
+            return [];
+        }
+
+        // If only one location, use regular endpoint
+        if (locations.length === 1) {
+            const data = await this.getHourlyForecast(locations[0].coords);
+            if (locations[0].locationName) {
+                data.locationName = locations[0].locationName;
+            }
+            return [data];
+        }
+
+        // Limit batch size to avoid rate limits
+        const MAX_BATCH_SIZE = 10;
+        if (locations.length > MAX_BATCH_SIZE) {
+            logger.warn(`Batch size ${locations.length} exceeds max ${MAX_BATCH_SIZE}, splitting into chunks`);
+            const results: WeatherData[] = [];
+            for (let i = 0; i < locations.length; i += MAX_BATCH_SIZE) {
+                const chunk = locations.slice(i, i + MAX_BATCH_SIZE);
+                const chunkResults = await this.getHourlyForecastBatch(chunk);
+                results.push(...chunkResults);
+                // Add delay between chunks to avoid rate limiting
+                if (i + MAX_BATCH_SIZE < locations.length) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
+            return results;
+        }
+
+        try {
+            // Build batch request parameters
+            const latitudes = locations.map(l => l.coords.lat).join(',');
+            const longitudes = locations.map(l => l.coords.lon).join(',');
+
+            const response = await this.client.get<OpenMeteoBatchResponse>('/forecast', {
+                params: {
+                    latitude: latitudes,
+                    longitude: longitudes,
+                    hourly: [
+                        'temperature_2m',
+                        'relative_humidity_2m',
+                        'precipitation_probability',
+                        'precipitation',
+                        'snowfall',
+                        'weather_code',
+                        'wind_speed_10m',
+                        'wind_direction_10m',
+                    ].join(','),
+                    temperature_unit: 'fahrenheit',
+                    wind_speed_unit: 'mph',
+                    forecast_days: 7,
+                },
+            });
+
+            // Parse each result
+            const results: WeatherData[] = [];
+            for (let i = 0; i < response.data.results.length; i++) {
+                const result = response.data.results[i];
+                const location = locations[i];
+                const weatherData = this.parseWeatherResponse(result, location.coords);
+                if (location.locationName) {
+                    weatherData.locationName = location.locationName;
+                }
+                results.push(weatherData);
+            }
+
+            logger.info(`OpenMeteo batch fetch: ${locations.length} locations in 1 API call`);
+            return results;
+        } catch (error) {
+            const statusCode = (error as any)?.response?.status;
+            logger.error('Failed to fetch Open-Meteo batch forecast', { 
+                count: locations.length, 
+                statusCode,
+                error: (error as Error).message 
+            });
+            
+            // If rate limited, wait before falling back
+            if (statusCode === 429) {
+                logger.warn('OpenMeteo rate limited (429), waiting 2s before fallback');
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            
+            // Fall back to sequential requests with delays to avoid further rate limiting
+            logger.warn('Falling back to sequential API calls with rate limiting');
+            const results: WeatherData[] = [];
+            for (const location of locations) {
+                try {
+                    const data = await this.getHourlyForecast(location.coords);
+                    if (location.locationName) {
+                        data.locationName = location.locationName;
+                    }
+                    results.push(data);
+                    // Small delay between requests
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                } catch (e) {
+                    logger.error(`Failed to fetch ${location.locationName || 'location'}`, { error: (e as Error).message });
+                    throw e; // Re-throw to trigger outer fallback
+                }
+            }
+            return results;
+        }
+    }
+
+    /**
+     * Parse OpenMeteo response into WeatherData
+     */
+    private parseWeatherResponse(data: OpenMeteoResponse, coords: Coordinates): WeatherData {
+        const hourly: HourlyForecast[] = [];
+
+        // Debug log raw data
+        if (data.hourly && data.hourly.temperature_2m) {
+            logger.debug(`OpenMeteo Raw Data for ${coords.lat},${coords.lon}:`, {
+                firstTime: data.hourly.time[0],
+                firstTemp: data.hourly.temperature_2m[0],
+                sampleTemps: data.hourly.temperature_2m.slice(0, 5),
+                tempUnit: 'fahrenheit'
+            });
+        } else {
+            logger.error(`OpenMeteo Raw Data Missing!`, { keys: Object.keys(data.hourly || {}) });
+        }
+
+        for (let i = 0; i < data.hourly.time.length; i++) {
+            // Open-Meteo returns UTC by default (ISO 8601 without offset)
+            // We must append 'Z' to force UTC parsing, otherwise Date() assumes local time
+            const timeStr = data.hourly.time[i].endsWith('Z') ? data.hourly.time[i] : `${data.hourly.time[i]}Z`;
+            const timestamp = new Date(timeStr);
+            const hour = timestamp.getHours();
+
+            hourly.push({
+                timestamp,
+                temperatureF: Math.round(data.hourly.temperature_2m[i]),
+                temperatureC: this.fahrenheitToCelsius(data.hourly.temperature_2m[i]),
+                humidity: data.hourly.relative_humidity_2m[i],
+                windSpeedMph: Math.round(data.hourly.wind_speed_10m[i]),
+                probabilityOfPrecipitation: data.hourly.precipitation_probability[i],
+                precipitationType: this.getPrecipType(
+                    data.hourly.weather_code[i],
+                    data.hourly.snowfall[i]
+                ),
+                snowfallInches: data.hourly.snowfall[i] ? data.hourly.snowfall[i] / 2.54 : 0,
+                shortForecast: WEATHER_CODE_MAP[data.hourly.weather_code[i]] || 'Unknown',
+                isDaytime: hour >= 6 && hour < 18,
+            });
+        }
+
+        // Debug log to verify time range
+        if (hourly.length > 0) {
+            logger.debug(`OpenMeteo fetched ${hourly.length} hours. Range: ${hourly[0].timestamp.toISOString()} to ${hourly[hourly.length-1].timestamp.toISOString()}`);
+        }
+
+        return {
+            location: coords,
+            locationName: `${coords.lat.toFixed(2)}, ${coords.lon.toFixed(2)}`,
+            fetchedAt: new Date(),
+            source: 'open-meteo',
+            hourly,
+        };
     }
 
     /**

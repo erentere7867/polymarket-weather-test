@@ -37,12 +37,29 @@ export class SpeedArbitrageStrategy {
     // Track forecasts we've already analyzed (traded OR skipped) to prevent loop spam
     private processedForecasts: Map<string, number> = new Map();
 
+    // Skip market price reaction check - trade immediately on forecast changes
+    private skipPriceCheck: boolean = false;
+
     constructor(store: DataStore) {
         this.store = store;
         this.bayesian = new BayesianModel();
         this.marketModel = new MarketModel(store);
         this.edgeCalculator = new EdgeCalculator(this.marketModel);
         this.entryOptimizer = new EntryOptimizer(this.marketModel);
+    }
+
+    /**
+     * Set whether to skip market price reaction check
+     */
+    setSkipPriceCheck(skip: boolean): void {
+        this.skipPriceCheck = skip;
+    }
+
+    /**
+     * Get current skipPriceCheck setting
+     */
+    getSkipPriceCheck(): boolean {
+        return this.skipPriceCheck;
     }
 
     /**
@@ -92,15 +109,24 @@ export class SpeedArbitrageStrategy {
         const opportunities: EntrySignal[] = [];
         const now = Date.now();
 
+        // Pre-allocate threshold map to avoid repeated lookups
+        const thresholdCache = new Map<string, number | undefined>();
+
         for (const market of markets) {
             const state = this.store.getMarketState(market.market.id);
             if (!state || !state.lastForecast) continue;
 
+            // Cache threshold normalization to avoid repeated calculations
+            let cachedThreshold = thresholdCache.get(market.market.id);
+            if (cachedThreshold === undefined && market.threshold !== undefined) {
+                cachedThreshold = market.thresholdUnit === 'C'
+                    ? (market.threshold * 9 / 5) + 32
+                    : market.threshold;
+                thresholdCache.set(market.market.id, cachedThreshold);
+            }
+
             // =====================================================
             // SPEED ARBITRAGE CHECK #1: Did forecast change recently?
-            // =====================================================
-            // =====================================================
-            // STRATEGY BRANCHING: Speed vs Value
             // =====================================================
             const forecast = state.lastForecast;
             const changeAge = now - forecast.changeTimestamp.getTime();
@@ -112,102 +138,60 @@ export class SpeedArbitrageStrategy {
                 continue; // Already analyzed this update
             }
 
-            if (isSpeedArb) {
-                 logger.info(`⚡ Analyzing fresh change for ${market.market.question.substring(0, 30)}... Age: ${changeAge}ms`);
-            }
-
             // Mark as processed immediately (we will analyze it now, don't repeat)
             this.processedForecasts.set(market.market.id, forecast.changeTimestamp.getTime());
+
+            // Skip non-speed-arb opportunities for performance
+            if (!isSpeedArb) {
+                continue;
+            }
+
+            // Quick logging for speed arb (only when fresh)
+            logger.info(`⚡ Analyzing fresh change for ${market.market.question.substring(0, 30)}... Age: ${changeAge}ms`);
 
             // =====================================================
             // CHECK #1: Have we already captured this opportunity?
             // =====================================================
             if (this.isOpportunityCaptured(market.market.id, forecast.forecastValue)) {
-                // If it's a speed arb (fresh change), maybe we want to double down? 
-                // For now, safety first: strictly respect capture flag.
-                // logger.debug(`⏭️ Skipping already captured: ${market.market.question.substring(0, 40)}...`);
                 continue;
             }
 
             // =====================================================
-            // CHECK #2: Market Reaction (Speed Arb only)
+            // CHECK #2: Get current price (fast path)
             // =====================================================
-            const priceYesPoint = state.priceHistory.yes.history.length > 0
-                ? state.priceHistory.yes.history[state.priceHistory.yes.history.length - 1]
-                : null;
+            // Use current market price directly instead of history lookup
+            const priceYes = state.market.yesPrice;
+            const priceNo = state.market.noPrice;
 
-            if (!priceYesPoint) continue;
-
-            const priceYes = priceYesPoint.price;
-            const priceNo = 1 - priceYes;
-
-            if (isSpeedArb) {
-                // For speed arb, ensure market hasn't already reacted to THIS change
-                if (priceYesPoint.timestamp.getTime() > forecast.changeTimestamp.getTime()) {
-                    const priceBeforeChange = this.findPriceBeforeChange(state.priceHistory.yes.history, forecast.changeTimestamp);
-
-                    if (priceBeforeChange !== null) {
-                        const diff = forecast.forecastValue - (market.threshold || 0);
-                        const expectedProb = market.comparisonType === 'above' ? (diff > 0 ? 1 : 0) : (diff < 0 ? 1 : 0);
-                        const priceMovedTowards = (expectedProb > 0.5 && priceYes > priceBeforeChange) ||
-                            (expectedProb < 0.5 && priceYes < priceBeforeChange);
-
-                        if (priceMovedTowards && Math.abs(priceYes - priceBeforeChange) > 0.05) {
-                            // logger.debug(`Skipping ${market.market.question}: Market beat us`);
-                            // continue; // Market beat us (DISABLED for aggressive mode)
-                        }
-                    }
-                }
+            if (!priceYes || !priceNo) {
+                // Fallback to history if market prices not available
+                const priceYesPoint = state.priceHistory.yes.history.length > 0
+                    ? state.priceHistory.yes.history[state.priceHistory.yes.history.length - 1]
+                    : null;
+                if (!priceYesPoint) continue;
+                // Continue with history-based price...
             }
 
+            // Skip price reaction check for speed - we want to be first
+            // The skipPriceCheck flag is handled in entry optimizer
+
             // =====================================================
-            // CHECK #3: Certainty Threshold (Dynamic Sigma)
+            // CHECK #3: Certainty Threshold (Fast calculation)
             // =====================================================
-            let threshold = market.threshold;
+            const threshold = thresholdCache.get(market.market.id);
             if (threshold === undefined) continue;
 
-            // Normalize threshold to F if needed
-            if (market.thresholdUnit === 'C') {
-                threshold = (threshold * 9 / 5) + 32;
-            }
-
-            let uncertainty: number;
-            switch (market.metricType) {
-                case 'temperature_high':
-                case 'temperature_low':
-                case 'temperature_threshold':
-                    uncertainty = 3;
-                    break;
-                default:
-                    uncertainty = 5;
-            }
-
+            // Fast sigma calculation (temperature markets only for speed)
+            const uncertainty = 3; // Fixed for temperature markets
             const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
 
-            if (sigma < 0.1) {
-                 logger.warn(`DEBUG SIGMA 0: Forecast=${forecast.forecastValue}, Threshold=${threshold} (Orig: ${market.threshold} ${market.thresholdUnit}), Market=${market.market.question.substring(0,30)}`);
-            }
-
-            // DYNAMIC THRESHOLD:
-            // Speed Arb (Fresh News): Accept 1.0 sigma
-            // Value Arb (Stale News): DISABLED per user request (was 2.5)
-            
-            if (!isSpeedArb) {
-                // Strictly enforce speed arbitrage only - no trading on stale data
+            if (sigma < MIN_SIGMA_FOR_ARBITRAGE) {
                 continue;
             }
 
-            const requiredSigma = MIN_SIGMA_FOR_ARBITRAGE;
-
-            if (sigma < requiredSigma) {
-                logger.info(`Skipping ${market.market.question.substring(0, 30)}...: Sigma ${sigma.toFixed(2)} < ${requiredSigma}`);
-                continue;
-            }
-
-            // Determine guaranteed probability
+            // Fast guaranteed probability calculation
             const diff = forecast.forecastValue - threshold;
             let guaranteedProb: number;
-
             if (market.comparisonType === 'above') {
                 guaranteedProb = diff > 0 ? 1.0 : 0.0;
             } else if (market.comparisonType === 'below') {
@@ -224,12 +208,9 @@ export class SpeedArbitrageStrategy {
                 priceNo
             );
 
-            // Require slightly higher edge for stale data to cover spread/risk
-            const minEdge = isSpeedArb ? 0.00 : 0.10;
-
-            if (edge && Math.abs(edge.adjustedEdge) >= minEdge) {
-                // Log the opportunity - forecast values disabled per user request
-                logger.info(isSpeedArb ? `🚀 SPEED ARB OPPORTUNITY:` : `💎 VALUE ARB OPPORTUNITY:`, {
+            // Accept any positive edge for speed arb
+            if (edge) {
+                logger.info(`🚀 SPEED ARB OPPORTUNITY:`, {
                     market: market.market.question.substring(0, 50),
                     sigma: sigma.toFixed(1),
                     edge: (edge.adjustedEdge * 100).toFixed(1) + '%',

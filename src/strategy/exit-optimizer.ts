@@ -69,22 +69,26 @@ export class ExitOptimizer {
         }
 
         // 2. Take Profit (Target Price)
-        // If price reached fair value (forecast probability), take profit?
-        // Or if we hit fixed ROI threshold.
+        // Only exit at fair value if we have meaningful profit (avoid 0% PnL exits)
         const fairValue = forecastProbability;
         const currentPrice = position.currentPrice;
 
-        // If we are LONG YES, and Price >= FairValue, maybe exit?
-        // Or if we surpassed fair value (Market Overreaction).
+        // Fair value exit only makes sense if:
+        // 1. We have a meaningful profit (>1%), OR
+        // 2. The price moved significantly toward fair value since entry
+        // This prevents immediate exits when entry price was already at fair value
+        const priceMovedSignificantly = Math.abs(currentPrice - position.entryPrice) > 0.01; // >1 cent move
+        const hasMeaningfulProfit = position.pnlPercent > 0.01; // >1% profit
 
         const isOvervalued = position.side === 'yes'
             ? currentPrice >= fairValue
             : currentPrice <= fairValue;
 
-        if (isOvervalued) {
+        // Only exit on fair value if we actually made money (not 0% PnL)
+        if (isOvervalued && hasMeaningfulProfit) {
             return {
                 shouldExit: true,
-                reason: `Fair value reached (Price ${currentPrice.toFixed(2)} vs Prob ${fairValue.toFixed(2)})`,
+                reason: `Fair value reached with profit (Price ${currentPrice.toFixed(2)} vs Prob ${fairValue.toFixed(2)}, PnL: ${(position.pnlPercent * 100).toFixed(1)}%)`,
                 urgency: 'MEDIUM'
             };
         }
@@ -98,11 +102,11 @@ export class ExitOptimizer {
         }
 
         // 3. Time Limit
-        const holdTime = Date.now() - position.entryTime.getTime();
-        if (holdTime > this.timeLimitMs) {
+        const holdTimeMs = Date.now() - position.entryTime.getTime();
+        if (holdTimeMs > this.timeLimitMs) {
             return {
                 shouldExit: true,
-                reason: `Time limit exceeded (${(holdTime / 3600000).toFixed(1)}h)`,
+                reason: `Time limit exceeded (${(holdTimeMs / 3600000).toFixed(1)}h)`,
                 urgency: 'LOW'
             };
         }

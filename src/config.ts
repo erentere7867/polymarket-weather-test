@@ -37,9 +37,16 @@ export interface Config {
     forecastPollIntervalMs: number;
     logLevel: string;
 
+    // City priority settings
+    highPriorityCities: string[];
+    highPriorityPollIntervalMs: number;  // Poll interval for high priority cities (default: 3000ms)
+
     // Guaranteed outcome detection
     certaintySigmaThreshold: number;      // Std deviations for certainty (default: 3.0)
     guaranteedPositionMultiplier: number; // Position size multiplier for guaranteed trades
+
+    // Speed arbitrage settings
+    skipPriceCheck: boolean;              // Skip market price reaction check on forecast changes (trade immediately)
 }
 
 function getEnvVarOptional(name: string, defaultValue: string): string {
@@ -52,7 +59,7 @@ function getEnvVarBool(name: string, defaultValue: boolean): boolean {
     return value.toLowerCase() === 'true';
 }
 
-function getEnvVarNumber(name: string, defaultValue: number): number {
+export function getEnvVarNumber(name: string, defaultValue: number): number {
     const value = process.env[name];
     if (!value) return defaultValue;
     const parsed = parseFloat(value);
@@ -86,12 +93,19 @@ export const config: Config = {
     maxPositionSize: getEnvVarNumber('MAX_POSITION_SIZE', 10),
     minEdgeThreshold: getEnvVarNumber('MIN_EDGE_THRESHOLD', 0.10),
     pollIntervalMs: getEnvVarNumber('POLL_INTERVAL_MS', 60000), // 1 minute
-    forecastPollIntervalMs: getEnvVarNumber('FORECAST_POLL_INTERVAL_MS', 10000), // 10 seconds for speed arbitrage
+    forecastPollIntervalMs: getEnvVarNumber('FORECAST_POLL_INTERVAL_MS', 12000),
     logLevel: getEnvVarOptional('LOG_LEVEL', 'info'),
+
+    // City priority settings
+    highPriorityCities: getEnvVarOptional('HIGH_PRIORITY_CITIES', '').split(',').map(c => c.trim()).filter(c => c.length > 0),
+    highPriorityPollIntervalMs: getEnvVarNumber('HIGH_PRIORITY_POLL_INTERVAL_MS', 6000), // 6 seconds
 
     // Guaranteed outcome detection
     certaintySigmaThreshold: getEnvVarNumber('CERTAINTY_SIGMA_THRESHOLD', 3.0), // 3 std devs = 99.87% certain
     guaranteedPositionMultiplier: getEnvVarNumber('GUARANTEED_POSITION_MULTIPLIER', 2.0), // 2x position for guaranteed
+
+    // Speed arbitrage settings
+    skipPriceCheck: getEnvVarBool('SKIP_PRICE_CHECK', false), // Skip market price reaction check on forecast changes
 };
 
 /**

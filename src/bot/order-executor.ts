@@ -132,19 +132,24 @@ export class OrderExecutor {
     async executeOpportunities(opportunities: TradingOpportunity[]): Promise<ExecutionResult[]> {
         const results: ExecutionResult[] = [];
 
-        for (const opportunity of opportunities) {
-            // Skip if we've already traded this market recently
-            const marketKey = opportunity.market.market.id;
+        // Filter out recently traded markets first
+        const eligibleOpportunities = opportunities.filter(opp => {
+            const marketKey = opp.market.market.id;
             if (this.recentlyTraded(marketKey)) {
-                logger.debug(`Skipping recently traded market: ${opportunity.market.market.question.substring(0, 40)}`);
-                continue;
+                logger.debug(`Skipping recently traded market: ${opp.market.market.question.substring(0, 40)}`);
+                return false;
             }
+            return true;
+        });
 
+        // Execute eligible opportunities with rate limiting
+        for (let i = 0; i < eligibleOpportunities.length; i++) {
+            const opportunity = eligibleOpportunities[i];
             const result = await this.executeOpportunity(opportunity);
             results.push(result);
 
-            // Rate limit: wait between orders
-            if (results.length < opportunities.length) {
+            // Rate limit: wait between orders (except after the last one)
+            if (i < eligibleOpportunities.length - 1) {
                 await this.delay(1000);
             }
         }

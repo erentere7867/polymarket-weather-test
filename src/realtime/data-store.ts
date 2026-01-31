@@ -68,12 +68,30 @@ export class DataStore {
         historyObj.history.push({ price, timestamp });
         historyObj.lastUpdated = timestamp;
 
-        // Prune history older than 60 minutes
-        const cutoff = new Date(timestamp.getTime() - 60 * 60 * 1000);
-        historyObj.history = historyObj.history.filter(p => p.timestamp > cutoff);
+        // Prune history older than 10 minutes (reduced from 60 for performance)
+        // We only need recent history for velocity calculation
+        const cutoffTime = timestamp.getTime() - 10 * 60 * 1000;
+        // Use binary search to find the cutoff index for O(log n) pruning
+        const history = historyObj.history;
+        let left = 0;
+        let right = history.length;
+        while (left < right) {
+            const mid = (left + right) >>> 1;
+            if (history[mid].timestamp.getTime() < cutoffTime) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        // Remove all elements before the found index
+        if (left > 0) {
+            history.splice(0, left);
+        }
 
-        // Calculate velocity (price change per second over last minute)
-        this.updateVelocity(historyObj);
+        // Calculate velocity only every 5 updates to reduce CPU usage
+        if (historyObj.history.length % 5 === 0) {
+            this.updateVelocity(historyObj);
+        }
     }
 
     private updateVelocity(history: { history: PricePoint[], velocity: number }): void {
@@ -107,9 +125,22 @@ export class DataStore {
         state.lastForecast = snapshot;
         state.forecastHistory.push(snapshot);
 
-        // Keep last 24h of forecasts
-        const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        state.forecastHistory = state.forecastHistory.filter(f => f.timestamp > cutoff);
+        // Keep last 24h of forecasts using binary search for efficient pruning
+        const cutoffTime = Date.now() - 24 * 60 * 60 * 1000;
+        const forecasts = state.forecastHistory;
+        let left = 0;
+        let right = forecasts.length;
+        while (left < right) {
+            const mid = (left + right) >>> 1;
+            if (forecasts[mid].timestamp.getTime() < cutoffTime) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        if (left > 0) {
+            forecasts.splice(0, left);
+        }
     }
 
     /**

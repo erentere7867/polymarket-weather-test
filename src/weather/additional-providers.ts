@@ -325,7 +325,16 @@ export class VisualCrossingProvider extends BaseProvider {
                 hourly
             };
         } catch (error) {
-            logger.error('Visual Crossing fetch failed', { error: (error as Error).message });
+            const statusCode = (error as any)?.response?.status;
+            const errorMessage = (error as Error).message;
+            
+            // Log specific rate limit errors
+            if (statusCode === 429) {
+                logger.error(`Visual Crossing rate limit exceeded (429). Consider reducing request frequency or upgrading plan.`);
+            } else {
+                logger.error('Visual Crossing fetch failed', { statusCode, error: errorMessage });
+            }
+            
             throw error;
         }
     }
