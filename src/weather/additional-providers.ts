@@ -342,10 +342,33 @@ export class VisualCrossingProvider extends BaseProvider {
 
 /**
  * Meteosource Provider
+ * 
+ * Supports batch requests for efficient multi-city polling.
+ * Meteosource API allows fetching weather for multiple locations
+ * by making parallel requests (no native batch endpoint, but we
+ * can optimize with request pooling and caching).
+ * 
+ * Rate Limits:
+ * - Free tier: 500 calls/day
+ * - Paid tiers: Higher limits available
+ * 
+ * Polling Strategy:
+ * - 2-second polling during HIGH urgency windows
+ * - Uses intelligent caching to minimize API calls
+ * - Falls back to sequential requests with rate limiting
  */
 export class MeteosourceProvider extends BaseProvider {
     name = 'meteosource';
     private client: AxiosInstance;
+    
+    // In-memory cache for weather data
+    private cache: Map<string, { data: WeatherData; fetchedAt: number }> = new Map();
+    private readonly cacheTtlMs = 60 * 1000; // 60 second cache for Meteosource
+    
+    // Rate limiting
+    private lastRequestTime: number = 0;
+    private readonly minRequestIntervalMs = 500; // Minimum 500ms between requests
+    private consecutiveErrors: number = 0;
 
     constructor() {
         super();
@@ -358,11 +381,73 @@ export class MeteosourceProvider extends BaseProvider {
     isConfigured(): boolean {
         return !!config.meteosourceApiKey;
     }
+    
+    /**
+     * Generate cache key for coordinates
+     */
+    private generateCacheKey(coords: Coordinates): string {
+        return `${coords.lat.toFixed(4)},${coords.lon.toFixed(4)}`;
+    }
+    
+    /**
+     * Get cached data if available and valid
+     */
+    private getCachedData(cacheKey: string): WeatherData | null {
+        const entry = this.cache.get(cacheKey);
+        if (!entry) return null;
+        
+        const now = Date.now();
+        if (now - entry.fetchedAt > this.cacheTtlMs) {
+            this.cache.delete(cacheKey);
+            return null;
+        }
+        
+        return entry.data;
+    }
+    
+    /**
+     * Store data in cache
+     */
+    private setCachedData(cacheKey: string, data: WeatherData): void {
+        this.cache.set(cacheKey, {
+            data,
+            fetchedAt: Date.now(),
+        });
+    }
+    
+    /**
+     * Apply rate limiting delay
+     */
+    private async applyRateLimit(): Promise<void> {
+        const now = Date.now();
+        const timeSinceLastRequest = now - this.lastRequestTime;
+        
+        if (timeSinceLastRequest < this.minRequestIntervalMs) {
+            const delay = this.minRequestIntervalMs - timeSinceLastRequest;
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        
+        this.lastRequestTime = Date.now();
+    }
 
-    async getHourlyForecast(coords: Coordinates): Promise<WeatherData> {
+    async getHourlyForecast(coords: Coordinates, useCache: boolean = true): Promise<WeatherData> {
         if (!this.isConfigured()) throw new Error('Meteosource API key not configured');
+        
+        const cacheKey = this.generateCacheKey(coords);
+        
+        // Check cache first if enabled
+        if (useCache) {
+            const cached = this.getCachedData(cacheKey);
+            if (cached) {
+                logger.debug(`Meteosource cache hit for ${cacheKey}`);
+                return cached;
+            }
+        }
 
         try {
+            // Apply rate limiting
+            await this.applyRateLimit();
+
             const response = await this.client.get('/point', {
                 params: {
                     key: config.meteosourceApiKey,
@@ -372,6 +457,9 @@ export class MeteosourceProvider extends BaseProvider {
                     units: 'us' // Fahrenheit, mph, inches
                 }
             });
+            
+            // Reset error counter on success
+            this.consecutiveErrors = 0;
 
             const data = response.data.hourly.data;
             const hourly: HourlyForecast[] = data.map((item: any) => {
@@ -397,15 +485,114 @@ export class MeteosourceProvider extends BaseProvider {
                 };
             });
 
-            return {
+            const weatherData: WeatherData = {
                 location: coords,
                 fetchedAt: new Date(),
                 source: 'meteosource',
                 hourly
             };
+            
+            // Cache the result
+            this.setCachedData(cacheKey, weatherData);
+
+            return weatherData;
         } catch (error) {
-            logger.error('Meteosource fetch failed', { error: (error as Error).message });
+            this.consecutiveErrors++;
+            logger.error('Meteosource fetch failed', { 
+                error: (error as Error).message,
+                consecutiveErrors: this.consecutiveErrors 
+            });
             throw error;
         }
+    }
+    
+    /**
+     * Get hourly forecasts for multiple coordinates using parallel requests
+     *
+     * Meteosource doesn't have a native batch endpoint, so we use
+     * parallel requests. NO rate limiting - fetches all cities as fast as possible.
+     *
+     * @param locations Array of locations to fetch
+     * @param useCache Whether to use cached data
+     * @returns Array of WeatherData for each location
+     */
+    async getHourlyForecastBatch(
+        locations: Array<{ coords: Coordinates; locationName?: string }>,
+        useCache: boolean = true
+    ): Promise<WeatherData[]> {
+        if (locations.length === 0) {
+            return [];
+        }
+
+        // If only one location, use regular method
+        if (locations.length === 1) {
+            const data = await this.getHourlyForecast(locations[0].coords, useCache);
+            if (locations[0].locationName) {
+                data.locationName = locations[0].locationName;
+            }
+            return [data];
+        }
+
+        logger.info(`🌤️ Meteosource batch request: ${locations.length} cities (parallel, no throttling)`);
+
+        const results: WeatherData[] = [];
+        const errors: Array<{ location: string; error: string }> = [];
+
+        // Fetch ALL cities in parallel - NO rate limiting, NO delays
+        // This is intentional for Meteosource polling mode which needs maximum speed
+        const fetchPromises = locations.map(async (location) => {
+            try {
+                const data = await this.getHourlyForecast(location.coords, useCache);
+                if (location.locationName) {
+                    data.locationName = location.locationName;
+                }
+                return { success: true, data, locationName: location.locationName || 'unknown' };
+            } catch (error) {
+                return {
+                    success: false,
+                    error: (error as Error).message,
+                    locationName: location.locationName || 'unknown'
+                };
+            }
+        });
+        
+        const fetchResults = await Promise.all(fetchPromises);
+        
+        for (const result of fetchResults) {
+            if (result.success && result.data) {
+                results.push(result.data);
+            } else {
+                errors.push({
+                    location: result.locationName || 'unknown',
+                    error: result.error || 'Unknown error'
+                });
+            }
+        }
+
+        if (errors.length > 0) {
+            logger.warn(`Meteosource batch completed with ${errors.length} errors:`, errors);
+        }
+
+        logger.info(`✅ Meteosource batch complete: ${results.length}/${locations.length} cities successful`);
+        
+        return results;
+    }
+    
+    /**
+     * Clear the cache
+     */
+    clearCache(): void {
+        this.cache.clear();
+        logger.info('Meteosource cache cleared');
+    }
+    
+    /**
+     * Get cache statistics
+     */
+    getCacheStats(): { size: number; ttlMs: number } {
+        return {
+            size: this.cache.size,
+            ttlMs: this.cacheTtlMs,
+        };
     }
 }

@@ -10,6 +10,9 @@ import { webhookValidator } from './middleware/webhook-validator.js';
 import { forecastStateMachine, StateContext } from '../realtime/forecast-state-machine.js';
 import { eventBus } from '../realtime/event-bus.js';
 import { WeatherProviderManager } from '../weather/provider-manager.js';
+import { HybridWeatherController, HybridWeatherMode, UrgencyLevel } from '../realtime/hybrid-weather-controller.js';
+import { apiCallTracker } from '../realtime/api-call-tracker.js';
+import { DataStore } from '../realtime/data-store.js';
 
 const app = express();
 const PORT = process.env.PORT || 8188;
@@ -40,6 +43,13 @@ const PORT = process.env.PORT || 8188;
 
 // Initialize Simulation (Indefinite Mode)
 const runner = new SimulationRunner(100000, Infinity);
+
+// Initialize Hybrid Weather Controller
+const dataStore = new DataStore();
+const hybridWeatherController = new HybridWeatherController(
+    forecastStateMachine,
+    dataStore
+);
 
 // Middleware
 app.use(cors());
@@ -305,11 +315,183 @@ app.get('/api/forecast/triggers', (req, res) => {
     });
 });
 
+// ============================================
+// HYBRID WEATHER CONTROLLER DASHBOARD ENDPOINTS
+// ============================================
+
+// 12. Hybrid Weather Controller Status
+app.get('/api/hybrid-weather/status', (req, res) => {
+    const status = hybridWeatherController.getStatusReport();
+    res.json({
+        currentMode: status.state.currentMode,
+        previousMode: status.state.previousMode,
+        modeDuration: status.modeDuration,
+        isRunning: status.state.isRunning,
+        currentUrgency: status.state.currentUrgency,
+        modeConfig: status.modeConfig,
+        burstActive: status.burstActive,
+        websocketActive: status.websocketActive,
+        openMeteoPollingActive: status.openMeteoPollingActive,
+        burstProgress: status.burstProgress,
+        nextUrgencyWindow: status.nextUrgencyWindow,
+        isAutoMode: status.isAutoMode,
+    });
+});
+
+// 13. API Call Tracker Status with Quota Information
+app.get('/api/api-calls/status', (req, res) => {
+    const status = apiCallTracker.getStatusReport();
+    res.json({
+        date: status.date,
+        totalCalls: status.totalCalls,
+        estimatedCost: status.estimatedCost,
+        burstMode: status.burstMode,
+        providers: status.providers.map(p => ({
+            provider: p.provider,
+            callCount: p.callCount,
+            dailyLimit: p.dailyLimit,
+            hardQuotaLimit: p.hardQuotaLimit,
+            usagePercentage: p.dailyLimit ? ((p.callCount / p.dailyLimit) * 100).toFixed(2) + '%' : 'N/A (unlimited)',
+            quotaUsagePercentage: p.hardQuotaLimit ? ((p.callCount / p.hardQuotaLimit) * 100).toFixed(2) + '%' : 'N/A (no quota)',
+            isRateLimited: p.isRateLimited,
+            isQuotaExceeded: p.isQuotaExceeded,
+            lastCallTime: p.lastCallTime,
+        })),
+    });
+});
+
+// 14. Trigger Burst Mode (Manual)
+app.post('/api/hybrid-weather/burst', async (req, res) => {
+    const { cityId } = req.body;
+    if (!cityId) {
+        res.status(400).json({ error: 'cityId is required' });
+        return;
+    }
+    
+    await hybridWeatherController.triggerBurstMode(cityId);
+    res.json({ success: true, message: `Burst mode triggered for ${cityId}` });
+});
+
+// 15. Return to Normal Mode (Manual)
+// This re-enables auto-switching based on urgency windows
+app.post('/api/hybrid-weather/normal', async (req, res) => {
+    await hybridWeatherController.returnToNormal();
+    const status = hybridWeatherController.getStatusReport();
+    res.json({
+        success: true,
+        message: 'Returned to automatic mode - auto-switching enabled',
+        currentMode: status.state.currentMode,
+        currentUrgency: status.state.currentUrgency,
+        isAutoMode: true,
+    });
+});
+
+// 16. Force Mode Transition (Emergency/Manual Override)
+app.post('/api/hybrid-weather/force-mode', async (req, res) => {
+    const { mode, reason } = req.body;
+    const validModes: HybridWeatherMode[] = ['OPEN_METEO_POLLING', 'METEOSOURCE_POLLING', 'WEBSOCKET_REST', 'ROUND_ROBIN_BURST'];
+    
+    if (!mode || !validModes.includes(mode)) {
+        res.status(400).json({
+            error: 'Invalid mode. Must be one of: OPEN_METEO_POLLING, METEOSOURCE_POLLING, WEBSOCKET_REST, ROUND_ROBIN_BURST'
+        });
+        return;
+    }
+    
+    await hybridWeatherController.forceMode(mode, reason || 'manual');
+    res.json({ success: true, message: `Forced transition to ${mode}` });
+});
+
+// 17. Get Urgency Window Schedule
+app.get('/api/hybrid-weather/urgency-schedule', (req, res) => {
+    const now = new Date();
+    const utcHour = now.getUTCHours();
+    const utcMinute = now.getUTCMinutes();
+    const currentTime = utcHour * 60 + utcMinute;
+
+    // Urgency window definitions
+    const windows = [
+        { level: 'HIGH', startHour: 0, startMinute: 30, endHour: 2, endMinute: 30, pollIntervalMs: 2000 },
+        { level: 'HIGH', startHour: 12, startMinute: 30, endHour: 14, endMinute: 30, pollIntervalMs: 2000 },
+        { level: 'MEDIUM', startHour: 6, startMinute: 30, endHour: 7, endMinute: 30, pollIntervalMs: 5000 },
+        { level: 'MEDIUM', startHour: 18, startMinute: 30, endHour: 19, endMinute: 30, pollIntervalMs: 5000 },
+    ];
+
+    // Determine current urgency
+    let currentUrgency = 'LOW';
+    for (const window of windows) {
+        const startTime = window.startHour * 60 + window.startMinute;
+        const endTime = window.endHour * 60 + window.endMinute;
+        if (currentTime >= startTime && currentTime < endTime) {
+            currentUrgency = window.level;
+            break;
+        }
+    }
+
+    res.json({
+        currentUrgency,
+        currentUTCTime: `${utcHour.toString().padStart(2, '0')}:${utcMinute.toString().padStart(2, '0')}`,
+        windows: windows.map(w => ({
+            level: w.level,
+            start: `${w.startHour.toString().padStart(2, '0')}:${w.startMinute.toString().padStart(2, '0')}`,
+            end: `${w.endHour.toString().padStart(2, '0')}:${w.endMinute.toString().padStart(2, '0')}`,
+            pollIntervalMs: w.pollIntervalMs,
+            pollIntervalSec: w.pollIntervalMs / 1000,
+        })),
+    });
+});
+
+// 18. Get Mode History
+app.get('/api/hybrid-weather/history', (req, res) => {
+    const state = hybridWeatherController.getState();
+    res.json({
+        modeHistory: state.modeHistory,
+        lastTransition: state.lastTransition,
+    });
+});
+
+// 19. Toggle Mode (Convenience endpoint for dashboard)
+// NOTE: This disables auto mode since it's a manual override
+app.post('/api/hybrid-weather/toggle', async (req, res) => {
+    const currentMode = hybridWeatherController.getCurrentMode();
+    const currentUrgency = hybridWeatherController.getCurrentUrgency();
+    
+    let targetMode: HybridWeatherMode;
+    
+    // Cycle through modes: WEBSOCKET_REST -> OPEN_METEO_POLLING -> ROUND_ROBIN_BURST -> WEBSOCKET_REST
+    switch (currentMode) {
+        case 'WEBSOCKET_REST':
+            targetMode = 'OPEN_METEO_POLLING';
+            break;
+        case 'OPEN_METEO_POLLING':
+            targetMode = 'ROUND_ROBIN_BURST';
+            break;
+        case 'ROUND_ROBIN_BURST':
+            targetMode = 'WEBSOCKET_REST';
+            break;
+        default:
+            targetMode = currentUrgency === 'LOW' ? 'WEBSOCKET_REST' : 'OPEN_METEO_POLLING';
+    }
+    
+    await hybridWeatherController.forceMode(targetMode, 'manual_toggle');
+    res.json({
+        success: true,
+        message: `Toggled from ${currentMode} to ${targetMode} (Auto mode disabled)`,
+        previousMode: currentMode,
+        currentMode: targetMode,
+        isAutoMode: false,
+    });
+});
+
 // Start Server
 async function startServer() {
     try {
         // Start Bot
         runner.start(); // This runs in background (async)
+
+        // Start Hybrid Weather Controller
+        hybridWeatherController.start();
+        logger.info('🌤️ Hybrid Weather Controller started');
 
         app.listen(PORT, () => {
             logger.info(`🌐 Web Server running on port ${PORT}`);
@@ -325,6 +507,7 @@ async function startServer() {
 process.on('SIGINT', () => {
     logger.info('Shutting down server...');
     runner.stop();
+    hybridWeatherController.stop();
     process.exit(0);
 });
 

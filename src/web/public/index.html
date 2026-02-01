@@ -88,6 +88,80 @@
         .timeline-item:last-child::after {
             display: none;
         }
+
+        /* Mode-specific styles */
+        .mode-open-meteo {
+            background: rgba(59, 130, 246, 0.2);
+            border-color: rgba(59, 130, 246, 0.5);
+            color: #60a5fa;
+        }
+
+        .mode-meteosource {
+            background: rgba(139, 92, 246, 0.2);
+            border-color: rgba(139, 92, 246, 0.5);
+            color: #a78bfa;
+            animation: pulse-purple 2s infinite;
+        }
+
+        @keyframes pulse-purple {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.4); }
+            50% { box-shadow: 0 0 0 10px rgba(139, 92, 246, 0); }
+        }
+
+        .mode-websocket {
+            background: rgba(16, 185, 129, 0.2);
+            border-color: rgba(16, 185, 129, 0.5);
+            color: #34d399;
+        }
+
+        .mode-burst {
+            background: rgba(245, 158, 11, 0.2);
+            border-color: rgba(245, 158, 11, 0.5);
+            color: #fbbf24;
+            animation: pulse-amber 1s infinite;
+        }
+
+        /* Urgency level indicators */
+        .urgency-high {
+            background: rgba(239, 68, 68, 0.2);
+            border-color: rgba(239, 68, 68, 0.5);
+            color: #f87171;
+            animation: pulse-red 2s infinite;
+        }
+
+        .urgency-medium {
+            background: rgba(245, 158, 11, 0.2);
+            border-color: rgba(245, 158, 11, 0.5);
+            color: #fbbf24;
+        }
+
+        .urgency-low {
+            background: rgba(16, 185, 129, 0.2);
+            border-color: rgba(16, 185, 129, 0.5);
+            color: #34d399;
+        }
+
+        @keyframes pulse-red {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+            50% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+        }
+
+        /* Progress bar styles */
+        .progress-bar {
+            transition: width 0.3s ease;
+        }
+
+        /* Button hover effects */
+        .btn-mode {
+            transition: all 0.2s ease;
+        }
+        .btn-mode:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+        .btn-mode:active {
+            transform: translateY(0);
+        }
     </style>
 </head>
 
@@ -100,21 +174,23 @@
                     class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">
                     Polymarket Speed Bot
                 </h1>
-                <p class="text-slate-400 text-sm">v3.0.0 • Webhook-Driven Architecture</p>
+                <p class="text-slate-400 text-sm">v3.0.0 • Hybrid Weather Controller</p>
             </div>
             <div class="flex items-center space-x-6">
                 <!-- Mode Indicator -->
                 <div class="text-right">
                     <p class="text-xs text-slate-500 uppercase tracking-wider">Mode</p>
-                    <p id="mode-text" class="text-blue-400 font-mono font-bold">IDLE POLLING</p>
+                    <p id="mode-text" class="text-blue-400 font-mono font-bold">LOADING...</p>
                 </div>
-                <!-- Webhook Status -->
+                <!-- Auto Mode Indicator -->
                 <div class="text-right">
-                    <p class="text-xs text-slate-500 uppercase tracking-wider">Webhook</p>
-                    <div class="flex items-center space-x-2">
-                        <p id="webhook-status-text" class="text-emerald-400 font-mono font-bold">ACTIVE</p>
-                        <div id="webhook-indicator" class="h-3 w-3 rounded-full bg-emerald-500 webhook-active"></div>
-                    </div>
+                    <p class="text-xs text-slate-500 uppercase tracking-wider">Control</p>
+                    <p id="auto-mode-text" class="text-emerald-400 font-mono font-bold">AUTO</p>
+                </div>
+                <!-- Urgency Level -->
+                <div class="text-right">
+                    <p class="text-xs text-slate-500 uppercase tracking-wider">Urgency</p>
+                    <p id="urgency-text" class="text-emerald-400 font-mono font-bold">LOW</p>
                 </div>
                 <!-- Overall Status -->
                 <div class="text-right">
@@ -154,51 +230,199 @@
             </div>
         </div>
 
+        <!-- Hybrid Weather Controller Status Panel -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                </svg>
+                Weather Controller Status
+            </h3>
+            
+            <!-- Current Mode Display -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                <!-- Current Mode -->
+                <div id="current-mode-card" class="bg-slate-800/50 rounded-lg p-4 border border-white/5 mode-meteosource">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-sm font-medium text-slate-300">Current Mode</span>
+                        <div class="flex items-center space-x-2">
+                            <span id="auto-mode-badge" class="px-2 py-0.5 text-xs rounded-full bg-emerald-500/20 text-emerald-400">AUTO</span>
+                            <span id="mode-badge" class="px-2 py-0.5 text-xs rounded-full bg-violet-500/20 text-violet-400">Active</span>
+                        </div>
+                    </div>
+                    <p id="current-mode-name" class="text-lg font-bold">METEOSOURCE_POLLING</p>
+                    <p id="mode-duration" class="text-xs text-slate-500 mt-1">Duration: 0s</p>
+                </div>
+
+                <!-- Urgency Level -->
+                <div id="urgency-card" class="bg-slate-800/50 rounded-lg p-4 border border-white/5 urgency-low">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-sm font-medium text-slate-300">Urgency Level</span>
+                        <span id="urgency-badge" class="px-2 py-0.5 text-xs rounded-full bg-emerald-500/20 text-emerald-400">LOW</span>
+                    </div>
+                    <p id="urgency-level" class="text-lg font-bold">LOW</p>
+                    <p id="next-window" class="text-xs text-slate-500 mt-1">Next window: --</p>
+                </div>
+
+                <!-- Burst Progress -->
+                <div id="burst-card" class="bg-slate-800/50 rounded-lg p-4 border border-white/5 opacity-50">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-sm font-medium text-slate-300">Burst Progress</span>
+                        <span id="burst-badge" class="px-2 py-0.5 text-xs rounded-full bg-slate-600 text-slate-400">Inactive</span>
+                    </div>
+                    <div class="w-full bg-slate-700 rounded-full h-2 mt-2">
+                        <div id="burst-progress-bar" class="bg-amber-500 h-2 rounded-full progress-bar" style="width: 0%"></div>
+                    </div>
+                    <p id="burst-progress-text" class="text-xs text-slate-500 mt-1">0/60 requests</p>
+                </div>
+            </div>
+
+            <!-- Mode Control Buttons -->
+            <div class="flex flex-wrap gap-3 mb-6">
+                <button onclick="toggleMode()" class="btn-mode bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg font-medium flex items-center space-x-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path>
+                    </svg>
+                    <span>Toggle Mode</span>
+                </button>
+                <button onclick="forceOpenMeteo()" class="btn-mode bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg font-medium flex items-center space-x-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <span>Open-Meteo</span>
+                </button>
+                <button onclick="forceMeteosource()" class="btn-mode bg-violet-700 hover:bg-violet-600 text-white px-4 py-2 rounded-lg font-medium flex items-center space-x-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path>
+                    </svg>
+                    <span>Meteosource</span>
+                </button>
+                <button onclick="forceWebsocket()" class="btn-mode bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg font-medium flex items-center space-x-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                    <span>WebSocket</span>
+                </button>
+                <button onclick="triggerBurst()" class="btn-mode bg-amber-600 hover:bg-amber-500 text-white px-4 py-2 rounded-lg font-medium flex items-center space-x-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                    </svg>
+                    <span>Trigger Burst</span>
+                </button>
+                <button onclick="returnToNormal()" class="btn-mode bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg font-medium flex items-center space-x-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    <span>Auto Mode</span>
+                </button>
+            </div>
+
+            <!-- Urgency Window Schedule -->
+            <div class="bg-slate-800/50 rounded-lg p-4 border border-white/5">
+                <h4 class="text-sm font-medium text-slate-300 mb-3">UTC Urgency Windows</h4>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div class="bg-slate-900/50 rounded p-3 border border-red-500/30">
+                        <div class="text-xs text-red-400 font-bold mb-1">HIGH</div>
+                        <div class="text-xs text-slate-400">00:30 - 02:30 UTC</div>
+                        <div class="text-xs text-slate-500">Open-Meteo: 1s</div>
+                    </div>
+                    <div class="bg-slate-900/50 rounded p-3 border border-red-500/30">
+                        <div class="text-xs text-red-400 font-bold mb-1">HIGH</div>
+                        <div class="text-xs text-slate-400">12:30 - 14:30 UTC</div>
+                        <div class="text-xs text-slate-500">Open-Meteo: 1s</div>
+                    </div>
+                    <div class="bg-slate-900/50 rounded p-3 border border-amber-500/30">
+                        <div class="text-xs text-amber-400 font-bold mb-1">MEDIUM</div>
+                        <div class="text-xs text-slate-400">06:30 - 07:30 UTC</div>
+                        <div class="text-xs text-slate-500">Meteosource: 1s</div>
+                    </div>
+                    <div class="bg-slate-900/50 rounded p-3 border border-amber-500/30">
+                        <div class="text-xs text-amber-400 font-bold mb-1">MEDIUM</div>
+                        <div class="text-xs text-slate-400">18:30 - 19:30 UTC</div>
+                        <div class="text-xs text-slate-500">Meteosource: 1s</div>
+                    </div>
+                </div>
+                <div class="mt-3 p-2 bg-emerald-500/10 border border-emerald-500/30 rounded">
+                    <div class="text-xs text-emerald-400 font-bold mb-1">LOW (Outside Windows)</div>
+                    <div class="text-xs text-slate-400">Meteosource polling: 1s (continuous)</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Open-Meteo Quota Status -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                </svg>
+                Open-Meteo Quota Status
+            </h3>
+            <div class="bg-slate-800/50 rounded-lg p-4 border border-white/5">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm text-slate-300">Daily Quota Usage</span>
+                    <span id="quota-percentage" class="text-sm font-bold text-emerald-400">0%</span>
+                </div>
+                <div class="w-full bg-slate-700 rounded-full h-3">
+                    <div id="quota-progress-bar" class="bg-gradient-to-r from-emerald-500 to-emerald-400 h-3 rounded-full progress-bar" style="width: 0%"></div>
+                </div>
+                <div class="flex justify-between mt-2 text-xs text-slate-500">
+                    <span id="quota-used">0 calls</span>
+                    <span id="quota-limit">Limit: 9,500</span>
+                </div>
+                <div id="quota-warning" class="hidden mt-3 p-2 bg-amber-500/20 border border-amber-500/50 rounded text-xs text-amber-400">
+                    ⚠️ Warning: Approaching quota limit
+                </div>
+                <div id="quota-exceeded" class="hidden mt-3 p-2 bg-red-500/20 border border-red-500/50 rounded text-xs text-red-400">
+                    🚫 HARD QUOTA EXCEEDED: Open-Meteo disabled
+                </div>
+            </div>
+        </div>
+
         <!-- Architecture Overview -->
         <div class="glass p-6 rounded-xl">
             <h3 class="text-xl font-bold mb-4 flex items-center">
                 <svg class="w-5 h-5 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                 </svg>
-                Webhook-Driven Architecture
+                Urgency-Based Polling Architecture
             </h3>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <!-- Webhook Trigger -->
+                <!-- Open-Meteo Polling Mode -->
                 <div class="bg-slate-800/50 rounded-lg p-4 border border-white/5">
                     <div class="flex items-center justify-between mb-2">
-                        <span class="text-sm font-medium text-slate-300">Tomorrow.io Webhook</span>
-                        <span id="webhook-badge" class="px-2 py-0.5 text-xs rounded-full bg-emerald-500/20 text-emerald-400">Active</span>
+                        <span class="text-sm font-medium text-slate-300">Open-Meteo Polling</span>
+                        <span id="openmeteo-badge" class="px-2 py-0.5 text-xs rounded-full bg-blue-500/20 text-blue-400">1s Polling</span>
                     </div>
-                    <p class="text-xs text-slate-500 mb-2">Triggers FETCH_MODE on forecast updates</p>
+                    <p class="text-xs text-slate-500 mb-2">1 req/sec • Batch requests • HIGH urgency only</p>
                     <div class="text-xs text-slate-400">
-                        <span class="text-slate-500">Last received:</span>
-                        <span id="last-webhook-time">Never</span>
+                        <span class="text-slate-500">Active during:</span>
+                        <span>HIGH urgency windows</span>
                     </div>
                 </div>
 
                 <!-- FETCH_MODE -->
                 <div class="bg-slate-800/50 rounded-lg p-4 border border-white/5">
                     <div class="flex items-center justify-between mb-2">
-                        <span class="text-sm font-medium text-slate-300">FETCH_MODE</span>
-                        <span id="fetch-mode-badge" class="px-2 py-0.5 text-xs rounded-full bg-slate-600 text-slate-400">0 cities</span>
+                        <span class="text-sm font-medium text-slate-300">Burst Mode</span>
+                        <span id="fetch-mode-badge" class="px-2 py-0.5 text-xs rounded-full bg-slate-600 text-slate-400">Inactive</span>
                     </div>
-                    <p class="text-xs text-slate-500 mb-2">10 min max • 5-sec provider polling</p>
+                    <p class="text-xs text-slate-500 mb-2">1 req/sec for 60s • Open-Meteo → Tomorrow → OpenWeather</p>
                     <div class="text-xs text-slate-400">
-                        <span class="text-slate-500">Timeout:</span>
-                        <span id="fetch-mode-timeout">10 min</span>
+                        <span class="text-slate-500">Trigger:</span>
+                        <span>WebSocket forecast changes only</span>
                     </div>
                 </div>
 
-                <!-- IDLE Mode -->
+                <!-- Meteosource Polling Mode -->
                 <div class="bg-slate-800/50 rounded-lg p-4 border border-white/5">
                     <div class="flex items-center justify-between mb-2">
-                        <span class="text-sm font-medium text-slate-300">IDLE Mode</span>
-                        <span id="idle-badge" class="px-2 py-0.5 text-xs rounded-full bg-blue-500/20 text-blue-400">Fallback</span>
+                        <span class="text-sm font-medium text-slate-300">Meteosource Polling</span>
+                        <span id="meteosource-badge" class="px-2 py-0.5 text-xs rounded-full bg-violet-500/20 text-violet-400">1s Polling</span>
                     </div>
-                    <p class="text-xs text-slate-500 mb-2">5-min fallback polling for missed webhooks</p>
+                    <p class="text-xs text-slate-500 mb-2">1 req/sec • Batch requests • LOW/MEDIUM urgency</p>
                     <div class="text-xs text-slate-400">
-                        <span class="text-slate-500">Poll interval:</span>
-                        <span id="idle-poll-interval">5 min</span>
+                        <span class="text-slate-500">Active during:</span>
+                        <span>LOW and MEDIUM urgency</span>
                     </div>
                 </div>
             </div>
@@ -373,6 +597,156 @@
             }
         }
 
+        async function fetchHybridWeatherStatus() {
+            try {
+                const res = await fetch(`${API_BASE}/hybrid-weather/status`);
+                const data = await res.json();
+
+                // Update mode display
+                const modeText = document.getElementById('mode-text');
+                const modeName = document.getElementById('current-mode-name');
+                const modeCard = document.getElementById('current-mode-card');
+                const modeBadge = document.getElementById('mode-badge');
+                const autoModeText = document.getElementById('auto-mode-text');
+                const autoModeBadge = document.getElementById('auto-mode-badge');
+                
+                modeText.innerText = data.currentMode;
+                modeName.innerText = data.currentMode;
+                
+                // Update auto mode indicator
+                if (data.isAutoMode) {
+                    autoModeText.innerText = 'AUTO';
+                    autoModeText.className = 'text-emerald-400 font-mono font-bold';
+                    autoModeBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-emerald-500/20 text-emerald-400';
+                    autoModeBadge.innerText = 'AUTO';
+                } else {
+                    autoModeText.innerText = 'MANUAL';
+                    autoModeText.className = 'text-amber-400 font-mono font-bold';
+                    autoModeBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400';
+                    autoModeBadge.innerText = 'MANUAL';
+                }
+                
+                // Update mode card styling
+                modeCard.className = 'bg-slate-800/50 rounded-lg p-4 border border-white/5';
+                if (data.currentMode === 'OPEN_METEO_POLLING') {
+                    modeCard.classList.add('mode-open-meteo');
+                    modeBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-blue-500/20 text-blue-400';
+                    modeBadge.innerText = 'Polling';
+                } else if (data.currentMode === 'METEOSOURCE_POLLING') {
+                    modeCard.classList.add('mode-meteosource');
+                    modeBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-violet-500/20 text-violet-400';
+                    modeBadge.innerText = 'Meteosource';
+                } else if (data.currentMode === 'WEBSOCKET_REST') {
+                    modeCard.classList.add('mode-websocket');
+                    modeBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-emerald-500/20 text-emerald-400';
+                    modeBadge.innerText = 'Rest Mode';
+                } else if (data.currentMode === 'ROUND_ROBIN_BURST') {
+                    modeCard.classList.add('mode-burst');
+                    modeBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400';
+                    modeBadge.innerText = 'Burst';
+                }
+
+                // Update mode duration
+                const durationSec = Math.floor(data.modeDuration / 1000);
+                const durationMin = Math.floor(durationSec / 60);
+                const durationStr = durationMin > 0 ? `${durationMin}m ${durationSec % 60}s` : `${durationSec}s`;
+                document.getElementById('mode-duration').innerText = `Duration: ${durationStr}`;
+
+                // Update urgency display
+                const urgencyText = document.getElementById('urgency-text');
+                const urgencyLevel = document.getElementById('urgency-level');
+                const urgencyCard = document.getElementById('urgency-card');
+                const urgencyBadge = document.getElementById('urgency-badge');
+                
+                urgencyText.innerText = data.currentUrgency;
+                urgencyLevel.innerText = data.currentUrgency;
+                
+                urgencyCard.className = 'bg-slate-800/50 rounded-lg p-4 border border-white/5';
+                if (data.currentUrgency === 'HIGH') {
+                    urgencyCard.classList.add('urgency-high');
+                    urgencyBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-red-500/20 text-red-400';
+                    urgencyBadge.innerText = 'HIGH';
+                } else if (data.currentUrgency === 'MEDIUM') {
+                    urgencyCard.classList.add('urgency-medium');
+                    urgencyBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400';
+                    urgencyBadge.innerText = 'MEDIUM';
+                } else {
+                    urgencyCard.classList.add('urgency-low');
+                    urgencyBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-emerald-500/20 text-emerald-400';
+                    urgencyBadge.innerText = 'LOW';
+                }
+
+                // Update next window
+                if (data.nextUrgencyWindow) {
+                    document.getElementById('next-window').innerText = `Next: ${data.nextUrgencyWindow.level} in ${data.nextUrgencyWindow.timeUntil}`;
+                }
+
+                // Update burst progress
+                const burstCard = document.getElementById('burst-card');
+                const burstBadge = document.getElementById('burst-badge');
+                const burstProgressBar = document.getElementById('burst-progress-bar');
+                const burstProgressText = document.getElementById('burst-progress-text');
+                
+                if (data.burstProgress) {
+                    burstCard.classList.remove('opacity-50');
+                    burstBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400';
+                    burstBadge.innerText = 'Active';
+                    
+                    const progress = (data.burstProgress.requestsCompleted / data.burstProgress.totalRequests) * 100;
+                    burstProgressBar.style.width = `${progress}%`;
+                    burstProgressText.innerText = `${data.burstProgress.requestsCompleted}/${data.burstProgress.totalRequests} requests`;
+                } else {
+                    burstCard.classList.add('opacity-50');
+                    burstBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-slate-600 text-slate-400';
+                    burstBadge.innerText = 'Inactive';
+                    burstProgressBar.style.width = '0%';
+                    burstProgressText.innerText = '0/60 requests';
+                }
+
+            } catch (err) {
+                console.error('Hybrid weather status error:', err);
+            }
+        }
+
+        async function fetchApiCallsStatus() {
+            try {
+                const res = await fetch(`${API_BASE}/api-calls/status`);
+                const data = await res.json();
+
+                // Find Open-Meteo provider
+                const openMeteo = data.providers.find(p => p.provider === 'openmeteo');
+                if (openMeteo && openMeteo.hardQuotaLimit) {
+                    const percentage = Math.min(100, (openMeteo.callCount / openMeteo.hardQuotaLimit) * 100);
+                    
+                    document.getElementById('quota-percentage').innerText = `${percentage.toFixed(1)}%`;
+                    document.getElementById('quota-progress-bar').style.width = `${percentage}%`;
+                    document.getElementById('quota-used').innerText = `${openMeteo.callCount.toLocaleString()} calls`;
+                    
+                    // Change color based on usage
+                    const progressBar = document.getElementById('quota-progress-bar');
+                    if (percentage >= 100) {
+                        progressBar.className = 'bg-red-500 h-3 rounded-full progress-bar';
+                        document.getElementById('quota-percentage').className = 'text-sm font-bold text-red-400';
+                        document.getElementById('quota-exceeded').classList.remove('hidden');
+                        document.getElementById('quota-warning').classList.add('hidden');
+                    } else if (percentage >= 80) {
+                        progressBar.className = 'bg-amber-500 h-3 rounded-full progress-bar';
+                        document.getElementById('quota-percentage').className = 'text-sm font-bold text-amber-400';
+                        document.getElementById('quota-warning').classList.remove('hidden');
+                        document.getElementById('quota-exceeded').classList.add('hidden');
+                    } else {
+                        progressBar.className = 'bg-gradient-to-r from-emerald-500 to-emerald-400 h-3 rounded-full progress-bar';
+                        document.getElementById('quota-percentage').className = 'text-sm font-bold text-emerald-400';
+                        document.getElementById('quota-warning').classList.add('hidden');
+                        document.getElementById('quota-exceeded').classList.add('hidden');
+                    }
+                }
+
+            } catch (err) {
+                console.error('API calls status error:', err);
+            }
+        }
+
         async function fetchWebhookStats() {
             try {
                 // Webhook Status
@@ -381,29 +755,6 @@
 
                 document.getElementById('webhook-count').innerText = webhookData.webhooksReceived || 0;
                 
-                const webhookStatusEl = document.getElementById('webhook-status-text');
-                const webhookIndicator = document.getElementById('webhook-indicator');
-                
-                if (webhookData.webhookMode) {
-                    webhookStatusEl.innerText = 'ACTIVE';
-                    webhookStatusEl.className = 'text-emerald-400 font-mono font-bold';
-                    webhookIndicator.className = 'h-3 w-3 rounded-full bg-emerald-500 webhook-active';
-                } else {
-                    webhookStatusEl.innerText = 'DISABLED';
-                    webhookStatusEl.className = 'text-slate-500 font-mono font-bold';
-                    webhookIndicator.className = 'h-3 w-3 rounded-full bg-slate-500';
-                }
-
-                // Update mode text
-                const modeText = document.getElementById('mode-text');
-                if (webhookData.webhookMode) {
-                    modeText.innerText = 'WEBHOOK-DRIVEN';
-                    modeText.className = 'text-emerald-400 font-mono font-bold';
-                } else {
-                    modeText.innerText = 'POLLING-ONLY';
-                    modeText.className = 'text-blue-400 font-mono font-bold';
-                }
-
                 // Update webhook badge
                 const webhookBadge = document.getElementById('webhook-badge');
                 if (webhookData.webhookSecretConfigured) {
@@ -436,17 +787,13 @@
                 // Update FETCH_MODE badge
                 const fetchModeBadge = document.getElementById('fetch-mode-badge');
                 const fetchModeCount = data.citiesInFetchMode?.length || 0;
-                fetchModeBadge.innerText = `${fetchModeCount} city${fetchModeCount !== 1 ? 'ies' : ''}`;
+                fetchModeBadge.innerText = fetchModeCount > 0 ? `${fetchModeCount} active` : 'Inactive';
                 
                 if (fetchModeCount > 0) {
                     fetchModeBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-amber-500/20 text-amber-400';
                 } else {
                     fetchModeBadge.className = 'px-2 py-0.5 text-xs rounded-full bg-slate-600 text-slate-400';
                 }
-
-                // Update timeout display
-                document.getElementById('fetch-mode-timeout').innerText = `${data.fetchModeTimeoutMinutes || 10} min`;
-                document.getElementById('idle-poll-interval').innerText = `${data.idlePollIntervalMinutes || 5} min`;
 
                 // Render city states
                 renderCityStates(data.cities || []);
@@ -478,6 +825,118 @@
             } catch (err) {
                 console.error('Forecast triggers error:', err);
             }
+        }
+
+        // Mode control functions
+        async function toggleMode() {
+            try {
+                const res = await fetch(`${API_BASE}/hybrid-weather/toggle`, { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showNotification(`${data.currentMode} (Manual mode - auto disabled)`, 'success');
+                    fetchHybridWeatherStatus();
+                }
+            } catch (err) {
+                showNotification('Failed to toggle mode', 'error');
+            }
+        }
+
+        async function forceOpenMeteo() {
+            try {
+                const res = await fetch(`${API_BASE}/hybrid-weather/force-mode`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: 'OPEN_METEO_POLLING', reason: 'manual_override' })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showNotification('MANUAL: Open-Meteo polling (auto disabled)', 'success');
+                    fetchHybridWeatherStatus();
+                }
+            } catch (err) {
+                showNotification('Failed to switch mode', 'error');
+            }
+        }
+
+        async function forceMeteosource() {
+            try {
+                const res = await fetch(`${API_BASE}/hybrid-weather/force-mode`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: 'METEOSOURCE_POLLING', reason: 'manual_override' })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showNotification('MANUAL: Meteosource polling mode (2s interval, auto disabled)', 'success');
+                    fetchHybridWeatherStatus();
+                }
+            } catch (err) {
+                showNotification('Failed to switch mode', 'error');
+            }
+        }
+
+        async function forceWebsocket() {
+            try {
+                const res = await fetch(`${API_BASE}/hybrid-weather/force-mode`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: 'WEBSOCKET_REST', reason: 'manual_override' })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showNotification('MANUAL: WebSocket rest mode (auto disabled)', 'success');
+                    fetchHybridWeatherStatus();
+                }
+            } catch (err) {
+                showNotification('Failed to switch mode', 'error');
+            }
+        }
+
+        async function triggerBurst() {
+            const cityId = prompt('Enter city ID for burst mode (or leave empty for all cities):');
+            try {
+                const res = await fetch(`${API_BASE}/hybrid-weather/burst`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cityId: cityId || 'all' })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showNotification('Burst mode triggered', 'success');
+                    fetchHybridWeatherStatus();
+                }
+            } catch (err) {
+                showNotification('Failed to trigger burst', 'error');
+            }
+        }
+
+        async function returnToNormal() {
+            try {
+                const res = await fetch(`${API_BASE}/hybrid-weather/normal`, { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showNotification(`AUTO mode enabled - ${data.currentMode} (${data.currentUrgency} urgency)`, 'success');
+                    fetchHybridWeatherStatus();
+                }
+            } catch (err) {
+                showNotification('Failed to return to normal', 'error');
+            }
+        }
+
+        function showNotification(message, type) {
+            // Create notification element
+            const notif = document.createElement('div');
+            notif.className = `fixed bottom-4 right-4 px-6 py-3 rounded-lg text-white font-medium z-50 transition-opacity duration-300 ${
+                type === 'success' ? 'bg-emerald-600' : 'bg-red-600'
+            }`;
+            notif.innerText = message;
+            document.body.appendChild(notif);
+            
+            // Remove after 3 seconds
+            setTimeout(() => {
+                notif.style.opacity = '0';
+                setTimeout(() => notif.remove(), 300);
+            }, 3000);
         }
 
         function renderCityStates(cities) {
@@ -649,6 +1108,8 @@
 
         // Poll every 3 seconds
         fetchStats();
+        fetchHybridWeatherStatus();
+        fetchApiCallsStatus();
         fetchWebhookStats();
         fetchStateMachineStats();
         fetchProviderHealth();
@@ -656,6 +1117,8 @@
         fetchSettings();
 
         setInterval(fetchStats, 3000);
+        setInterval(fetchHybridWeatherStatus, 1000); // Update more frequently for burst progress
+        setInterval(fetchApiCallsStatus, 5000);
         setInterval(fetchWebhookStats, 3000);
         setInterval(fetchStateMachineStats, 3000);
         setInterval(fetchProviderHealth, 10000);
