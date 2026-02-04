@@ -124,7 +124,7 @@ const WEATHER_CODE_MAP: { [key: number]: string } = {
 export class OpenMeteoClient implements IWeatherProvider {
     name = 'open-meteo';
     private client: AxiosInstance;
-    
+
     // In-memory cache for weather data
     private cache: Map<string, CacheEntry> = new Map();
     private cacheStats: CacheStats = {
@@ -133,9 +133,39 @@ export class OpenMeteoClient implements IWeatherProvider {
         conditionalHits: 0,
         lastPruned: new Date(),
     };
-    
+
     // Default model to use for update time calculations
     private defaultModel = 'gfs';
+
+    // Rate limit tracking
+    private lastRateLimitTime: number | null = null;
+    private static readonly RATE_LIMIT_WINDOW_MS = 5000; // 5 second rate limit window
+
+    // Per-city rate limiting to prevent duplicate/overlapping API calls
+    private static cityLastCallTime: Map<string, number> = new Map();
+    private static readonly MIN_CALL_INTERVAL_MS = 2000; // Minimum 2 seconds between calls for same city
+
+    /**
+     * Check if rate limit is currently active
+     * @returns true if within the rate limit window
+     */
+    isRateLimitActive(): boolean {
+        if (this.lastRateLimitTime === null) {
+            return false;
+        }
+        const timeSinceRateLimit = Date.now() - this.lastRateLimitTime;
+        return timeSinceRateLimit < OpenMeteoClient.RATE_LIMIT_WINDOW_MS;
+    }
+
+    /**
+     * Record a rate limit event
+     */
+    private recordRateLimit(): void {
+        this.lastRateLimitTime = Date.now();
+        logger.warn('OpenMeteo rate limit recorded', {
+            lastRateLimitTime: new Date(this.lastRateLimitTime).toISOString(),
+        });
+    }
     
     constructor() {
         this.client = axios.create({
@@ -145,6 +175,38 @@ export class OpenMeteoClient implements IWeatherProvider {
         
         // Start periodic cache pruning
         this.startCachePruning();
+    }
+
+    /**
+     * Check if a city can be called (respects minimum call interval)
+     * @param cityKey - Unique identifier for the city (e.g., "lat,lon")
+     * @returns true if the city can be called, false if rate limited
+     */
+    private canCallCity(cityKey: string): boolean {
+        const now = Date.now();
+        const lastCall = OpenMeteoClient.cityLastCallTime.get(cityKey);
+        
+        if (!lastCall) {
+            return true;
+        }
+        
+        const timeSinceLastCall = now - lastCall;
+        return timeSinceLastCall >= OpenMeteoClient.MIN_CALL_INTERVAL_MS;
+    }
+
+    /**
+     * Record a city call time
+     * @param cityKey - Unique identifier for the city
+     */
+    private recordCityCall(cityKey: string): void {
+        OpenMeteoClient.cityLastCallTime.set(cityKey, Date.now());
+    }
+
+    /**
+     * Get city key from coordinates
+     */
+    private getCityKey(coords: Coordinates): string {
+        return `${coords.lat.toFixed(4)},${coords.lon.toFixed(4)}`;
     }
 
     isConfigured(): boolean {
@@ -397,6 +459,44 @@ export class OpenMeteoClient implements IWeatherProvider {
      * - Cache is only used during idle WebSocket rest periods to conserve API calls
      */
     async getHourlyForecast(coords: Coordinates, useCache: boolean = true): Promise<WeatherData> {
+        // Check if rate limit is active
+        if (this.isRateLimitActive()) {
+            const cacheKey = this.generateCacheKey(coords, {
+                latitude: coords.lat,
+                longitude: coords.lon,
+                hourly: 'temperature_2m,relative_humidity_2m,precipitation_probability,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m',
+                temperature_unit: 'fahrenheit',
+                wind_speed_unit: 'mph',
+                forecast_days: 7,
+            });
+            const cached = this.cache.get(cacheKey);
+            if (cached) {
+                logger.warn('Rate limit active, returning cached data', { coords });
+                return cached.data;
+            }
+            throw new Error('Rate limit active and no cached data available');
+        }
+
+        // Check per-city rate limit (minimum 2 seconds between calls for same city)
+        const cityKey = this.getCityKey(coords);
+        if (!this.canCallCity(cityKey)) {
+            // Return cached data if available, otherwise throw
+            const cacheKey = this.generateCacheKey(coords, {
+                latitude: coords.lat,
+                longitude: coords.lon,
+                hourly: 'temperature_2m,relative_humidity_2m,precipitation_probability,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m',
+                temperature_unit: 'fahrenheit',
+                wind_speed_unit: 'mph',
+                forecast_days: 7,
+            });
+            const cached = this.cache.get(cacheKey);
+            if (cached) {
+                logger.warn('Per-city rate limit active, returning cached data', { coords });
+                return cached.data;
+            }
+            throw new Error(`Per-city rate limit active for ${cityKey} and no cached data available`);
+        }
+
         const params = {
             latitude: coords.lat,
             longitude: coords.lon,
@@ -448,6 +548,9 @@ export class OpenMeteoClient implements IWeatherProvider {
             const weatherData = this.parseWeatherResponse(result.data, coords);
             this.setCachedData(cacheKey, weatherData, result.headers, JSON.stringify(params));
             
+            // Record the city call for per-city rate limiting
+            this.recordCityCall(cityKey);
+            
             return weatherData;
         } catch (error) {
             // If request fails but we have stale cache, use it as fallback
@@ -489,6 +592,34 @@ export class OpenMeteoClient implements IWeatherProvider {
     ): Promise<WeatherData[]> {
         if (locations.length === 0) {
             return [];
+        }
+
+        // Check if rate limit is active
+        if (this.isRateLimitActive()) {
+            logger.warn('Rate limit active for batch request, attempting to return cached data');
+            const cachedResults: WeatherData[] = [];
+            for (const location of locations) {
+                const cacheKey = this.generateCacheKey(location.coords, {
+                    latitude: location.coords.lat,
+                    longitude: location.coords.lon,
+                    hourly: 'temperature_2m,relative_humidity_2m,precipitation_probability,precipitation,snowfall,weather_code,wind_speed_10m,wind_direction_10m',
+                    temperature_unit: 'fahrenheit',
+                    wind_speed_unit: 'mph',
+                    forecast_days: 7,
+                });
+                const cached = this.cache.get(cacheKey);
+                if (cached) {
+                    cachedResults.push({
+                        ...cached.data,
+                        locationName: location.locationName || cached.data.locationName,
+                    });
+                }
+            }
+            if (cachedResults.length === locations.length) {
+                logger.warn('Rate limit active, returning all cached data for batch request');
+                return cachedResults;
+            }
+            throw new Error('Rate limit active and not all locations have cached data');
         }
 
         // If only one location, use regular endpoint with caching
@@ -587,12 +718,13 @@ export class OpenMeteoClient implements IWeatherProvider {
     
     /**
      * Internal method to fetch batch locations from API
+     * Optimized for speed: MAX_BATCH_SIZE increased to 50, delays removed
      */
     private async fetchBatchLocations(
         locations: Array<{ coords: Coordinates; locationName?: string; index?: number }>
     ): Promise<WeatherData[]> {
-        // Limit batch size to avoid rate limits
-        const MAX_BATCH_SIZE = 10;
+        // Open-Meteo supports up to 50 locations per batch request
+        const MAX_BATCH_SIZE = 50;
         if (locations.length > MAX_BATCH_SIZE) {
             logger.warn(`Batch size ${locations.length} exceeds max ${MAX_BATCH_SIZE}, splitting into chunks`);
             const results: WeatherData[] = [];
@@ -600,10 +732,7 @@ export class OpenMeteoClient implements IWeatherProvider {
                 const chunk = locations.slice(i, i + MAX_BATCH_SIZE);
                 const chunkResults = await this.fetchBatchLocations(chunk);
                 results.push(...chunkResults);
-                // Add delay between chunks to avoid rate limiting
-                if (i + MAX_BATCH_SIZE < locations.length) {
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                }
+                // No delay between chunks for maximum speed
             }
             return results;
         }
@@ -647,6 +776,9 @@ export class OpenMeteoClient implements IWeatherProvider {
                 // Cache individual location
                 const individualKey = this.generateCacheKey(location.coords, params);
                 this.setCachedData(individualKey, weatherData, response.headers as Record<string, string>);
+                
+                // Record city call for per-city rate limiting
+                this.recordCityCall(this.getCityKey(location.coords));
             }
 
             // Also cache the batch result
@@ -667,14 +799,16 @@ export class OpenMeteoClient implements IWeatherProvider {
                 error: (error as Error).message 
             });
             
-            // If rate limited, wait before falling back
+            // If rate limited, record the event and wait before falling back
             if (statusCode === 429) {
+                this.recordRateLimit();
                 logger.warn('OpenMeteo rate limited (429), waiting 2s before fallback');
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
             
-            // Fall back to sequential requests with delays to avoid further rate limiting
-            logger.warn('Falling back to sequential API calls with rate limiting');
+            // Fall back to sequential requests without delays for maximum speed
+            // Rate limit tracking is kept as a safety net
+            logger.warn('Falling back to sequential API calls');
             const results: WeatherData[] = [];
             for (const location of locations) {
                 try {
@@ -683,8 +817,7 @@ export class OpenMeteoClient implements IWeatherProvider {
                         data.locationName = location.locationName;
                     }
                     results.push(data);
-                    // Small delay between requests
-                    await new Promise(resolve => setTimeout(resolve, 200));
+                    // No delay between requests for maximum speed
                 } catch (e) {
                     logger.error(`Failed to fetch ${location.locationName || 'location'}`, { error: (e as Error).message });
                     throw e; // Re-throw to trigger outer fallback

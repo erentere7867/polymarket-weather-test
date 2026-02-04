@@ -1,15 +1,55 @@
 /**
  * Real-Time Data Store
  * In-memory database for market state, price history, and forecasts
+ * Extended to support file-confirmed forecast data
  */
 
 import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { MarketState, PricePoint, ForecastSnapshot } from './types.js';
+import { ModelType, CityGRIBData } from '../weather/types.js';
 import { logger } from '../logger.js';
+
+/**
+ * Confirmation status for forecast data
+ */
+export type ForecastConfirmationStatus = 'UNCONFIRMED' | 'FILE_CONFIRMED';
+
+/**
+ * Extended forecast snapshot with confirmation status
+ */
+export interface ConfirmedForecastSnapshot extends ForecastSnapshot {
+    confirmationStatus: ForecastConfirmationStatus;
+    confirmedAt?: Date;
+    source: 'API' | 'FILE';
+    model?: ModelType;
+    cycleHour?: number;
+    forecastHour?: number;
+}
+
+/**
+ * Cached previous run value for change detection
+ */
+export interface CachedRunValue {
+    cityId: string;
+    variable: 'temperature' | 'windSpeed' | 'precipitation';
+    value: number;
+    model: ModelType;
+    cycleHour: number;
+    forecastHour: number;
+    timestamp: Date;
+    source: 'API' | 'FILE';
+}
 
 export class DataStore {
     private markets: Map<string, MarketState> = new Map();
     private tokenToMarketId: Map<string, string> = new Map();
+    
+    // File-confirmed forecast storage
+    private fileConfirmedForecasts: Map<string, ConfirmedForecastSnapshot> = new Map(); // marketId -> forecast
+    private confirmationStatus: Map<string, ForecastConfirmationStatus> = new Map(); // marketId -> status
+    
+    // Previous run cache for change detection
+    private previousRunCache: Map<string, CachedRunValue> = new Map(); // composite key -> value
 
     constructor() { }
 
@@ -162,5 +202,219 @@ export class DataStore {
      */
     getMarketIdByToken(tokenId: string): string | undefined {
         return this.tokenToMarketId.get(tokenId);
+    }
+
+    // ====================
+    // File-Confirmed Forecast Methods
+    // ====================
+
+    /**
+     * Store file-confirmed forecast data
+     */
+    storeFileConfirmedForecast(
+        marketId: string,
+        snapshot: ConfirmedForecastSnapshot
+    ): void {
+        this.fileConfirmedForecasts.set(marketId, snapshot);
+        this.confirmationStatus.set(marketId, 'FILE_CONFIRMED');
+        
+        logger.debug(`[DataStore] File-confirmed forecast stored for ${marketId}`);
+    }
+
+    /**
+     * Store unconfirmed (API) forecast data
+     */
+    storeUnconfirmedForecast(
+        marketId: string,
+        snapshot: ForecastSnapshot
+    ): void {
+        const confirmedSnapshot: ConfirmedForecastSnapshot = {
+            ...snapshot,
+            confirmationStatus: 'UNCONFIRMED',
+            source: 'API',
+        };
+        
+        // Only store if no file-confirmed data exists (file data takes priority)
+        if (!this.fileConfirmedForecasts.has(marketId)) {
+            this.fileConfirmedForecasts.set(marketId, confirmedSnapshot);
+            this.confirmationStatus.set(marketId, 'UNCONFIRMED');
+        }
+    }
+
+    /**
+     * Get forecast with confirmation status
+     */
+    getConfirmedForecast(marketId: string): ConfirmedForecastSnapshot | undefined {
+        return this.fileConfirmedForecasts.get(marketId);
+    }
+
+    /**
+     * Get confirmation status for a market
+     */
+    getConfirmationStatus(marketId: string): ForecastConfirmationStatus | undefined {
+        return this.confirmationStatus.get(marketId);
+    }
+
+    /**
+     * Check if market has file-confirmed data
+     */
+    isFileConfirmed(marketId: string): boolean {
+        return this.confirmationStatus.get(marketId) === 'FILE_CONFIRMED';
+    }
+
+    /**
+     * Reconcile API data with file-confirmed data
+     * Returns true if reconciliation was performed
+     */
+    reconcileForecast(
+        marketId: string,
+        fileData: CityGRIBData,
+        model: ModelType,
+        cycleHour: number,
+        forecastHour: number
+    ): boolean {
+        const existing = this.fileConfirmedForecasts.get(marketId);
+        if (!existing) return false;
+
+        // Update with file data
+        const reconciled: ConfirmedForecastSnapshot = {
+            ...existing,
+            confirmationStatus: 'FILE_CONFIRMED',
+            confirmedAt: new Date(),
+            source: 'FILE',
+            model,
+            cycleHour,
+            forecastHour,
+        };
+
+        this.fileConfirmedForecasts.set(marketId, reconciled);
+        this.confirmationStatus.set(marketId, 'FILE_CONFIRMED');
+
+        logger.debug(`[DataStore] Forecast reconciled for ${marketId} with ${model} ${cycleHour}Z`);
+        return true;
+    }
+
+    // ====================
+    // Previous Run Cache Methods
+    // ====================
+
+    /**
+     * Cache a previous run value for change detection
+     */
+    cachePreviousRunValue(
+        cityId: string,
+        variable: 'temperature' | 'windSpeed' | 'precipitation',
+        value: number,
+        model: ModelType,
+        cycleHour: number,
+        forecastHour: number,
+        source: 'API' | 'FILE'
+    ): void {
+        const key = this.getCacheKey(cityId, variable, forecastHour);
+        const cached: CachedRunValue = {
+            cityId,
+            variable,
+            value,
+            model,
+            cycleHour,
+            forecastHour,
+            timestamp: new Date(),
+            source,
+        };
+        this.previousRunCache.set(key, cached);
+    }
+
+    /**
+     * Get cached previous run value
+     */
+    getPreviousRunValue(
+        cityId: string,
+        variable: 'temperature' | 'windSpeed' | 'precipitation',
+        forecastHour: number
+    ): CachedRunValue | undefined {
+        const key = this.getCacheKey(cityId, variable, forecastHour);
+        return this.previousRunCache.get(key);
+    }
+
+    /**
+     * Get all cached values for a city
+     */
+    getCityCachedValues(cityId: string): CachedRunValue[] {
+        const values: CachedRunValue[] = [];
+        for (const [key, value] of this.previousRunCache.entries()) {
+            if (key.startsWith(`${cityId}:`)) {
+                values.push(value);
+            }
+        }
+        return values;
+    }
+
+    /**
+     * Clear previous run cache for a city
+     */
+    clearCityCache(cityId: string): void {
+        for (const key of this.previousRunCache.keys()) {
+            if (key.startsWith(`${cityId}:`)) {
+                this.previousRunCache.delete(key);
+            }
+        }
+    }
+
+    /**
+     * Clear all previous run cache
+     */
+    clearAllPreviousRunCache(): void {
+        this.previousRunCache.clear();
+        logger.info('[DataStore] Previous run cache cleared');
+    }
+
+    /**
+     * Get cache statistics
+     */
+    getCacheStats(): {
+        fileConfirmedForecasts: number;
+        unconfirmedForecasts: number;
+        previousRunCacheSize: number;
+    } {
+        let unconfirmed = 0;
+        for (const snapshot of this.fileConfirmedForecasts.values()) {
+            if (snapshot.confirmationStatus === 'UNCONFIRMED') {
+                unconfirmed++;
+            }
+        }
+
+        return {
+            fileConfirmedForecasts: this.fileConfirmedForecasts.size - unconfirmed,
+            unconfirmedForecasts: unconfirmed,
+            previousRunCacheSize: this.previousRunCache.size,
+        };
+    }
+
+    /**
+     * Clean up old cache entries
+     */
+    cleanupOldCache(maxAgeHours: number = 24): void {
+        const now = new Date();
+        const maxAgeMs = maxAgeHours * 60 * 60 * 1000;
+
+        // Clean up previous run cache
+        for (const [key, value] of this.previousRunCache.entries()) {
+            if (now.getTime() - value.timestamp.getTime() > maxAgeMs) {
+                this.previousRunCache.delete(key);
+            }
+        }
+
+        logger.debug('[DataStore] Old cache entries cleaned up');
+    }
+
+    /**
+     * Generate cache key
+     */
+    private getCacheKey(
+        cityId: string,
+        variable: string,
+        forecastHour: number
+    ): string {
+        return `${cityId}:${variable}:${forecastHour}`;
     }
 }

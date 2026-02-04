@@ -1,7 +1,8 @@
-
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import { createServer } from 'http';
+import { WebSocketServer } from 'ws';
 import { SimulationRunner } from '../simulation/runner.js';
 import { logger } from '../logger.js';
 import { config } from '../config.js';
@@ -10,39 +11,23 @@ import { webhookValidator } from './middleware/webhook-validator.js';
 import { forecastStateMachine, StateContext } from '../realtime/forecast-state-machine.js';
 import { eventBus } from '../realtime/event-bus.js';
 import { WeatherProviderManager } from '../weather/provider-manager.js';
-import { HybridWeatherController, HybridWeatherMode, UrgencyLevel } from '../realtime/hybrid-weather-controller.js';
+import { HybridWeatherController, HybridWeatherMode } from '../realtime/hybrid-weather-controller.js';
 import { apiCallTracker } from '../realtime/api-call-tracker.js';
 import { DataStore } from '../realtime/data-store.js';
+import { FileBasedIngestion } from '../weather/file-based-ingestion.js';
+import { ScheduleManager } from '../weather/schedule-manager.js';
+import { ApiFallbackPoller } from '../weather/api-fallback-poller.js';
+import { DashboardController, createDashboardRouter } from './dashboard-controller.js';
 
-const app = express();
-const PORT = process.env.PORT || 8188;
+const dashboardApp = express();
+const webhookApp = express();
 
-/**
- * Tomorrow.io Webhook URL Configuration
- * 
- * Tomorrow.io requires a full HTTPS URL format for webhook endpoints.
- * The URL must include:
- * - Full protocol: https:// (required)
- * - Domain name: your-domain.com or subdomain
- * - Path: /tomorrow (webhook endpoint path)
- * 
- * Correct format examples:
- *   - https://your-domain.com/tomorrow
- *   - https://api.your-domain.com/tomorrow
- *   - https://webhooks.your-domain.com/tomorrow
- * 
- * Incorrect format examples:
- *   - webhooks.erentere7867.com (missing https:// and path)
- *   - http://your-domain.com/tomorrow (must use https)
- *   - your-domain.com:8188/tomorrow (port should not be in public URL)
- * 
- * Note: When configuring webhooks in Tomorrow.io dashboard, always use the
- * full HTTPS URL. The port (8188) is internal and should not appear in the
- * public-facing webhook URL (it's handled by reverse proxy/load balancer).
- */
+const DASHBOARD_PORT = process.env.DASHBOARD_PORT || 8034;
+const WEBHOOK_PORT = process.env.WEBHOOK_PORT || 8188;
 
-// Initialize Simulation (Indefinite Mode)
-const runner = new SimulationRunner(100000, Infinity);
+// Initialize Simulation (Indefinite Mode) - $1,000,000 starting capital
+const runner = new SimulationRunner(1000000, Infinity);
+logger.info(`[Server] SimulationRunner created. Simulator cash: $${runner.getSimulator().getCashBalance()}`);
 
 // Initialize Hybrid Weather Controller
 const dataStore = new DataStore();
@@ -51,31 +36,66 @@ const hybridWeatherController = new HybridWeatherController(
     dataStore
 );
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(process.cwd(), 'src/web/public')));
+// Initialize File-Based Ingestion System
+const fileBasedIngestion = new FileBasedIngestion({
+    enabled: true,
+    s3PollIntervalMs: 150,
+    maxDetectionDurationMs: 45 * 60 * 1000,
+    awsRegion: 'us-east-1',
+    publicBuckets: true,
+});
 
-// API Routes
+// Initialize Schedule Manager and API Fallback Poller
+const scheduleManager = new ScheduleManager();
+const apiFallbackPoller = new ApiFallbackPoller();
+
+// Initialize Dashboard Controller
+const dashboardController = new DashboardController(
+    dataStore,
+    fileBasedIngestion,
+    scheduleManager,
+    apiFallbackPoller
+);
+
+// Middleware (Dashboard)
+dashboardApp.use(cors());
+dashboardApp.use(express.json());
+dashboardApp.use(express.static(path.join(process.cwd(), 'src/web/public')));
+
+// Middleware (Webhook)
+webhookApp.use(cors());
+webhookApp.use(express.json());
+
+// ========================
+// API Routes (Dashboard)
+// ========================
 
 // 1. Status
-app.get('/api/status', (req, res) => {
+dashboardApp.get('/api/status', (req, res) => {
+    const cycles = runner.getCycles();
+    const uptime = process.uptime();
+    // Calculate cycles per minute for more meaningful display
+    const cyclesPerMinute = uptime > 0 ? Math.round((cycles / uptime) * 60) : 0;
+
     res.json({
         online: runner.isSimulationRunning(),
-        cycles: runner.getCycles(),
-        uptime: process.uptime(),
+        cycles: cycles,
+        cyclesPerMinute: cyclesPerMinute,
+        uptime: uptime,
         simulationMode: config.simulationMode
     });
 });
 
 // 2. Portfolio
-app.get('/api/portfolio', (req, res) => {
+dashboardApp.get('/api/portfolio', (req, res) => {
     const sim = runner.getSimulator();
-    res.json(sim.getPortfolio());
+    const portfolio = sim.getPortfolio();
+    logger.debug(`[API /portfolio] Returning portfolio:`, portfolio);
+    res.json(portfolio);
 });
 
 // 3. Active Positions
-app.get('/api/positions/active', (req, res) => {
+dashboardApp.get('/api/positions/active', (req, res) => {
     const sim = runner.getSimulator();
     const positions = sim.getOpenPositions().map(p => {
         const state = runner.getStore().getMarketState(p.marketId);
@@ -90,7 +110,7 @@ app.get('/api/positions/active', (req, res) => {
 });
 
 // 4. Closed Positions
-app.get('/api/positions/closed', (req, res) => {
+dashboardApp.get('/api/positions/closed', (req, res) => {
     const sim = runner.getSimulator();
     const closedPositions = sim.getClosedPositions().map(p => {
         const holdDurationMs = p.exitTime && p.entryTime
@@ -121,7 +141,7 @@ app.get('/api/positions/closed', (req, res) => {
 });
 
 // 5. Settings Update
-app.post('/api/settings', (req, res) => {
+dashboardApp.post('/api/settings', (req, res) => {
     const { takeProfit, stopLoss, skipPriceCheck } = req.body;
 
     if (typeof takeProfit !== 'number' || typeof stopLoss !== 'number') {
@@ -139,7 +159,7 @@ app.post('/api/settings', (req, res) => {
     res.json({ success: true, message: 'Settings updated' });
 });
 
-app.get('/api/settings', (req, res) => {
+dashboardApp.get('/api/settings', (req, res) => {
     const settings = runner.getSettings();
     // Return as percentages for UI
     res.json({
@@ -152,7 +172,7 @@ app.get('/api/settings', (req, res) => {
 });
 
 // 7. Cache TTL Control (Dynamic adjustment)
-app.post('/api/settings/cache-ttl', (req, res) => {
+dashboardApp.post('/api/settings/cache-ttl', (req, res) => {
     const { ttlMs } = req.body;
     if (typeof ttlMs !== 'number' || ttlMs < 0 || ttlMs > 60000) {
         res.status(400).json({ success: false, message: 'Invalid TTL. Must be between 0 and 60000ms' });
@@ -162,12 +182,12 @@ app.post('/api/settings/cache-ttl', (req, res) => {
     res.json({ success: true, message: `Cache TTL updated to ${ttlMs}ms`, cacheTtlMs: ttlMs });
 });
 
-app.get('/api/settings/cache-ttl', (req, res) => {
+dashboardApp.get('/api/settings/cache-ttl', (req, res) => {
     res.json({ cacheTtlMs: runner.getCacheTtl() });
 });
 
 // 8. Poll Interval Control (Dynamic adjustment)
-app.post('/api/settings/poll-interval', (req, res) => {
+dashboardApp.post('/api/settings/poll-interval', (req, res) => {
     const { intervalMs } = req.body;
     if (typeof intervalMs !== 'number' || intervalMs < 1000 || intervalMs > 60000) {
         res.status(400).json({ success: false, message: 'Invalid interval. Must be between 1000 and 60000ms' });
@@ -177,24 +197,20 @@ app.post('/api/settings/poll-interval', (req, res) => {
     res.json({ success: true, message: `Poll interval updated to ${intervalMs}ms`, pollIntervalMs: intervalMs });
 });
 
-app.get('/api/settings/poll-interval', (req, res) => {
+dashboardApp.get('/api/settings/poll-interval', (req, res) => {
     res.json({ pollIntervalMs: runner.getPollInterval() });
 });
 
 // 6. Opportunities (Signals)
 // Accessing latest signals might require storing them in DataStore or Strategy.
 // For now, we return empty list or just valid markets
-app.get('/api/opportunities', (req, res) => {
+dashboardApp.get('/api/opportunities', (req, res) => {
     // This would need strategy state. Skipping for MVP dashboard.
     res.json([]);
 });
 
-// 7. Tomorrow.io Webhook Endpoint
-// Mount the webhook router at /tomorrow with validation middleware
-app.use('/tomorrow', webhookValidator, createWebhookRouter());
-
-// 8. Webhook Status Endpoint
-app.get('/api/webhook/status', (req, res) => {
+// 8. Webhook Status Endpoint (on Dashboard)
+dashboardApp.get('/api/webhook/status', (req, res) => {
     const stats = eventBus.getEventStats();
     res.json({
         webhookMode: config.USE_WEBHOOK_MODE,
@@ -207,7 +223,7 @@ app.get('/api/webhook/status', (req, res) => {
 });
 
 // 9. State Machine Stats Endpoint
-app.get('/api/state-machine/stats', (req, res) => {
+dashboardApp.get('/api/state-machine/stats', (req, res) => {
     const stats = forecastStateMachine.getStats();
     const allCityStates: Array<{
         cityId: string;
@@ -261,7 +277,7 @@ app.get('/api/state-machine/stats', (req, res) => {
 });
 
 // 10. Provider Health Endpoint
-app.get('/api/providers/health', (req, res) => {
+dashboardApp.get('/api/providers/health', (req, res) => {
     const providerManager = new WeatherProviderManager();
     const providers: Array<{
         name: string;
@@ -300,7 +316,7 @@ app.get('/api/providers/health', (req, res) => {
 });
 
 // 11. Forecast Trigger Statistics
-app.get('/api/forecast/triggers', (req, res) => {
+dashboardApp.get('/api/forecast/triggers', (req, res) => {
     const stats = forecastStateMachine.getStats();
     const eventStats = eventBus.getEventStats();
 
@@ -320,26 +336,25 @@ app.get('/api/forecast/triggers', (req, res) => {
 // ============================================
 
 // 12. Hybrid Weather Controller Status
-app.get('/api/hybrid-weather/status', (req, res) => {
+dashboardApp.get('/api/hybrid-weather/status', (req, res) => {
     const status = hybridWeatherController.getStatusReport();
     res.json({
         currentMode: status.state.currentMode,
         previousMode: status.state.previousMode,
         modeDuration: status.modeDuration,
         isRunning: status.state.isRunning,
-        currentUrgency: status.state.currentUrgency,
+        currentDetectionWindow: status.state.currentDetectionWindow,
         modeConfig: status.modeConfig,
         burstActive: status.burstActive,
-        websocketActive: status.websocketActive,
-        openMeteoPollingActive: status.openMeteoPollingActive,
+        pollingActive: status.pollingActive,
         burstProgress: status.burstProgress,
-        nextUrgencyWindow: status.nextUrgencyWindow,
+        nextDetectionWindow: status.nextDetectionWindow,
         isAutoMode: status.isAutoMode,
     });
 });
 
 // 13. API Call Tracker Status with Quota Information
-app.get('/api/api-calls/status', (req, res) => {
+dashboardApp.get('/api/api-calls/status', (req, res) => {
     const status = apiCallTracker.getStatusReport();
     res.json({
         date: status.date,
@@ -361,7 +376,7 @@ app.get('/api/api-calls/status', (req, res) => {
 });
 
 // 14. Trigger Burst Mode (Manual)
-app.post('/api/hybrid-weather/burst', async (req, res) => {
+dashboardApp.post('/api/hybrid-weather/burst', async (req, res) => {
     const { cityId } = req.body;
     if (!cityId) {
         res.status(400).json({ error: 'cityId is required' });
@@ -372,28 +387,28 @@ app.post('/api/hybrid-weather/burst', async (req, res) => {
     res.json({ success: true, message: `Burst mode triggered for ${cityId}` });
 });
 
-// 15. Return to Normal Mode (Manual)
-// This re-enables auto-switching based on urgency windows
-app.post('/api/hybrid-weather/normal', async (req, res) => {
-    await hybridWeatherController.returnToNormal();
+// 15. Return to Auto Mode (Manual)
+// This re-enables auto-switching based on detection windows
+dashboardApp.post('/api/hybrid-weather/normal', async (req, res) => {
+    await hybridWeatherController.returnToAutoMode();
     const status = hybridWeatherController.getStatusReport();
     res.json({
         success: true,
         message: 'Returned to automatic mode - auto-switching enabled',
         currentMode: status.state.currentMode,
-        currentUrgency: status.state.currentUrgency,
+        currentDetectionWindow: status.state.currentDetectionWindow,
         isAutoMode: true,
     });
 });
 
 // 16. Force Mode Transition (Emergency/Manual Override)
-app.post('/api/hybrid-weather/force-mode', async (req, res) => {
+dashboardApp.post('/api/hybrid-weather/force-mode', async (req, res) => {
     const { mode, reason } = req.body;
-    const validModes: HybridWeatherMode[] = ['OPEN_METEO_POLLING', 'METEOSOURCE_POLLING', 'WEBSOCKET_REST', 'ROUND_ROBIN_BURST'];
+    const validModes: HybridWeatherMode[] = ['DETECTION_POLLING', 'WEBSOCKET_IDLE', 'BURST_MODE'];
     
     if (!mode || !validModes.includes(mode)) {
         res.status(400).json({
-            error: 'Invalid mode. Must be one of: OPEN_METEO_POLLING, METEOSOURCE_POLLING, WEBSOCKET_REST, ROUND_ROBIN_BURST'
+            error: 'Invalid mode. Must be one of: DETECTION_POLLING, WEBSOCKET_IDLE, BURST_MODE'
         });
         return;
     }
@@ -403,7 +418,7 @@ app.post('/api/hybrid-weather/force-mode', async (req, res) => {
 });
 
 // 17. Get Urgency Window Schedule
-app.get('/api/hybrid-weather/urgency-schedule', (req, res) => {
+dashboardApp.get('/api/hybrid-weather/urgency-schedule', (req, res) => {
     const now = new Date();
     const utcHour = now.getUTCHours();
     const utcMinute = now.getUTCMinutes();
@@ -442,7 +457,7 @@ app.get('/api/hybrid-weather/urgency-schedule', (req, res) => {
 });
 
 // 18. Get Mode History
-app.get('/api/hybrid-weather/history', (req, res) => {
+dashboardApp.get('/api/hybrid-weather/history', (req, res) => {
     const state = hybridWeatherController.getState();
     res.json({
         modeHistory: state.modeHistory,
@@ -452,25 +467,24 @@ app.get('/api/hybrid-weather/history', (req, res) => {
 
 // 19. Toggle Mode (Convenience endpoint for dashboard)
 // NOTE: This disables auto mode since it's a manual override
-app.post('/api/hybrid-weather/toggle', async (req, res) => {
+dashboardApp.post('/api/hybrid-weather/toggle', async (req, res) => {
     const currentMode = hybridWeatherController.getCurrentMode();
-    const currentUrgency = hybridWeatherController.getCurrentUrgency();
     
     let targetMode: HybridWeatherMode;
     
-    // Cycle through modes: WEBSOCKET_REST -> OPEN_METEO_POLLING -> ROUND_ROBIN_BURST -> WEBSOCKET_REST
+    // Cycle through modes: WEBSOCKET_IDLE -> DETECTION_POLLING -> BURST_MODE -> WEBSOCKET_IDLE
     switch (currentMode) {
-        case 'WEBSOCKET_REST':
-            targetMode = 'OPEN_METEO_POLLING';
+        case 'WEBSOCKET_IDLE':
+            targetMode = 'DETECTION_POLLING';
             break;
-        case 'OPEN_METEO_POLLING':
-            targetMode = 'ROUND_ROBIN_BURST';
+        case 'DETECTION_POLLING':
+            targetMode = 'BURST_MODE';
             break;
-        case 'ROUND_ROBIN_BURST':
-            targetMode = 'WEBSOCKET_REST';
+        case 'BURST_MODE':
+            targetMode = 'WEBSOCKET_IDLE';
             break;
         default:
-            targetMode = currentUrgency === 'LOW' ? 'WEBSOCKET_REST' : 'OPEN_METEO_POLLING';
+            targetMode = 'WEBSOCKET_IDLE';
     }
     
     await hybridWeatherController.forceMode(targetMode, 'manual_toggle');
@@ -483,6 +497,22 @@ app.post('/api/hybrid-weather/toggle', async (req, res) => {
     });
 });
 
+// ============================================
+// FILE-BASED INGESTION DASHBOARD ENDPOINTS
+// ============================================
+
+// 20. Mount Dashboard Router
+dashboardApp.use('/api/dashboard', createDashboardRouter(dashboardController));
+
+// ========================
+// Webhook Routes (Webhook)
+// ========================
+
+// 7. Tomorrow.io Webhook Endpoint
+// Mount the webhook router at /tomorrow with validation middleware
+webhookApp.use('/tomorrow', webhookValidator, createWebhookRouter());
+
+
 // Start Server
 async function startServer() {
     try {
@@ -493,9 +523,30 @@ async function startServer() {
         hybridWeatherController.start();
         logger.info('🌤️ Hybrid Weather Controller started');
 
-        app.listen(PORT, () => {
-            logger.info(`🌐 Web Server running on port ${PORT}`);
-            logger.info(`📊 Dashboard available at http://localhost:${PORT}`);
+        // Start File-Based Ingestion
+        fileBasedIngestion.start();
+        logger.info('📁 File-Based Ingestion started');
+
+        // Create HTTP server for Dashboard (Express + WebSocket)
+        const dashboardServer = createServer(dashboardApp);
+
+        // Setup WebSocket server for dashboard real-time updates
+        const wss = new WebSocketServer({ server: dashboardServer, path: '/ws/dashboard' });
+        dashboardController.setupWebSocketServer(wss);
+        logger.info('🔌 Dashboard WebSocket server initialized');
+
+        // Start Dashboard Server
+        dashboardServer.listen(DASHBOARD_PORT, () => {
+            logger.info(`🌐 Dashboard Web Server running on port ${DASHBOARD_PORT}`);
+            logger.info(`📊 Dashboard available at http://localhost:${DASHBOARD_PORT}`);
+            logger.info(`🔌 WebSocket endpoint: ws://localhost:${DASHBOARD_PORT}/ws/dashboard`);
+        });
+
+        // Start Webhook Server
+        const webhookServer = createServer(webhookApp);
+        webhookServer.listen(WEBHOOK_PORT, () => {
+             logger.info(`🪝 Webhook Listener running on port ${WEBHOOK_PORT}`);
+             logger.info(`📡 Webhook endpoint: http://localhost:${WEBHOOK_PORT}/tomorrow`);
         });
 
     } catch (error) {
@@ -508,6 +559,8 @@ process.on('SIGINT', () => {
     logger.info('Shutting down server...');
     runner.stop();
     hybridWeatherController.stop();
+    fileBasedIngestion.stop();
+    dashboardController.destroy();
     process.exit(0);
 });
 

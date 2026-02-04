@@ -84,7 +84,7 @@ export interface TradingOpportunity {
     // Our calculated probability based on weather data
     forecastProbability: number;
 
-    // Market implied probability
+    // Market implied probability (snapshotted at opportunity detection time)
     marketProbability: number;
 
     // Edge = forecast - market (positive = underpriced YES)
@@ -107,6 +107,11 @@ export interface TradingOpportunity {
     // Guaranteed outcome detection
     isGuaranteed: boolean;      // Whether this is a near-certain outcome
     certaintySigma?: number;    // How many std devs from threshold
+
+    // Price snapshot at opportunity detection time (prevents race conditions)
+    snapshotYesPrice: number;   // YES price at detection time
+    snapshotNoPrice: number;    // NO price at detection time
+    snapshotTimestamp: Date;    // When the snapshot was taken
 }
 
 /**

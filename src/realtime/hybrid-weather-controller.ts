@@ -1,85 +1,143 @@
 /**
- * Hybrid Weather Controller
- * Main state machine controller managing four operational modes:
- * - OPEN_METEO_POLLING: Time-based polling using Open-Meteo with UTC urgency windows
- * - METEOSOURCE_POLLING: 1-second polling using Meteosource API (batch requests)
- * - WEBSOCKET_REST: Tomorrow.io WebSocket rest mode (pure rest, no polling)
- * - ROUND_ROBIN_BURST: 60-second burst polling across providers (1 req/sec)
- *
- * URGENCY WINDOWS (UTC):
- * - HIGH: 00:30-02:30 and 12:30-14:30 UTC (poll every 1 second using Open-Meteo)
- * - MEDIUM: 06:30-07:30 and 18:30-19:30 UTC (poll every 1 second using Meteosource)
- * - LOW: Outside these windows - Meteosource polling every 1 second
- *
- * BURST MODE:
- * - Triggered ONLY by WebSocket-detected forecast updates
- * - NOT triggered during HIGH/MEDIUM urgency windows
- * - 1 request per second for exactly 60 seconds
- * - Round-robin through: Open-Meteo (batched) → Tomorrow.io → OpenWeather
- * - Open-Meteo skipped if quota exceeded (9,500 calls)
- *
- * METEOSOURCE POLLING MODE:
- * - Dedicated 1-second polling mode using Meteosource API
- * - Uses batch requests for efficient multi-city polling
- * - Used for LOW and MEDIUM urgency windows
- * - Requires METEOSOURCE_API_KEY to be configured
- *
- * STATE TRANSITIONS:
- * - Entering HIGH window: Switch to Open-Meteo polling (1s)
- * - Entering MEDIUM window: Switch to Meteosource polling (1s)
- * - LOW urgency: Meteosource polling (1s)
- * - Burst completes: Return to appropriate urgency-based mode
- *
- * CRITICAL LATENCY REQUIREMENT - SUB-5-SECOND REACTION TIME:
- * - During HIGH/MEDIUM/LOW urgency: polling uses useCache=false
- *   This ensures fresh data on every poll (every 1s for all urgency levels)
- *   guaranteeing sub-5-second detection of forecast changes
- * - During burst mode: Open-Meteo uses useCache=false for immediate response
- *
- * CACHE STRATEGY:
- * - Open-Meteo client implements intelligent caching based on model update schedules
- * - Meteosource uses 60-second TTL cache to minimize API calls
- * - ECMWF/GFS update at 00:00, 06:00, 12:00, 18:00 UTC (4x daily)
- * - Cache is ONLY used during non-urgency periods (if any)
- * - During critical windows, cache is bypassed to ensure sub-5-second latency
+ * Hybrid Weather Controller - Optimized Detection Window Architecture
+ * 
+ * POLLING STRATEGY:
+ * - DETECTION_POLLING: Only during model update windows (HRRR, RAP, GFS, ECMWF)
+ * - WEBSOCKET_IDLE: Outside detection windows - NO polling, just WebSocket listening
+ * - BURST_MODE: 60-second burst when WebSocket alert received outside detection windows
+ * 
+ * DETECTION WINDOWS (based on actual model output delays):
+ * - HRRR: Every hour, window at +30-50 min (e.g., 00:30-00:50, 01:30-01:50)
+ * - RAP: Every hour, window at +30-50 min
+ * - GFS: 00/06/12/18 UTC, window at +3-15 min (very fast)
+ * - ECMWF: 00/12 UTC, window at +30-50 min
+ * 
+ * This approach reduces API calls by ~70% compared to continuous polling,
+ * while maintaining sub-5-second detection during critical update windows.
+ * 
+ * ADVANCED FEATURES:
+ * - Data source priority system (S3 file > API > Webhook)
+ * - Confidence scoring based on data source
+ * - Reconciliation logic when sources disagree
+ * - Staleness detection - prefer fresh API data over stale file data
+ * - Adaptive detection windows based on historical learning
+ * - Early detection mode that triggers on first sign of new data
  */
 
 import { EventEmitter } from 'events';
-import { eventBus } from './event-bus.js';
+import { EventBus, eventBus } from './event-bus.js';
 import { apiCallTracker, ApiCallTracker } from './api-call-tracker.js';
 import { ForecastStateMachine } from './forecast-state-machine.js';
 import { DataStore } from './data-store.js';
 import { logger } from '../logger.js';
 import { WeatherProviderManager } from '../weather/provider-manager.js';
-import { WeatherService } from '../weather/index.js';
-import { findCity, CityLocation, Coordinates } from '../weather/types.js';
+import { WeatherService, FileBasedIngestion, ConfirmationManager } from '../weather/index.js';
+import { findCity, CityLocation, Coordinates, ModelType } from '../weather/types.js';
+import { config } from '../config.js';
 
 /**
- * Urgency level for Open-Meteo polling
+ * Data source priority ranking (higher = more trusted)
  */
-export type UrgencyLevel = 'HIGH' | 'MEDIUM' | 'LOW';
+export type DataSourceType = 'S3_FILE' | 'API' | 'WEBHOOK' | 'CACHE';
+
+export interface DataSourcePriority {
+    source: DataSourceType;
+    priority: number;        // 1-10, higher = more trusted
+    confidenceWeight: number; // 0-1, multiplier for confidence
+    maxStalenessMs: number;  // Maximum acceptable age
+}
+
+/**
+ * Data source confidence scoring
+ */
+export interface DataConfidenceScore {
+    source: DataSourceType;
+    baseConfidence: number;
+    freshnessMultiplier: number;
+    reconciliationBonus: number;
+    finalScore: number;
+    timestamp: Date;
+    stalenessMs: number;
+}
+
+/**
+ * Reconciliation result when sources disagree
+ */
+export interface ReconciliationResult {
+    marketId: string;
+    selectedSource: DataSourceType;
+    selectedValue: number;
+    allSources: Array<{
+        source: DataSourceType;
+        value: number;
+        confidence: number;
+        timestamp: Date;
+    }>;
+    disagreementAmount: number;
+    resolutionReason: string;
+}
+
+/**
+ * Historical learning data for adaptive windows
+ */
+export interface HistoricalPublicationData {
+    model: ModelType;
+    cycleHour: number;
+    expectedOffsetMinutes: number;
+    actualOffsets: number[];  // Historical actual offsets
+    averageOffset: number;
+    stdDevOffset: number;
+    reliabilityScore: number;  // 0-1 based on consistency
+    lastUpdated: Date;
+}
+
+/**
+ * Adaptive detection window
+ */
+export interface AdaptiveDetectionWindow {
+    model: ModelType;
+    cycleIntervalHours: number;
+    baseStartOffsetMinutes: number;
+    baseEndOffsetMinutes: number;
+    adjustedStartOffset: number;
+    adjustedEndOffset: number;
+    confidence: number;
+    pollIntervalMs: number;
+}
+
+/**
+ * Early detection trigger
+ */
+export interface EarlyDetectionTrigger {
+    model: ModelType;
+    cycleHour: number;
+    triggeredAt: Date;
+    triggerSource: DataSourceType;
+    confidence: number;
+}
 
 /**
  * Operational modes for the hybrid weather system
  */
 export type HybridWeatherMode = 
-    | 'OPEN_METEO_POLLING' 
-    | 'METEOSOURCE_POLLING'
-    | 'WEBSOCKET_REST' 
-    | 'ROUND_ROBIN_BURST';
+    | 'DETECTION_POLLING'   // Poll during model update detection windows
+    | 'WEBSOCKET_IDLE'      // No polling, just WebSocket listening
+    | 'BURST_MODE'          // 60-second burst when WebSocket alert received
+    | 'EARLY_DETECTION';    // Early detection mode triggered by first sign of data
 
 /**
  * Mode transition reasons
  */
 export type ModeTransitionReason =
-    | 'urgency_window_entered'  // Entered HIGH/MEDIUM urgency window
-    | 'urgency_window_exited'   // Exited urgency window (LOW urgency)
-    | 'webhook_trigger'         // Tomorrow.io webhook triggered
-    | 'forecast_change'         // Significant forecast change detected via WebSocket
-    | 'burst_complete'          // Round-robin burst completed
-    | 'quota_exceeded'          // Open-Meteo quota exceeded
-    | 'manual'                  // Manual override
-    | 'error_recovery';         // Recovering from error state
+    | 'detection_window_started'   // Entered a model detection window
+    | 'detection_window_ended'     // Detection window ended
+    | 'webhook_trigger'            // Tomorrow.io webhook triggered
+    | 'burst_complete'             // Burst mode completed
+    | 'quota_exceeded'             // Open-Meteo quota exceeded
+    | 'manual'                     // Manual override
+    | 'error_recovery'             // Recovering from error state
+    | 'early_detection_triggered'  // Early detection mode triggered
+    | 'early_detection_complete';  // Early detection completed
 
 /**
  * Mode transition event
@@ -118,15 +176,14 @@ export interface ModeStats {
 }
 
 /**
- * Urgency window configuration
+ * Detection window configuration for a weather model
  */
-export interface UrgencyWindow {
-    level: UrgencyLevel;
-    startHour: number;
-    startMinute: number;
-    endHour: number;
-    endMinute: number;
-    pollIntervalMs: number;
+export interface DetectionWindowConfig {
+    model: ModelType;
+    cycleIntervalHours: number;    // How often the model runs (1, 6, 12 hours)
+    startOffsetMinutes: number;    // Minutes after cycle start to begin polling
+    endOffsetMinutes: number;      // Minutes after cycle start to end polling
+    pollIntervalMs: number;        // How often to poll during window
 }
 
 /**
@@ -140,66 +197,118 @@ export interface HybridControllerState {
     isRunning: boolean;
     lastTransition: ModeTransition | null;
     modeHistory: ModeStats[];
-    currentUrgency: UrgencyLevel;
     burstStartTime: Date | null;
     burstRequestsCompleted: number;
-    isAutoMode: boolean;  // true = auto-switching enabled, false = manual override
+    isAutoMode: boolean;
+    currentDetectionWindow: {
+        model: ModelType;
+        cycleHour: number;
+        windowStart: Date;
+        windowEnd: Date;
+    } | null;
+    earlyDetectionActive: boolean;
+    lastReconciliationResult?: ReconciliationResult;
 }
 
-// UTC Urgency Windows Configuration
-const URGENCY_WINDOWS: UrgencyWindow[] = [
-    // HIGH urgency: 00:30-02:30 UTC (poll every 1 second using Open-Meteo)
-    { level: 'HIGH', startHour: 0, startMinute: 30, endHour: 2, endMinute: 30, pollIntervalMs: 1000 },
-    // HIGH urgency: 12:30-14:30 UTC (poll every 1 second using Open-Meteo)
-    { level: 'HIGH', startHour: 12, startMinute: 30, endHour: 14, endMinute: 30, pollIntervalMs: 1000 },
-    // MEDIUM urgency: 06:30-07:30 UTC (poll every 1 second using Meteosource)
-    { level: 'MEDIUM', startHour: 6, startMinute: 30, endHour: 7, endMinute: 30, pollIntervalMs: 1000 },
-    // MEDIUM urgency: 18:30-19:30 UTC (poll every 1 second using Meteosource)
-    { level: 'MEDIUM', startHour: 18, startMinute: 30, endHour: 19, endMinute: 30, pollIntervalMs: 1000 },
-];
+interface CityUpdateState {
+    lastUpdateSource: 'GFS' | 'ECMWF' | 'OTHER';
+    lastUpdateTimestamp: Date; // Wall-clock time when the update was processed
+    lastModelRunTime?: Date;    // The 'runDate' of the model (e.g., 12z)
+}
 
-// Burst mode configuration: 1 request per second for 60 seconds
-const BURST_CONFIG = {
-    durationMs: 60000,  // Exactly 60 seconds
-    intervalMs: 1000,   // 1 request per second (not parallel)
-    providers: ['openmeteo', 'tomorrow', 'openweather'],  // Round-robin order
+// Data source priority configuration
+const DATA_SOURCE_PRIORITIES: Record<DataSourceType, DataSourcePriority> = {
+    S3_FILE: {
+        source: 'S3_FILE',
+        priority: 10,
+        confidenceWeight: 1.0,
+        maxStalenessMs: 30 * 60 * 1000  // 30 minutes
+    },
+    API: {
+        source: 'API',
+        priority: 7,
+        confidenceWeight: 0.85,
+        maxStalenessMs: 10 * 60 * 1000  // 10 minutes
+    },
+    WEBHOOK: {
+        source: 'WEBHOOK',
+        priority: 5,
+        confidenceWeight: 0.70,
+        maxStalenessMs: 5 * 60 * 1000   // 5 minutes
+    },
+    CACHE: {
+        source: 'CACHE',
+        priority: 3,
+        confidenceWeight: 0.50,
+        maxStalenessMs: 2 * 60 * 1000   // 2 minutes
+    }
 };
 
-// Mode configurations (updated for new requirements)
+// Detection window configurations based on actual model output delays
+// These are precise windows when models typically publish new forecasts
+const DETECTION_WINDOW_CONFIGS: DetectionWindowConfig[] = [
+    // HRRR: Hourly runs, publishes at ~25-35 min (was 30-50)
+    { model: 'HRRR', cycleIntervalHours: 1, startOffsetMinutes: 25, endOffsetMinutes: 45, pollIntervalMs: 2000 },
+
+    // RAP: Hourly runs, publishes slightly faster than HRRR at ~25-32 min (was 30-50)
+    { model: 'RAP', cycleIntervalHours: 1, startOffsetMinutes: 25, endOffsetMinutes: 40, pollIntervalMs: 2000 },
+
+    // GFS: 4x daily, very fast output at ~5-10 min (was 3-15)
+    { model: 'GFS', cycleIntervalHours: 6, startOffsetMinutes: 5, endOffsetMinutes: 20, pollIntervalMs: 2000 },
+
+    // ECMWF: 2x daily (00/12 UTC), publishes at ~6-7 hours (360-420 min)
+    { model: 'ECMWF', cycleIntervalHours: 12, startOffsetMinutes: 360, endOffsetMinutes: 420, pollIntervalMs: 2000 },
+];
+
+// Burst mode configuration: 2 second polling for 60 seconds
+const BURST_CONFIG = {
+    durationMs: 60000,  // 60 seconds
+    intervalMs: 2000,   // 2 seconds (changed from 1s to match user requirement)
+    providers: ['openmeteo', 'meteosource'],  // Primary providers
+};
+
+// Early detection configuration
+const EARLY_DETECTION_CONFIG = {
+    triggerThreshold: 0.7,  // Confidence threshold to trigger early detection
+    maxDurationMs: 300000,  // 5 minutes max in early detection
+    pollIntervalMs: 1000,   // 1 second polling in early detection
+};
+
+// Mode configurations
 const MODE_CONFIGS: Record<HybridWeatherMode, ModeConfig> = {
-    OPEN_METEO_POLLING: {
-        mode: 'OPEN_METEO_POLLING',
-        durationMs: null, // Runs indefinitely until urgency window changes
-        pollIntervalMs: 1000, // 1 second for HIGH urgency
-        providers: ['openmeteo'],
-        description: 'HIGH urgency polling using Open-Meteo (1 second)',
+    DETECTION_POLLING: {
+        mode: 'DETECTION_POLLING',
+        durationMs: null, // Runs until detection window ends
+        pollIntervalMs: 2000, // 2 seconds as requested
+        providers: ['openmeteo', 'meteosource'],
+        description: 'Polling during model update detection window (2s interval)',
     },
-    METEOSOURCE_POLLING: {
-        mode: 'METEOSOURCE_POLLING',
-        durationMs: null, // Runs indefinitely until urgency window changes
-        pollIntervalMs: 1000, // 1 second for LOW and MEDIUM urgency
-        providers: ['meteosource'],
-        description: 'LOW/MEDIUM urgency polling using Meteosource (1 second)',
-    },
-    WEBSOCKET_REST: {
-        mode: 'WEBSOCKET_REST',
-        durationMs: null, // Runs indefinitely until urgency window or burst trigger
-        pollIntervalMs: null, // Pure rest mode - NO polling
+    WEBSOCKET_IDLE: {
+        mode: 'WEBSOCKET_IDLE',
+        durationMs: null, // Runs indefinitely until detection window or burst trigger
+        pollIntervalMs: null, // NO polling
         providers: ['tomorrow'],  // WebSocket only
-        description: 'Tomorrow.io WebSocket rest mode - NO polling, minimal API usage',
+        description: 'Idle mode - NO polling, WebSocket listening only',
     },
-    ROUND_ROBIN_BURST: {
-        mode: 'ROUND_ROBIN_BURST',
-        durationMs: 60000, // Exactly 60 seconds
-        pollIntervalMs: 1000, // 1 request per second
-        providers: ['openmeteo', 'tomorrow', 'openweather'],  // Round-robin order
-        description: 'High-frequency burst: 1 req/sec for 60s, rotating through providers',
+    BURST_MODE: {
+        mode: 'BURST_MODE',
+        durationMs: 60000, // 60 seconds
+        pollIntervalMs: 2000, // 2 seconds
+        providers: ['openmeteo', 'meteosource'],
+        description: 'Burst polling triggered by WebSocket alert (2s for 60s)',
     },
+    EARLY_DETECTION: {
+        mode: 'EARLY_DETECTION',
+        durationMs: 300000, // 5 minutes
+        pollIntervalMs: 1000, // 1 second
+        providers: ['openmeteo', 'meteosource'],
+        description: 'Early detection mode triggered by first sign of new data',
+    }
 };
 
 /**
  * Hybrid Weather Controller
- * Manages the three-state weather fetching system with UTC urgency windows
+ * Optimized for precise detection windows + WebSocket alerts
  */
 export class HybridWeatherController extends EventEmitter {
     private state: HybridControllerState;
@@ -209,29 +318,69 @@ export class HybridWeatherController extends EventEmitter {
     private providerManager: WeatherProviderManager;
     private weatherService: WeatherService;
     
+    // File-based ingestion components
+    private fileBasedIngestion: FileBasedIngestion | null = null;
+    private confirmationManager: ConfirmationManager | null = null;
+    private fileBasedIngestionEnabled: boolean = config.ENABLE_FILE_BASED_INGESTION;
+    private eventBus: EventBus;
+    
+    // Track which cities have file-confirmed data (to stop API polling)
+    private fileConfirmedCities: Set<string> = new Set();
+    
+    // Data source tracking for reconciliation
+    private sourceDataCache: Map<string, Map<DataSourceType, {
+        value: number;
+        timestamp: Date;
+        confidence: number;
+    }>> = new Map();
+    
+    // Historical learning data for adaptive windows
+    private historicalData: Map<string, HistoricalPublicationData> = new Map();
+    
     // Timers
-    private urgencyCheckIntervalId: NodeJS.Timeout | null = null;
+    private detectionWindowCheckIntervalId: NodeJS.Timeout | null = null;
     private burstIntervalId: NodeJS.Timeout | null = null;
-    private openMeteoPollIntervalId: NodeJS.Timeout | null = null;
-    private meteosourcePollIntervalId: NodeJS.Timeout | null = null;
+    private pollIntervalId: NodeJS.Timeout | null = null;
+    private burstTimeoutId: NodeJS.Timeout | null = null;
+    private earlyDetectionTimeoutId: NodeJS.Timeout | null = null;
     
     // Burst mode tracking
     private burstModeActive: boolean = false;
-    private burstProviderIndex: number = 0;
-    private burstCityId: string | null = null;
     private burstRequestCount: number = 0;
     private burstStartTime: Date | null = null;
 
-    // WebSocket rest mode tracking
-    private websocketRestActive: boolean = false;
-    private websocketCityId: string | null = null;
+    // Early detection tracking
+    private earlyDetectionActive: boolean = false;
+    private earlyDetectionStartTime: Date | null = null;
 
-    // Open-Meteo polling tracking
-    private openMeteoPollingActive: boolean = false;
-    private currentPollInterval: number = 5000; // Default fallback
+    // Polling tracking
+    private pollingActive: boolean = false;
     
-    // Meteosource polling tracking
-    private meteosourcePollingActive: boolean = false;
+    // Shared forecast cache with 2-second TTL for coordination
+    private forecastCache: Map<string, {
+        data: {
+            cityId: string;
+            cityName: string;
+            temperatureC: number;
+            temperatureF: number;
+            windSpeedMph: number;
+            precipitationMm: number;
+            timestamp: Date;
+            source: DataSourceType;
+            confidence: number;
+        };
+        expiresAt: Date;
+    }> = new Map();
+    private readonly FORECAST_CACHE_TTL_MS = 2000;
+
+    // Track last batch update time
+    private lastBatchUpdateTime: Date | null = null;
+    
+    // OPTIMIZED: Pre-computed city ID cache for fast normalization
+    private cityIdCache: Map<string, string> = new Map();
+
+    // Track last update state for each city for arbitration
+    private cityUpdateStates: Map<string, CityUpdateState> = new Map();
 
     constructor(
         stateMachine: ForecastStateMachine,
@@ -246,26 +395,477 @@ export class HybridWeatherController extends EventEmitter {
         this.apiTracker = apiCallTracker;
         this.providerManager = providerManager || new WeatherProviderManager();
         this.weatherService = weatherService || new WeatherService();
+        this.eventBus = EventBus.getInstance();
+        
+        // Pre-populate city ID cache for fast lookups
+        this.initializeCityIdCache();
         
         this.state = {
-            currentMode: 'METEOSOURCE_POLLING', // Start in Meteosource polling mode (LOW urgency default)
+            currentMode: 'WEBSOCKET_IDLE', // Start in idle mode
             previousMode: null,
             modeEntryTime: new Date(),
             activeCities: new Set(),
             isRunning: false,
             lastTransition: null,
             modeHistory: [],
-            currentUrgency: 'LOW',
             burstStartTime: null,
             burstRequestsCompleted: 0,
-            isAutoMode: true,  // Start in auto mode
+            isAutoMode: true,
+            currentDetectionWindow: null,
+            earlyDetectionActive: false,
         };
 
         this.setupEventListeners();
         
+        // Initialize file-based ingestion if enabled
+        if (this.fileBasedIngestionEnabled) {
+            this.initializeFileBasedIngestion();
+        }
+        
+        // Initialize historical learning data
+        this.initializeHistoricalData();
+        
         logger.info('HybridWeatherController initialized', {
             initialMode: this.state.currentMode,
+            fileBasedIngestion: this.fileBasedIngestionEnabled,
         });
+    }
+
+    /**
+     * OPTIMIZED: Initialize city ID cache for fast normalization
+     */
+    private initializeCityIdCache(): void {
+        const commonCities = [
+            'New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix',
+            'Philadelphia', 'San Antonio', 'San Diego', 'Dallas', 'San Jose',
+            'London', 'Paris', 'Berlin', 'Tokyo', 'Sydney', 'Buenos Aires',
+            'Toronto', 'Mumbai', 'Dubai', 'Singapore', 'Hong Kong',
+        ];
+        
+        for (const city of commonCities) {
+            this.cityIdCache.set(city, city.toLowerCase().replace(/\s+/g, '_'));
+        }
+    }
+    
+    /**
+     * OPTIMIZED: Fast city ID normalization using cache
+     */
+    private fastNormalizeCityId(cityName: string): string {
+        const cached = this.cityIdCache.get(cityName);
+        if (cached) return cached;
+        
+        const normalized = cityName.toLowerCase().replace(/\s+/g, '_');
+        this.cityIdCache.set(cityName, normalized);
+        return normalized;
+    }
+
+    /**
+     * Initialize historical learning data
+     */
+    private initializeHistoricalData(): void {
+        for (const config of DETECTION_WINDOW_CONFIGS) {
+            for (let hour = 0; hour < 24; hour += config.cycleIntervalHours) {
+                const key = `${config.model}_${hour}`;
+                this.historicalData.set(key, {
+                    model: config.model,
+                    cycleHour: hour,
+                    expectedOffsetMinutes: config.startOffsetMinutes,
+                    actualOffsets: [],
+                    averageOffset: config.startOffsetMinutes,
+                    stdDevOffset: 5,
+                    reliabilityScore: 0.5,
+                    lastUpdated: new Date()
+                });
+            }
+        }
+    }
+
+    /**
+     * Initialize file-based ingestion system
+     */
+    private initializeFileBasedIngestion(): void {
+        logger.info('📁 Initializing file-based ingestion system');
+        
+        this.fileBasedIngestion = new FileBasedIngestion({
+            enabled: true,
+            s3PollIntervalMs: config.S3_POLL_INTERVAL_MS,
+            maxDetectionDurationMs: config.API_FALLBACK_MAX_DURATION_MINUTES * 60 * 1000,
+            awsRegion: 'us-east-1',
+            publicBuckets: true,
+        });
+        
+        this.confirmationManager = new ConfirmationManager({
+            maxWaitMinutes: config.API_FALLBACK_MAX_DURATION_MINUTES,
+            emitUnconfirmed: true,
+        });
+        
+        // Listen for FILE_CONFIRMED events
+        this.eventBus.on('FILE_CONFIRMED', (event) => {
+            if (event.type === 'FILE_CONFIRMED') {
+                this.handleFileConfirmed(event.payload);
+            }
+        });
+        
+        logger.info('✅ File-based ingestion system initialized');
+    }
+
+    /**
+     * Handle FILE_CONFIRMED event
+     */
+    private handleFileConfirmed(payload: {
+        model: ModelType;
+        cycleHour: number;
+        forecastHour: number;
+        cityData: Array<{
+            cityName: string;
+            coordinates: Coordinates;
+            temperatureC: number;
+            temperatureF: number;
+            windSpeedMps: number;
+            windSpeedMph: number;
+            windDirection: number;
+            precipitationRateMmHr: number;
+            totalPrecipitationMm: number;
+            totalPrecipitationIn: number;
+        }>;
+        timestamp: Date;
+        source: 'FILE';
+        detectionLatencyMs: number;
+        downloadTimeMs: number;
+        parseTimeMs: number;
+        fileSize: number;
+    }): void {
+        logger.info(
+            `📁 FILE_CONFIRMED: ${payload.model} ${String(payload.cycleHour).padStart(2, '0')}Z ` +
+            `(${payload.cityData.length} cities, ${payload.detectionLatencyMs}ms latency)`
+        );
+        
+        // Update historical learning data
+        this.updateHistoricalData(payload.model, payload.cycleHour, payload.detectionLatencyMs);
+        
+        // Mark cities as file-confirmed and trigger opportunity re-scan
+        for (const cityData of payload.cityData) {
+            const cityId = cityData.cityName.toLowerCase().replace(/\s+/g, '_');
+            
+            // DUAL MODEL ARBITRATION LOGIC
+            // Check if we should update this city based on model priority/timing
+            if (!this.shouldUpdateForecast(cityId, payload.model, new Date())) {
+                logger.debug(`[HybridWeatherController] Skipping update for ${cityId} from ${payload.model} (Arbitration Logic)`);
+                continue;
+            }
+
+            // Update arbitration state
+            this.cityUpdateStates.set(cityId, {
+                lastUpdateSource: payload.model === 'ECMWF' || payload.model === 'GFS' ? payload.model : 'OTHER',
+                lastUpdateTimestamp: new Date(),
+                // payload.timestamp is usually creation time, we want run time if possible, but timestamp is close enough for now
+                lastModelRunTime: payload.timestamp 
+            });
+
+            this.fileConfirmedCities.add(cityId);
+            
+            // Store with high confidence from S3 file
+            this.storeDataWithConfidence(cityId, 'S3_FILE', cityData.temperatureF, 1.0);
+            
+            // Store in data store
+            const marketId = this.dataStore.getAllMarkets().find(m => 
+                m.city?.toLowerCase().replace(/\s+/g, '_') === cityId
+            )?.market.id;
+            
+            if (marketId) {
+                this.dataStore.reconcileForecast(marketId, cityData, payload.model, payload.cycleHour, payload.forecastHour);
+            }
+            
+            // Emit forecast change event to trigger trading opportunity re-scan
+            // This ensures the bot immediately re-evaluates markets when new file data arrives
+            this.eventBus.emit({
+                type: 'FORECAST_CHANGED',
+                payload: {
+                    cityId,
+                    provider: payload.model,
+                    newValue: cityData.temperatureF,
+                    changeAmount: 1.0, // Significant change to trigger re-scan
+                    timestamp: new Date(),
+                    source: 'S3_FILE' as DataSourceType,
+                    confidence: 1.0,
+                },
+            });
+            
+            logger.debug(`[HybridWeatherController] Emitted FORECAST_CHANGED for ${cityId} from ${payload.model} file`);
+        }
+        
+        this.emit('fileConfirmed', payload);
+    }
+
+    /**
+     * Determines if a new forecast should be applied based on arbitration rules.
+     * 
+     * Rules:
+     * 1. Race: Whichever arrives first triggers update.
+     * 2. ECMWF Preference: If ECMWF arrives after GFS, always update.
+     * 3. GFS Restriction: If GFS arrives after ECMWF:
+     *    - < 5 mins since ECMWF: IGNORE GFS.
+     *    - > 1 hour since ECMWF: UPDATE with GFS (freshness wins).
+     *    - 5m - 1h: IGNORE (Implicitly prefer ECMWF).
+     */
+    private shouldUpdateForecast(
+        cityId: string, 
+        newModel: ModelType, 
+        newTimestamp: Date // Current wall-clock time
+    ): boolean {
+        const currentState = this.cityUpdateStates.get(cityId);
+
+        // Rule 1: First arrival (no previous state) -> Update
+        if (!currentState) {
+            return true;
+        }
+
+        // Rule 2: ECMWF Preference
+        // If the new update is ECMWF, we generally always accept it.
+        if (newModel === 'ECMWF') {
+            return true; 
+        }
+
+        // Rule 3: GFS Handling
+        if (newModel === 'GFS') {
+            // If previous was also GFS, update (newer GFS replaces older GFS)
+            if (currentState.lastUpdateSource === 'GFS') {
+                return true;
+            }
+
+            // If previous was ECMWF, check time diff
+            if (currentState.lastUpdateSource === 'ECMWF') {
+                const timeSinceLastUpdateMs = newTimestamp.getTime() - currentState.lastUpdateTimestamp.getTime();
+                const timeSinceLastUpdateMinutes = timeSinceLastUpdateMs / (1000 * 60);
+
+                // "Short time" (< 5 mins) -> Ignore
+                if (timeSinceLastUpdateMinutes < 5) {
+                    logger.info(`Ignoring GFS update for ${cityId}: Too close to ECMWF update (${timeSinceLastUpdateMinutes.toFixed(1)}m)`);
+                    return false;
+                }
+
+                // "Long time" (> 1 hour) -> Update
+                if (timeSinceLastUpdateMinutes > 60) {
+                     logger.info(`Accepting GFS update for ${cityId}: Significantly fresher than ECMWF (${timeSinceLastUpdateMinutes.toFixed(1)}m)`);
+                    return true;
+                }
+
+                // Implicit: 5m - 60m -> Ignore (Stick with preferred ECMWF)
+                logger.info(`Ignoring GFS update for ${cityId}: Within ECMWF preference window (${timeSinceLastUpdateMinutes.toFixed(1)}m)`);
+                return false;
+            }
+        }
+
+        // Default: Allow update (e.g. from other sources if we support them)
+        return true;
+    }
+
+    /**
+     * Update historical learning data with actual publication time
+     */
+    private updateHistoricalData(model: ModelType, cycleHour: number, detectionLatencyMs: number): void {
+        const key = `${model}_${cycleHour}`;
+        const data = this.historicalData.get(key);
+        
+        if (data) {
+            // Convert latency to offset (approximate)
+            const actualOffset = data.expectedOffsetMinutes + (detectionLatencyMs / 60000);
+            data.actualOffsets.push(actualOffset);
+            
+            // Keep last 20 observations
+            if (data.actualOffsets.length > 20) {
+                data.actualOffsets.shift();
+            }
+            
+            // Recalculate statistics
+            const sum = data.actualOffsets.reduce((a, b) => a + b, 0);
+            data.averageOffset = sum / data.actualOffsets.length;
+            
+            const variance = data.actualOffsets.reduce((sum, val) => {
+                return sum + Math.pow(val - data.averageOffset, 2);
+            }, 0) / data.actualOffsets.length;
+            data.stdDevOffset = Math.sqrt(variance);
+            
+            // Update reliability score (lower std dev = higher reliability)
+            data.reliabilityScore = Math.max(0, 1 - (data.stdDevOffset / 10));
+            data.lastUpdated = new Date();
+            
+            logger.debug(`[HistoricalLearning] ${model} ${cycleHour}Z: avg=${data.averageOffset.toFixed(1)}min, std=${data.stdDevOffset.toFixed(1)}min, reliability=${(data.reliabilityScore * 100).toFixed(0)}%`);
+        }
+    }
+
+    /**
+     * Store data with confidence scoring
+     */
+    private storeDataWithConfidence(
+        cityId: string,
+        source: DataSourceType,
+        value: number,
+        baseConfidence: number
+    ): void {
+        const priority = DATA_SOURCE_PRIORITIES[source];
+        const timestamp = new Date();
+        
+        // Calculate freshness multiplier
+        const stalenessMs = 0;  // Fresh data
+        const freshnessMultiplier = 1.0;
+        
+        // Calculate reconciliation bonus (agreement with other sources)
+        const reconciliationBonus = this.calculateReconciliationBonus(cityId, source, value);
+        
+        // Calculate final confidence score
+        const finalScore = baseConfidence * priority.confidenceWeight * freshnessMultiplier + reconciliationBonus;
+        
+        // Store in cache
+        if (!this.sourceDataCache.has(cityId)) {
+            this.sourceDataCache.set(cityId, new Map());
+        }
+        
+        this.sourceDataCache.get(cityId)!.set(source, {
+            value,
+            timestamp,
+            confidence: finalScore
+        });
+        
+        // Check for early detection trigger
+        if (finalScore >= EARLY_DETECTION_CONFIG.triggerThreshold && !this.earlyDetectionActive) {
+            this.triggerEarlyDetection({
+                model: 'HRRR',  // Default, will be updated
+                cycleHour: new Date().getUTCHours(),
+                triggeredAt: new Date(),
+                triggerSource: source,
+                confidence: finalScore
+            });
+        }
+    }
+
+    /**
+     * Calculate reconciliation bonus when sources agree
+     */
+    private calculateReconciliationBonus(cityId: string, source: DataSourceType, value: number): number {
+        const cityData = this.sourceDataCache.get(cityId);
+        if (!cityData) return 0;
+        
+        let bonus = 0;
+        const threshold = 0.5;  // Temperature threshold for agreement
+        
+        for (const [otherSource, data] of cityData.entries()) {
+            if (otherSource !== source) {
+                const diff = Math.abs(data.value - value);
+                if (diff < threshold) {
+                    // Sources agree - add bonus based on other source's priority
+                    bonus += DATA_SOURCE_PRIORITIES[otherSource].priority * 0.01;
+                }
+            }
+        }
+        
+        return Math.min(bonus, 0.2);  // Cap bonus at 0.2
+    }
+
+    /**
+     * Reconcile data from multiple sources
+     */
+    reconcileSources(cityId: string): ReconciliationResult | null {
+        const cityData = this.sourceDataCache.get(cityId);
+        if (!cityData || cityData.size === 0) return null;
+        
+        const sources: Array<{
+            source: DataSourceType;
+            value: number;
+            confidence: number;
+            timestamp: Date;
+        }> = [];
+        
+        // Gather all sources
+        for (const [source, data] of cityData.entries()) {
+            // Check staleness
+            const stalenessMs = Date.now() - data.timestamp.getTime();
+            const maxStaleness = DATA_SOURCE_PRIORITIES[source].maxStalenessMs;
+            
+            if (stalenessMs <= maxStaleness) {
+                // Apply freshness penalty
+                const freshnessMultiplier = Math.exp(-stalenessMs / maxStaleness);
+                const adjustedConfidence = data.confidence * freshnessMultiplier;
+                
+                sources.push({
+                    source,
+                    value: data.value,
+                    confidence: adjustedConfidence,
+                    timestamp: data.timestamp
+                });
+            }
+        }
+        
+        if (sources.length === 0) return null;
+        
+        // Sort by confidence (highest first)
+        sources.sort((a, b) => b.confidence - a.confidence);
+        
+        // Calculate disagreement
+        const values = sources.map(s => s.value);
+        const maxDiff = Math.max(...values) - Math.min(...values);
+        
+        const result: ReconciliationResult = {
+            marketId: cityId,  // Will be mapped to actual market ID
+            selectedSource: sources[0].source,
+            selectedValue: sources[0].value,
+            allSources: sources,
+            disagreementAmount: maxDiff,
+            resolutionReason: maxDiff < 0.5 
+                ? 'Sources agree within threshold' 
+                : `Selected highest confidence source (${sources[0].source})`
+        };
+        
+        this.state.lastReconciliationResult = result;
+        return result;
+    }
+
+    /**
+     * Trigger early detection mode
+     */
+    private triggerEarlyDetection(trigger: EarlyDetectionTrigger): void {
+        if (this.earlyDetectionActive) return;
+        
+        logger.info(`🚨 Early detection triggered by ${trigger.triggerSource} (confidence: ${(trigger.confidence * 100).toFixed(0)}%)`);
+        
+        this.earlyDetectionActive = true;
+        this.earlyDetectionStartTime = new Date();
+        
+        // Transition to early detection mode
+        this.transitionTo('EARLY_DETECTION', 'early_detection_triggered');
+        
+        // Set timeout to exit early detection
+        this.earlyDetectionTimeoutId = setTimeout(() => {
+            this.exitEarlyDetection();
+        }, EARLY_DETECTION_CONFIG.maxDurationMs);
+        
+        this.emit('earlyDetectionTriggered', trigger);
+    }
+
+    /**
+     * Exit early detection mode
+     */
+    private exitEarlyDetection(): void {
+        if (!this.earlyDetectionActive) return;
+        
+        logger.info('✅ Early detection completed');
+        
+        this.earlyDetectionActive = false;
+        this.earlyDetectionStartTime = null;
+        
+        if (this.earlyDetectionTimeoutId) {
+            clearTimeout(this.earlyDetectionTimeoutId);
+            this.earlyDetectionTimeoutId = null;
+        }
+        
+        // Return to appropriate mode
+        if (this.state.currentDetectionWindow) {
+            this.transitionTo('DETECTION_POLLING', 'early_detection_complete');
+        } else {
+            this.transitionTo('WEBSOCKET_IDLE', 'early_detection_complete');
+        }
+        
+        this.emit('earlyDetectionComplete');
     }
 
     /**
@@ -273,26 +873,35 @@ export class HybridWeatherController extends EventEmitter {
      */
     private setupEventListeners(): void {
         // Listen for webhook triggers from Tomorrow.io
-        eventBus.on('FORECAST_TRIGGER', async (event) => {
+        this.eventBus.on('FORECAST_TRIGGER', async (event) => {
             const payload = event.payload as { provider: 'tomorrow.io'; cityId: string; triggerTimestamp: Date; location: Coordinates; forecastId?: string; updateType?: string };
             if (payload.provider === 'tomorrow.io') {
-                await this.handleWebhookTrigger(
-                    payload.cityId,
-                    payload.location
-                );
+                await this.handleWebhookTrigger(payload.cityId, payload.location);
             }
         });
 
         // Listen for forecast changes detected via WebSocket
-        eventBus.on('FORECAST_CHANGED', (event) => {
-            const payload = event.payload as { cityId: string; marketId?: string; provider: string; previousValue?: number; newValue: number; changeAmount: number; timestamp: Date };
-            // Only trigger burst if we're in LOW urgency (WebSocket rest mode)
-            // AND the change came from WebSocket (not from polling)
-            if (this.state.currentUrgency === 'LOW' && payload.provider === 'tomorrow.io') {
-                this.handleWebSocketForecastChange(
-                    payload.cityId,
-                    payload.changeAmount
-                );
+        this.eventBus.on('FORECAST_CHANGED', (event) => {
+            const payload = event.payload as {
+                cityId: string;
+                marketId?: string;
+                provider: string;
+                previousValue?: number;
+                newValue: number;
+                changeAmount: number; 
+                timestamp: Date;
+                source?: DataSourceType;
+                confidence?: number;
+            };
+            
+            // Store with confidence if provided
+            if (payload.source && payload.confidence !== undefined) {
+                this.storeDataWithConfidence(payload.cityId, payload.source, payload.newValue, payload.confidence);
+            }
+            
+            // Only trigger burst if we're in WEBSOCKET_IDLE mode (not in detection window)
+            if (this.state.currentMode === 'WEBSOCKET_IDLE' && payload.provider === 'tomorrow.io') {
+                this.handleWebSocketForecastChange(payload.cityId, payload.changeAmount);
             }
         });
     }
@@ -309,13 +918,19 @@ export class HybridWeatherController extends EventEmitter {
         this.state.isRunning = true;
         logger.info('HybridWeatherController started');
 
-        // Start urgency window checker (every 10 seconds)
-        this.urgencyCheckIntervalId = setInterval(() => {
-            this.checkUrgencyWindow();
-        }, 10000);
+        // Start file-based ingestion if enabled
+        if (this.fileBasedIngestionEnabled && this.fileBasedIngestion) {
+            this.fileBasedIngestion.start();
+            logger.info('📁 File-based ingestion started');
+        }
 
-        // Initial urgency check
-        this.checkUrgencyWindow();
+        // Start detection window checker (every 30 seconds for precise timing)
+        this.detectionWindowCheckIntervalId = setInterval(() => {
+            this.checkDetectionWindows();
+        }, 30000);
+
+        // Initial check
+        this.checkDetectionWindows();
 
         this.emit('started', { timestamp: new Date() });
     }
@@ -336,11 +951,21 @@ export class HybridWeatherController extends EventEmitter {
         // Stop burst mode if active
         this.stopBurstMode();
 
-        // Stop Open-Meteo polling if active
-        this.stopOpenMeteoPolling();
-        
-        // Stop Meteosource polling if active
-        this.stopMeteosourcePolling();
+        // Stop polling if active
+        this.stopPolling();
+
+        // Exit early detection if active
+        this.exitEarlyDetection();
+
+        // Stop file-based ingestion
+        if (this.fileBasedIngestion) {
+            this.fileBasedIngestion.stop();
+        }
+
+        // Dispose confirmation manager
+        if (this.confirmationManager) {
+            this.confirmationManager.dispose();
+        }
 
         logger.info('HybridWeatherController stopped');
         this.emit('stopped', { timestamp: new Date() });
@@ -350,88 +975,747 @@ export class HybridWeatherController extends EventEmitter {
      * Clear all active timers
      */
     private clearAllTimers(): void {
-        if (this.urgencyCheckIntervalId) {
-            clearInterval(this.urgencyCheckIntervalId);
-            this.urgencyCheckIntervalId = null;
+        if (this.detectionWindowCheckIntervalId) {
+            clearInterval(this.detectionWindowCheckIntervalId);
+            this.detectionWindowCheckIntervalId = null;
         }
         if (this.burstIntervalId) {
             clearInterval(this.burstIntervalId);
             this.burstIntervalId = null;
         }
-        if (this.openMeteoPollIntervalId) {
-            clearInterval(this.openMeteoPollIntervalId);
-            this.openMeteoPollIntervalId = null;
+        if (this.pollIntervalId) {
+            clearInterval(this.pollIntervalId);
+            this.pollIntervalId = null;
         }
-        if (this.meteosourcePollIntervalId) {
-            clearInterval(this.meteosourcePollIntervalId);
-            this.meteosourcePollIntervalId = null;
+        if (this.burstTimeoutId) {
+            clearTimeout(this.burstTimeoutId);
+            this.burstTimeoutId = null;
+        }
+        if (this.earlyDetectionTimeoutId) {
+            clearTimeout(this.earlyDetectionTimeoutId);
+            this.earlyDetectionTimeoutId = null;
         }
     }
 
     /**
-     * Check current UTC time and determine urgency level
-     * Only performs auto-transitions when isAutoMode is true
+     * Check if we're currently in any detection window
+     * Uses adaptive windows based on historical learning
      */
-    private checkUrgencyWindow(): void {
-        // Skip auto-switching if in manual mode
+    private checkDetectionWindows(): void {
         if (!this.state.isAutoMode) {
-            logger.debug('Skipping urgency check - manual mode active');
+            logger.debug('Skipping detection window check - manual mode active');
             return;
         }
 
         const now = new Date();
         const utcHour = now.getUTCHours();
         const utcMinute = now.getUTCMinutes();
-        const currentTime = utcHour * 60 + utcMinute; // Minutes since midnight UTC
+        const currentTimeMinutes = utcHour * 60 + utcMinute;
 
-        let currentUrgency: UrgencyLevel = 'LOW';
-        let pollInterval: number | null = null;
+        // Check each detection window config with adaptive adjustments
+        for (const config of DETECTION_WINDOW_CONFIGS) {
+            // Get adaptive window if historical data exists
+            const adaptiveWindow = this.getAdaptiveWindow(config, utcHour);
+            
+            // Calculate which cycle we're in
+            const cyclesSinceMidnight = Math.floor(currentTimeMinutes / (config.cycleIntervalHours * 60));
+            const cycleStartMinutes = cyclesSinceMidnight * config.cycleIntervalHours * 60;
+            
+            const windowStartMinutes = cycleStartMinutes + adaptiveWindow.adjustedStartOffset;
+            const windowEndMinutes = cycleStartMinutes + adaptiveWindow.adjustedEndOffset;
 
-        for (const window of URGENCY_WINDOWS) {
-            const startTime = window.startHour * 60 + window.startMinute;
-            const endTime = window.endHour * 60 + window.endMinute;
-
-            if (currentTime >= startTime && currentTime < endTime) {
-                currentUrgency = window.level;
-                pollInterval = window.pollIntervalMs;
-                break;
+            // Check if we're in this detection window
+            if (currentTimeMinutes >= windowStartMinutes && currentTimeMinutes < windowEndMinutes) {
+                const cycleHour = Math.floor(cycleStartMinutes / 60) % 24;
+                
+                // Check if this is a new window (different from current)
+                if (!this.state.currentDetectionWindow || 
+                    this.state.currentDetectionWindow.model !== config.model ||
+                    this.state.currentDetectionWindow.cycleHour !== cycleHour) {
+                    
+                    // New detection window started
+                    this.enterDetectionWindow(config.model, cycleHour, windowStartMinutes, windowEndMinutes);
+                }
+                return; // We're in a window, no need to check others
             }
         }
 
-        // Handle urgency level changes
-        if (currentUrgency !== this.state.currentUrgency) {
-            logger.info(`🕐 Urgency window change: ${this.state.currentUrgency} → ${currentUrgency}`, {
-                utcTime: `${utcHour.toString().padStart(2, '0')}:${utcMinute.toString().padStart(2, '0')}`,
-            });
+        // Not in any detection window
+        if (this.state.currentMode === 'DETECTION_POLLING') {
+            this.exitDetectionWindow();
+        }
+    }
 
-            const previousUrgency = this.state.currentUrgency;
-            this.state.currentUrgency = currentUrgency;
+    /**
+     * Get adaptive detection window based on historical learning
+     */
+    private getAdaptiveWindow(config: DetectionWindowConfig, currentHour: number): {
+        adjustedStartOffset: number;
+        adjustedEndOffset: number;
+        confidence: number;
+    } {
+        const cycleHour = Math.floor(currentHour / config.cycleIntervalHours) * config.cycleIntervalHours;
+        const key = `${config.model}_${cycleHour}`;
+        const historicalData = this.historicalData.get(key);
+        
+        if (!historicalData || historicalData.actualOffsets.length < 5) {
+            // Not enough historical data, use defaults
+            return {
+                adjustedStartOffset: config.startOffsetMinutes,
+                adjustedEndOffset: config.endOffsetMinutes,
+                confidence: 0.5
+            };
+        }
+        
+        // Adjust window based on historical data
+        // Start slightly earlier than average to catch early publications
+        const adjustedStart = Math.max(0, historicalData.averageOffset - historicalData.stdDevOffset - 2);
+        const adjustedEnd = historicalData.averageOffset + historicalData.stdDevOffset + 5;
+        
+        return {
+            adjustedStartOffset: adjustedStart,
+            adjustedEndOffset: adjustedEnd,
+            confidence: historicalData.reliabilityScore
+        };
+    }
 
-            // Handle state transitions based on urgency (only in auto mode)
-            if (currentUrgency === 'HIGH') {
-                // HIGH urgency: Switch to Open-Meteo polling (1 second)
-                if (this.state.currentMode !== 'OPEN_METEO_POLLING') {
-                    this.transitionTo('OPEN_METEO_POLLING', 'urgency_window_entered');
-                }
-                // Update poll interval
-                if (pollInterval) {
-                    this.currentPollInterval = pollInterval;
-                    this.updateOpenMeteoPollingInterval(pollInterval);
-                }
-            } else if (currentUrgency === 'MEDIUM' || currentUrgency === 'LOW') {
-                // MEDIUM and LOW urgency: Switch to Meteosource polling (1 second)
-                if (this.state.currentMode !== 'METEOSOURCE_POLLING') {
-                    this.transitionTo('METEOSOURCE_POLLING', currentUrgency === 'MEDIUM' ? 'urgency_window_entered' : 'urgency_window_exited');
+    /**
+     * Enter detection window polling mode
+     */
+    private enterDetectionWindow(model: ModelType, cycleHour: number, windowStartMinutes: number, windowEndMinutes: number): void {
+        const now = new Date();
+        const windowStart = new Date(now);
+        windowStart.setUTCMinutes(windowStartMinutes % 60);
+        windowStart.setUTCHours(Math.floor(windowStartMinutes / 60));
+        
+        const windowEnd = new Date(now);
+        windowEnd.setUTCMinutes(windowEndMinutes % 60);
+        windowEnd.setUTCHours(Math.floor(windowEndMinutes / 60));
+
+        this.state.currentDetectionWindow = {
+            model,
+            cycleHour,
+            windowStart,
+            windowEnd,
+        };
+
+        logger.info(`🔍 Detection window started: ${model} ${String(cycleHour).padStart(2, '0')}Z (${windowStartMinutes}-${windowEndMinutes} min)`);
+
+        this.transitionTo('DETECTION_POLLING', 'detection_window_started');
+    }
+
+    /**
+     * Exit detection window
+     */
+    private exitDetectionWindow(): void {
+        logger.info(`🔍 Detection window ended`);
+        this.state.currentDetectionWindow = null;
+        this.transitionTo('WEBSOCKET_IDLE', 'detection_window_ended');
+    }
+
+    /**
+     * Transition to a new mode
+     */
+    public async transitionTo(
+        newMode: HybridWeatherMode, 
+        reason: ModeTransitionReason = 'manual',
+        cityId?: string
+    ): Promise<boolean> {
+        if (newMode === this.state.currentMode) {
+            logger.debug(`Already in mode ${newMode}, no transition needed`);
+            return true;
+        }
+
+        const previousMode = this.state.currentMode;
+        
+        const transition: ModeTransition = {
+            from: previousMode,
+            to: newMode,
+            timestamp: new Date(),
+            reason,
+            cityId,
+        };
+
+        logger.info(`🔄 Mode transition: ${previousMode} → ${newMode}`, { reason, cityId });
+
+        // Exit current mode
+        await this.exitCurrentMode();
+
+        // Update state
+        this.state.previousMode = previousMode;
+        this.state.currentMode = newMode;
+        this.state.modeEntryTime = new Date();
+        this.state.lastTransition = transition;
+
+        // Enter new mode
+        await this.enterNewMode(newMode, cityId);
+
+        // Emit transition event
+        this.emit('modeTransition', transition);
+
+        return true;
+    }
+
+    /**
+     * Exit the current mode - cleanup
+     */
+    private async exitCurrentMode(): Promise<void> {
+        switch (this.state.currentMode) {
+            case 'DETECTION_POLLING':
+                this.stopPolling();
+                break;
+            case 'WEBSOCKET_IDLE':
+                // Nothing to clean up
+                break;
+            case 'BURST_MODE':
+                this.stopBurstMode();
+                break;
+            case 'EARLY_DETECTION':
+                // Early detection cleanup handled separately
+                break;
+        }
+
+        // Record mode stats
+        const duration = Date.now() - this.state.modeEntryTime.getTime();
+        const stats: ModeStats = {
+            mode: this.state.currentMode,
+            entryTime: this.state.modeEntryTime,
+            exitTime: new Date(),
+            durationMs: duration,
+            apiCalls: this.apiTracker.getTotalCallsToday(),
+            forecastChanges: 0,
+            webhooksReceived: 0,
+        };
+        this.state.modeHistory.push(stats);
+    }
+
+    /**
+     * Enter a new mode
+     */
+    private async enterNewMode(mode: HybridWeatherMode, cityId?: string): Promise<void> {
+        switch (mode) {
+            case 'DETECTION_POLLING':
+                this.startPolling();
+                break;
+            case 'WEBSOCKET_IDLE':
+                // No polling, just WebSocket listening
+                logger.info('🔌 Entering WEBSOCKET_IDLE mode (NO polling)');
+                break;
+            case 'BURST_MODE':
+                this.startBurstMode(cityId);
+                break;
+            case 'EARLY_DETECTION':
+                this.startEarlyDetectionPolling();
+                break;
+        }
+    }
+
+    /**
+     * Start early detection polling (faster interval)
+     */
+    private startEarlyDetectionPolling(): void {
+        logger.info('🚨 Starting early detection polling (every 1s)');
+        this.pollingActive = true;
+
+        // Execute first poll immediately
+        this.executePoll();
+
+        // Set up interval (1 second for early detection)
+        this.pollIntervalId = setInterval(() => {
+            this.executePoll();
+        }, EARLY_DETECTION_CONFIG.pollIntervalMs);
+    }
+
+    // ====================
+    // DETECTION POLLING Mode
+    // ====================
+
+    /**
+     * Start polling during detection window
+     */
+    private startPolling(): void {
+        if (this.pollingActive) {
+            return;
+        }
+
+        logger.info('📡 Starting detection window polling (every 2s)');
+        this.pollingActive = true;
+
+        // Execute first poll immediately
+        this.executePoll();
+
+        // Set up interval (2 seconds as requested)
+        this.pollIntervalId = setInterval(() => {
+            this.executePoll();
+        }, 2000);
+    }
+
+    /**
+     * Stop polling
+     */
+    private stopPolling(): void {
+        if (!this.pollingActive) {
+            return;
+        }
+
+        logger.info('📡 Stopping detection window polling');
+        this.pollingActive = false;
+
+        if (this.pollIntervalId) {
+            clearInterval(this.pollIntervalId);
+            this.pollIntervalId = null;
+        }
+    }
+
+    /**
+     * Execute a single poll using Open-Meteo with MeteoSource fallback
+     */
+    private async executePoll(): Promise<void> {
+        if (!this.pollingActive) {
+            return;
+        }
+
+        // Check if Open-Meteo quota exceeded
+        if (this.apiTracker.isQuotaExceeded('openmeteo')) {
+            logger.warn('Open-Meteo quota exceeded, falling back to MeteoSource');
+            await this.executeMeteoSourcePoll();
+            return;
+        }
+
+        // Get active cities (exclude file-confirmed cities and FETCH_MODE cities)
+        let cities: string[] = [];
+        for (const cityId of this.state.activeCities) {
+            if (!this.fileConfirmedCities.has(cityId) && !this.stateMachine.isInFetchMode(cityId)) {
+                cities.push(cityId);
+            }
+        }
+        
+        if (cities.length === 0) {
+            // No active cities, poll all known cities from dataStore
+            const allMarkets = this.dataStore.getAllMarkets();
+            const citySet = new Set<string>();
+            for (const market of allMarkets) {
+                if (market.city) {
+                    const cityId = this.fastNormalizeCityId(market.city);
+                    if (!this.fileConfirmedCities.has(cityId) && !this.stateMachine.isInFetchMode(cityId)) {
+                        citySet.add(cityId);
+                    }
                 }
             }
-        } else if (currentUrgency === 'HIGH' && pollInterval) {
-            // Still in HIGH urgency window, ensure correct poll interval
-            if (this.currentPollInterval !== pollInterval) {
-                this.currentPollInterval = pollInterval;
-                this.updateOpenMeteoPollingInterval(pollInterval);
+            cities = Array.from(citySet);
+        }
+
+        if (cities.length === 0) {
+            logger.debug('No cities to poll');
+            return;
+        }
+
+        // Resolve city IDs to CityLocation objects
+        const cityLocations: Array<{ cityId: string; city: CityLocation }> = [];
+        for (const cityId of cities) {
+            const city = findCity(cityId);
+            if (city) {
+                cityLocations.push({ cityId, city });
+            }
+        }
+
+        if (cityLocations.length === 0) {
+            return;
+        }
+
+        try {
+            // Try Open-Meteo first
+            const openMeteoProvider = this.providerManager.getProvider('openmeteo');
+            
+            if (!('getHourlyForecastBatch' in openMeteoProvider)) {
+                logger.error('OpenMeteo provider does not support batch requests');
+                await this.executeMeteoSourcePoll();
+                return;
+            }
+
+            const openMeteoClient = openMeteoProvider as import('../weather/openmeteo-client.js').OpenMeteoClient;
+
+            const locations = cityLocations.map(({ city }) => ({
+                coords: city.coordinates,
+                locationName: city.name
+            }));
+
+            logger.debug(`🌤️ Open-Meteo batch request: ${locations.length} cities`);
+
+            // Execute batch request (no cache during detection window)
+            const batchResults = await openMeteoClient.getHourlyForecastBatch(locations, false);
+
+            // Record API call
+            this.apiTracker.recordCall('openmeteo', true);
+
+            // Process results
+            this.processBatchResults(batchResults, cityLocations, 'open-meteo');
+
+        } catch (error) {
+            logger.error('Open-Meteo poll failed, falling back to MeteoSource', {
+                error: (error as Error).message,
+            });
+            
+            // Record failed call
+            this.apiTracker.recordCall('openmeteo', false);
+            
+            // Fallback to MeteoSource
+            await this.executeMeteoSourcePoll();
+        }
+    }
+
+    /**
+     * Execute poll using MeteoSource (fallback)
+     */
+    private async executeMeteoSourcePoll(): Promise<void> {
+        const meteosourceProvider = this.providerManager.getProvider('meteosource');
+        if (!meteosourceProvider) {
+            logger.warn('MeteoSource provider not available');
+            return;
+        }
+
+        // Get cities (same logic as executePoll)
+        let cities: string[] = [];
+        for (const cityId of this.state.activeCities) {
+            if (!this.fileConfirmedCities.has(cityId) && !this.stateMachine.isInFetchMode(cityId)) {
+                cities.push(cityId);
+            }
+        }
+        
+        if (cities.length === 0) {
+            const allMarkets = this.dataStore.getAllMarkets();
+            const citySet = new Set<string>();
+            for (const market of allMarkets) {
+                if (market.city) {
+                    const cityId = this.fastNormalizeCityId(market.city);
+                    if (!this.fileConfirmedCities.has(cityId) && !this.stateMachine.isInFetchMode(cityId)) {
+                        citySet.add(cityId);
+                    }
+                }
+            }
+            cities = Array.from(citySet);
+        }
+
+        const cityLocations: Array<{ cityId: string; city: CityLocation }> = [];
+        for (const cityId of cities) {
+            const city = findCity(cityId);
+            if (city) {
+                cityLocations.push({ cityId, city });
+            }
+        }
+
+        if (cityLocations.length === 0) {
+            return;
+        }
+
+        try {
+            if (!('getHourlyForecastBatch' in meteosourceProvider)) {
+                logger.error('MeteoSource provider does not support batch requests');
+                return;
+            }
+
+            const meteosourceClient = meteosourceProvider as import('../weather/additional-providers.js').MeteosourceProvider;
+
+            const locations = cityLocations.map(({ city }) => ({
+                coords: city.coordinates,
+                locationName: city.name
+            }));
+
+            logger.debug(`🌤️ MeteoSource batch request: ${locations.length} cities`);
+
+            const batchResults = await meteosourceClient.getHourlyForecastBatch(locations, false);
+
+            // Record API calls
+            for (let i = 0; i < batchResults.length; i++) {
+                this.apiTracker.recordCall('meteosource', true);
+            }
+
+            this.processBatchResults(batchResults, cityLocations, 'meteosource');
+
+        } catch (error) {
+            logger.error('MeteoSource poll failed', {
+                error: (error as Error).message,
+            });
+            
+            for (let i = 0; i < cityLocations.length; i++) {
+                this.apiTracker.recordCall('meteosource', false);
             }
         }
     }
+
+    /**
+     * Process batch poll results
+     */
+    private processBatchResults(
+        batchResults: import('../weather/types.js').WeatherData[],
+        cityLocations: Array<{ cityId: string; city: CityLocation }>,
+        provider: string
+    ): void {
+        const batchForecasts: Array<{
+            cityId: string;
+            cityName: string;
+            temperatureC: number;
+            temperatureF: number;
+            windSpeedMph: number;
+            precipitationMm: number;
+            timestamp: Date;
+            source: DataSourceType;
+            confidence: number;
+        }> = [];
+
+        for (let i = 0; i < batchResults.length && i < cityLocations.length; i++) {
+            const result = batchResults[i];
+            const { cityId, city } = cityLocations[i];
+
+            const currentForecast = result.hourly[0];
+            if (!currentForecast) continue;
+
+            // Calculate confidence score for API data
+            const confidence = this.calculateDataConfidence('API', new Date());
+
+            const forecastData = {
+                cityId,
+                cityName: city.name,
+                temperatureC: currentForecast.temperatureC,
+                temperatureF: currentForecast.temperatureF,
+                windSpeedMph: currentForecast.windSpeedMph || 0,
+                precipitationMm: currentForecast.snowfallInches ? currentForecast.snowfallInches * 25.4 : 0,
+                timestamp: new Date(),
+                source: 'API' as DataSourceType,
+                confidence,
+            };
+
+            // Store in shared cache
+            this.forecastCache.set(cityId, {
+                data: forecastData,
+                expiresAt: new Date(Date.now() + this.FORECAST_CACHE_TTL_MS),
+            });
+
+            // Store with confidence scoring
+            this.storeDataWithConfidence(cityId, 'API', forecastData.temperatureF, confidence);
+
+            batchForecasts.push(forecastData);
+
+            // Emit events
+            this.eventBus.emit({
+                type: 'PROVIDER_FETCH',
+                payload: {
+                    cityId,
+                    provider,
+                    success: true,
+                    hasChanges: true,
+                },
+            });
+
+            this.eventBus.emit({
+                type: 'FORECAST_UPDATED',
+                payload: {
+                    cityId,
+                    cityName: city.name,
+                    provider,
+                    temperatureC: forecastData.temperatureC,
+                    temperatureF: forecastData.temperatureF,
+                    windSpeedMph: forecastData.windSpeedMph,
+                    precipitationMm: forecastData.precipitationMm,
+                    timestamp: forecastData.timestamp,
+                    source: 'API' as DataSourceType,
+                    confidence,
+                },
+            });
+        }
+
+        // Emit batch update event
+        if (batchForecasts.length > 0) {
+            this.lastBatchUpdateTime = new Date();
+            this.eventBus.emit({
+                type: 'FORECAST_BATCH_UPDATED',
+                payload: {
+                    forecasts: batchForecasts,
+                    provider,
+                    batchTimestamp: this.lastBatchUpdateTime,
+                    totalCities: batchForecasts.length,
+                },
+            });
+        }
+    }
+
+    /**
+     * Calculate confidence score for data based on source and freshness
+     */
+    private calculateDataConfidence(source: DataSourceType, timestamp: Date): number {
+        const priority = DATA_SOURCE_PRIORITIES[source];
+        const stalenessMs = Date.now() - timestamp.getTime();
+        
+        // Calculate freshness multiplier
+        const freshnessMultiplier = Math.max(0, 1 - (stalenessMs / priority.maxStalenessMs));
+        
+        // Base confidence from source priority
+        return priority.confidenceWeight * freshnessMultiplier;
+    }
+
+    // ====================
+    // BURST MODE
+    // ====================
+
+    /**
+     * Start burst mode (triggered by WebSocket alert)
+     */
+    private startBurstMode(cityId?: string): void {
+        if (this.burstModeActive) {
+            // Already in burst mode, extend it
+            logger.info('⚡ Extending burst mode');
+            this.resetBurstTimeout();
+            return;
+        }
+
+        logger.info('⚡ Entering BURST_MODE', { 
+            cityId,
+            duration: '60 seconds',
+            rate: '1 req/2 sec',
+        });
+        
+        this.burstModeActive = true;
+        this.burstRequestCount = 0;
+        this.burstStartTime = new Date();
+        this.state.burstStartTime = new Date();
+        this.state.burstRequestsCompleted = 0;
+
+        // Notify API tracker
+        this.apiTracker.enterBurstMode();
+
+        // Start burst polling
+        this.startBurstPolling();
+
+        // Set timeout to end burst after 60 seconds
+        this.burstTimeoutId = setTimeout(() => {
+            this.handleBurstComplete();
+        }, BURST_CONFIG.durationMs);
+
+        this.emit('modeEntered', { mode: 'BURST_MODE', cityId });
+    }
+
+    /**
+     * Reset burst timeout (extend burst)
+     */
+    private resetBurstTimeout(): void {
+        if (this.burstTimeoutId) {
+            clearTimeout(this.burstTimeoutId);
+        }
+        this.burstTimeoutId = setTimeout(() => {
+            this.handleBurstComplete();
+        }, BURST_CONFIG.durationMs);
+    }
+
+    /**
+     * Start burst polling
+     */
+    private startBurstPolling(): void {
+        // Execute first poll immediately
+        this.executeBurstPoll();
+        
+        // Set up interval (2 seconds)
+        this.burstIntervalId = setInterval(() => {
+            this.executeBurstPoll();
+        }, BURST_CONFIG.intervalMs);
+    }
+
+    /**
+     * Stop burst mode
+     */
+    private stopBurstMode(): void {
+        this.burstModeActive = false;
+        
+        if (this.burstIntervalId) {
+            clearInterval(this.burstIntervalId);
+            this.burstIntervalId = null;
+        }
+        
+        if (this.burstTimeoutId) {
+            clearTimeout(this.burstTimeoutId);
+            this.burstTimeoutId = null;
+        }
+
+        // Notify API tracker
+        this.apiTracker.exitBurstMode();
+    }
+
+    /**
+     * Execute a single burst poll
+     */
+    private async executeBurstPoll(): Promise<void> {
+        if (!this.burstModeActive) {
+            return;
+        }
+
+        // Check if we've reached 60 seconds
+        if (this.burstStartTime) {
+            const elapsed = Date.now() - this.burstStartTime.getTime();
+            if (elapsed >= BURST_CONFIG.durationMs) {
+                this.handleBurstComplete();
+                return;
+            }
+        }
+
+        // Execute poll (same as detection polling)
+        await this.executePoll();
+
+        this.burstRequestCount++;
+        this.state.burstRequestsCompleted++;
+        
+        logger.debug(`Burst poll: ${this.burstRequestCount}/30`);
+    }
+
+    /**
+     * Handle burst completion
+     */
+    private async handleBurstComplete(): Promise<void> {
+        logger.info('✅ Burst mode completed', {
+            totalRequests: this.burstRequestCount,
+            duration: '60 seconds',
+        });
+
+        this.stopBurstMode();
+
+        // Return to appropriate mode
+        if (this.state.currentDetectionWindow) {
+            await this.transitionTo('DETECTION_POLLING', 'burst_complete');
+        } else {
+            await this.transitionTo('WEBSOCKET_IDLE', 'burst_complete');
+        }
+    }
+
+    // ====================
+    // Event Handlers
+    // ====================
+
+    /**
+     * Handle webhook trigger from Tomorrow.io
+     */
+    private async handleWebhookTrigger(cityId: string, location: Coordinates): Promise<void> {
+        logger.info(`📨 Webhook trigger received for ${cityId}`);
+        this.state.activeCities.add(cityId);
+    }
+
+    /**
+     * Handle forecast change detected via WebSocket
+     * Triggers burst mode when in WEBSOCKET_IDLE
+     */
+    private async handleWebSocketForecastChange(cityId: string, changeAmount: number): Promise<void> {
+        const significantChangeThreshold = 2.0; // degrees or percentage points
+
+        if (Math.abs(changeAmount) >= significantChangeThreshold &&
+            this.state.currentMode === 'WEBSOCKET_IDLE') {
+            
+            logger.info(`📊 Significant forecast change via WebSocket: ${changeAmount} for ${cityId}`);
+
+            // Trigger burst mode
+            await this.transitionTo('BURST_MODE', 'webhook_trigger', cityId);
+        }
+    }
+
+    // ====================
+    // Public API
+    // ====================
 
     /**
      * Get current controller state
@@ -476,805 +1760,10 @@ export class HybridWeatherController extends EventEmitter {
     }
 
     /**
-     * Get current urgency level
+     * Get current detection window info
      */
-    public getCurrentUrgency(): UrgencyLevel {
-        return this.state.currentUrgency;
-    }
-
-    /**
-     * Transition to a new mode
-     */
-    public async transitionTo(
-        newMode: HybridWeatherMode, 
-        reason: ModeTransitionReason = 'manual',
-        cityId?: string
-    ): Promise<boolean> {
-        if (newMode === this.state.currentMode) {
-            logger.debug(`Already in mode ${newMode}, no transition needed`);
-            return true;
-        }
-
-        const previousMode = this.state.currentMode;
-        
-        // Create transition record
-        const transition: ModeTransition = {
-            from: previousMode,
-            to: newMode,
-            timestamp: new Date(),
-            reason,
-            cityId,
-        };
-
-        logger.info(`🔄 Mode transition: ${previousMode} → ${newMode}`, { reason, cityId });
-
-        // Exit current mode
-        await this.exitCurrentMode();
-
-        // Update state
-        this.state.previousMode = previousMode;
-        this.state.currentMode = newMode;
-        this.state.modeEntryTime = new Date();
-        this.state.lastTransition = transition;
-
-        // Enter new mode
-        await this.enterNewMode(newMode, cityId);
-
-        // Emit transition event
-        this.emit('modeTransition', transition);
-
-        return true;
-    }
-
-    /**
-     * Exit the current mode - cleanup
-     */
-    private async exitCurrentMode(): Promise<void> {
-        switch (this.state.currentMode) {
-            case 'OPEN_METEO_POLLING':
-                this.exitOpenMeteoPolling();
-                break;
-            case 'METEOSOURCE_POLLING':
-                this.exitMeteosourcePolling();
-                break;
-            case 'WEBSOCKET_REST':
-                await this.exitWebsocketRest();
-                break;
-            case 'ROUND_ROBIN_BURST':
-                this.exitRoundRobinBurst();
-                break;
-        }
-
-        // Record mode stats
-        const duration = Date.now() - this.state.modeEntryTime.getTime();
-        const stats: ModeStats = {
-            mode: this.state.currentMode,
-            entryTime: this.state.modeEntryTime,
-            exitTime: new Date(),
-            durationMs: duration,
-            apiCalls: this.apiTracker.getTotalCallsToday(),
-            forecastChanges: 0, // Would track separately
-            webhooksReceived: 0, // Would track separately
-        };
-        this.state.modeHistory.push(stats);
-    }
-
-    /**
-     * Enter a new mode
-     */
-    private async enterNewMode(mode: HybridWeatherMode, cityId?: string): Promise<void> {
-        switch (mode) {
-            case 'OPEN_METEO_POLLING':
-                this.enterOpenMeteoPolling();
-                break;
-            case 'METEOSOURCE_POLLING':
-                this.enterMeteosourcePolling();
-                break;
-            case 'WEBSOCKET_REST':
-                await this.enterWebsocketRest(cityId);
-                break;
-            case 'ROUND_ROBIN_BURST':
-                this.enterRoundRobinBurst(cityId);
-                break;
-        }
-    }
-
-    // ====================
-    // OPEN_METEO_POLLING Mode
-    // ====================
-
-    /**
-     * Enter OPEN_METEO_POLLING mode
-     */
-    private enterOpenMeteoPolling(): void {
-        logger.info('📡 Entering OPEN_METEO_POLLING mode', {
-            urgency: this.state.currentUrgency,
-            pollInterval: this.currentPollInterval,
-        });
-        
-        this.openMeteoPollingActive = true;
-        
-        // Start polling with current urgency interval
-        this.startOpenMeteoPolling(this.currentPollInterval);
-
-        this.emit('modeEntered', { mode: 'OPEN_METEO_POLLING', urgency: this.state.currentUrgency });
-    }
-
-    /**
-     * Start Open-Meteo polling with specified interval
-     */
-    private startOpenMeteoPolling(intervalMs: number): void {
-        this.stopOpenMeteoPolling();
-        
-        logger.info(`Starting Open-Meteo polling every ${intervalMs}ms`);
-        
-        // Execute first poll immediately
-        this.executeOpenMeteoPoll();
-        
-        // Set up interval
-        this.openMeteoPollIntervalId = setInterval(() => {
-            this.executeOpenMeteoPoll();
-        }, intervalMs);
-    }
-
-    /**
-     * Update Open-Meteo polling interval
-     */
-    private updateOpenMeteoPollingInterval(intervalMs: number): void {
-        if (this.openMeteoPollingActive) {
-            logger.info(`Updating Open-Meteo poll interval to ${intervalMs}ms`);
-            this.startOpenMeteoPolling(intervalMs);
-        }
-    }
-
-    /**
-     * Execute a single Open-Meteo poll using TRUE BATCH REQUESTS
-     * 
-     * MANDATORY REQUIREMENT: All cities must be queried in ONE request
-     * - Uses comma-separated latitude and longitude parameters
-     * - One batched request counts as exactly ONE API call
-     * - No per-city requests allowed (critical for 10,000 daily limit)
-     * 
-     * CRITICAL LATENCY REQUIREMENT - SUB-5-SECOND REACTION TIME:
-     * - During HIGH/MEDIUM urgency windows: useCache=false ensures fresh data
-     * - Polling every 2s (HIGH) or 5s (MEDIUM) with no cache delay
-     * - This guarantees sub-5-second detection of forecast changes
-     * - Cache is ONLY used during LOW urgency / WebSocket rest mode
-     */
-    private async executeOpenMeteoPoll(): Promise<void> {
-        // Check if Open-Meteo quota exceeded
-        if (this.apiTracker.isQuotaExceeded('openmeteo')) {
-            logger.warn('Open-Meteo quota exceeded, skipping poll');
-            return;
-        }
-
-        // Get active cities
-        let cities = Array.from(this.state.activeCities);
-        if (cities.length === 0) {
-            // No active cities, poll all known cities from dataStore
-            const allMarkets = this.dataStore.getAllMarkets();
-            const citySet = new Set<string>();
-            for (const market of allMarkets) {
-                if (market.city) {
-                    citySet.add(market.city.toLowerCase().replace(/\s+/g, '_'));
-                }
-            }
-            cities = Array.from(citySet);
-        }
-
-        if (cities.length === 0) {
-            logger.debug('No cities to poll in Open-Meteo mode');
-            return;
-        }
-
-        // Resolve city IDs to CityLocation objects
-        const cityLocations: Array<{ cityId: string; city: CityLocation }> = [];
-        for (const cityId of cities) {
-            const city = findCity(cityId);
-            if (city) {
-                cityLocations.push({ cityId, city });
-            }
-        }
-
-        if (cityLocations.length === 0) {
-            logger.debug('No valid city locations found for Open-Meteo batch poll');
-            return;
-        }
-
-        try {
-            // Get OpenMeteoClient directly for batch support
-            const openMeteoProvider = this.providerManager.getProvider('openmeteo');
-            
-            // Check if OpenMeteo client has batch support
-            if (!('getHourlyForecastBatch' in openMeteoProvider)) {
-                logger.error('OpenMeteo provider does not support batch requests');
-                return;
-            }
-
-            const openMeteoClient = openMeteoProvider as import('../weather/openmeteo-client.js').OpenMeteoClient;
-
-            // Build batch request locations
-            const locations = cityLocations.map(({ city }) => ({
-                coords: city.coordinates,
-                locationName: city.name
-            }));
-
-            // Check cache stats before request
-            const cacheStatsBefore = openMeteoClient.getCacheStats?.();
-            
-            // CRITICAL: Disable cache during HIGH/MEDIUM urgency for sub-5-second reaction time
-            // During LOW urgency, cache is used to conserve API calls
-            const useCache = this.state.currentUrgency === 'LOW';
-            
-            logger.info(`🌤️ Open-Meteo BATCH request: ${locations.length} cities in 1 API call`, {
-                cities: locations.map(l => l.locationName).join(', '),
-                urgency: this.state.currentUrgency,
-                useCache,
-                cacheSize: cacheStatsBefore?.size || 0,
-                cacheHitRate: cacheStatsBefore ? `${cacheStatsBefore.hitRate.toFixed(1)}%` : 'N/A',
-            });
-
-            // Execute SINGLE batch request
-            // useCache=false during HIGH/MEDIUM urgency ensures sub-5-second detection of forecast changes
-            const batchResults = await openMeteoClient.getHourlyForecastBatch(locations, useCache);
-
-            // Record exactly ONE API call for the entire batch
-            // Note: If all locations were cached, this might not actually make an API call
-            this.apiTracker.recordCall('openmeteo', true);
-
-            // Get cache stats after request
-            const cacheStatsAfter = openMeteoClient.getCacheStats?.();
-
-            // Distribute results back to individual cities and emit events
-            for (let i = 0; i < batchResults.length && i < cityLocations.length; i++) {
-                const result = batchResults[i];
-                const { cityId } = cityLocations[i];
-
-                // Emit provider fetch event (compatible with existing event types)
-                eventBus.emit({
-                    type: 'PROVIDER_FETCH',
-                    payload: {
-                        cityId,
-                        provider: 'open-meteo',
-                        success: true,
-                        hasChanges: true,
-                    },
-                });
-
-                logger.debug(`Open-Meteo batch result distributed for ${cityId}`);
-            }
-
-            logger.info(`✅ Open-Meteo batch poll complete: ${batchResults.length} cities, 1 API call`, {
-                cacheHitRate: cacheStatsAfter ? `${cacheStatsAfter.hitRate.toFixed(1)}%` : 'N/A',
-                cacheSize: cacheStatsAfter?.size || 0,
-            });
-
-        } catch (error) {
-            // Record single failed API call for the batch
-            this.apiTracker.recordCall('openmeteo', false);
-            logger.error('Open-Meteo batch poll failed', {
-                cityCount: cityLocations.length,
-                error: (error as Error).message,
-            });
-        }
-    }
-
-    /**
-     * Exit OPEN_METEO_POLLING mode
-     */
-    private exitOpenMeteoPolling(): void {
-        logger.info('📡 Exiting OPEN_METEO_POLLING mode');
-        
-        this.openMeteoPollingActive = false;
-        this.stopOpenMeteoPolling();
-    }
-
-    /**
-     * Stop Open-Meteo polling
-     */
-    private stopOpenMeteoPolling(): void {
-        if (this.openMeteoPollIntervalId) {
-            clearInterval(this.openMeteoPollIntervalId);
-            this.openMeteoPollIntervalId = null;
-        }
-    }
-
-    // ====================
-    // METEOSOURCE_POLLING Mode
-    // ====================
-
-    /**
-     * Enter METEOSOURCE_POLLING mode
-     */
-    private enterMeteosourcePolling(): void {
-        const pollInterval = MODE_CONFIGS.METEOSOURCE_POLLING.pollIntervalMs || 1000;
-        logger.info('📡 Entering METEOSOURCE_POLLING mode', {
-            pollInterval,
-            description: '1-second polling with Meteosource batch requests',
-        });
-
-        this.meteosourcePollingActive = true;
-
-        // Start polling with configured interval (1 second)
-        this.startMeteosourcePolling(pollInterval);
-
-        this.emit('modeEntered', { mode: 'METEOSOURCE_POLLING' });
-    }
-
-    /**
-     * Start Meteosource polling with specified interval
-     */
-    private startMeteosourcePolling(intervalMs: number): void {
-        this.stopMeteosourcePolling();
-        
-        logger.info(`Starting Meteosource polling every ${intervalMs}ms`);
-        
-        // Execute first poll immediately
-        this.executeMeteosourcePoll();
-        
-        // Set up interval
-        this.meteosourcePollIntervalId = setInterval(() => {
-            this.executeMeteosourcePoll();
-        }, intervalMs);
-    }
-
-    /**
-     * Execute a single Meteosource poll using BATCH REQUESTS
-     * 
-     * METEOSOURCE API LIMITS:
-     * - Free tier: 500 calls/day
-     * - We use batch requests to minimize API calls
-     * - 60-second cache TTL to avoid redundant calls
-     * 
-     * CRITICAL LATENCY REQUIREMENT:
-     * - 2-second polling ensures sub-5-second detection
-     * - Cache disabled during active polling for fresh data
-     */
-    private async executeMeteosourcePoll(): Promise<void> {
-        // Check if Meteosource is configured
-        const meteosourceProvider = this.providerManager.getProvider('meteosource');
-        if (!meteosourceProvider) {
-            logger.warn('Meteosource provider not available, skipping poll');
-            return;
-        }
-
-        // Get active cities
-        let cities = Array.from(this.state.activeCities);
-        if (cities.length === 0) {
-            // No active cities, poll all known cities from dataStore
-            const allMarkets = this.dataStore.getAllMarkets();
-            const citySet = new Set<string>();
-            for (const market of allMarkets) {
-                if (market.city) {
-                    citySet.add(market.city.toLowerCase().replace(/\s+/g, '_'));
-                }
-            }
-            cities = Array.from(citySet);
-        }
-
-        if (cities.length === 0) {
-            logger.debug('No cities to poll in Meteosource mode');
-            return;
-        }
-
-        // Resolve city IDs to CityLocation objects
-        const cityLocations: Array<{ cityId: string; city: CityLocation }> = [];
-        for (const cityId of cities) {
-            const city = findCity(cityId);
-            if (city) {
-                cityLocations.push({ cityId, city });
-            }
-        }
-
-        if (cityLocations.length === 0) {
-            logger.debug('No valid city locations found for Meteosource batch poll');
-            return;
-        }
-
-        try {
-            // Check if Meteosource client has batch support
-            if (!('getHourlyForecastBatch' in meteosourceProvider)) {
-                logger.error('Meteosource provider does not support batch requests');
-                return;
-            }
-
-            const meteosourceClient = meteosourceProvider as import('../weather/additional-providers.js').MeteosourceProvider;
-
-            // Build batch request locations
-            const locations = cityLocations.map(({ city }) => ({
-                coords: city.coordinates,
-                locationName: city.name
-            }));
-
-            logger.info(`🌤️ Meteosource BATCH request: ${locations.length} cities`, {
-                cities: locations.map(l => l.locationName).join(', '),
-            });
-
-            // Execute batch request with cache disabled for fresh data
-            // Meteosource has its own internal rate limiting
-            const batchResults = await meteosourceClient.getHourlyForecastBatch(locations, false);
-
-            // Record API calls (each city call counts separately for Meteosource)
-            for (let i = 0; i < batchResults.length; i++) {
-                this.apiTracker.recordCall('meteosource', true);
-            }
-
-            // Distribute results back to individual cities and emit events
-            for (let i = 0; i < batchResults.length && i < cityLocations.length; i++) {
-                const result = batchResults[i];
-                const { cityId } = cityLocations[i];
-
-                // Emit provider fetch event
-                eventBus.emit({
-                    type: 'PROVIDER_FETCH',
-                    payload: {
-                        cityId,
-                        provider: 'meteosource',
-                        success: true,
-                        hasChanges: true,
-                    },
-                });
-
-                logger.debug(`Meteosource batch result distributed for ${cityId}`);
-            }
-
-            logger.info(`✅ Meteosource batch poll complete: ${batchResults.length} cities`);
-
-        } catch (error) {
-            // Record failed API calls
-            for (let i = 0; i < cityLocations.length; i++) {
-                this.apiTracker.recordCall('meteosource', false);
-            }
-            logger.error('Meteosource batch poll failed', {
-                cityCount: cityLocations.length,
-                error: (error as Error).message,
-            });
-        }
-    }
-
-    /**
-     * Exit METEOSOURCE_POLLING mode
-     */
-    private exitMeteosourcePolling(): void {
-        logger.info('📡 Exiting METEOSOURCE_POLLING mode');
-        
-        this.meteosourcePollingActive = false;
-        this.stopMeteosourcePolling();
-    }
-    
-    /**
-     * Stop Meteosource polling
-     */
-    private stopMeteosourcePolling(): void {
-        if (this.meteosourcePollIntervalId) {
-            clearInterval(this.meteosourcePollIntervalId);
-            this.meteosourcePollIntervalId = null;
-        }
-    }
-
-    // ====================
-    // WEBSOCKET_REST Mode
-    // ====================
-
-    /**
-     * Enter WEBSOCKET_REST mode
-     */
-    private async enterWebsocketRest(cityId?: string): Promise<void> {
-        logger.info('🔌 Entering WEBSOCKET_REST mode (PURE REST - NO POLLING)', { cityId });
-        
-        this.websocketRestActive = true;
-        this.websocketCityId = cityId || null;
-
-        // Note: We maintain WebSocket connection but do NO polling
-        // Forecast updates come exclusively via WebSocket/webhook
-
-        this.emit('modeEntered', { mode: 'WEBSOCKET_REST', cityId });
-    }
-
-    /**
-     * Exit WEBSOCKET_REST mode
-     */
-    private async exitWebsocketRest(): Promise<void> {
-        logger.info('🔌 Exiting WEBSOCKET_REST mode');
-        
-        this.websocketRestActive = false;
-        this.websocketCityId = null;
-    }
-
-    // ====================
-    // ROUND_ROBIN_BURST Mode
-    // ====================
-
-    /**
-     * Enter ROUND_ROBIN_BURST mode
-     */
-    private enterRoundRobinBurst(cityId?: string): void {
-        logger.info('⚡ Entering ROUND_ROBIN_BURST mode', { 
-            cityId,
-            duration: '60 seconds',
-            rate: '1 req/sec',
-        });
-        
-        this.burstModeActive = true;
-        this.burstCityId = cityId || null;
-        this.burstProviderIndex = 0;
-        this.burstRequestCount = 0;
-        this.burstStartTime = new Date();
-        this.state.burstStartTime = new Date();
-        this.state.burstRequestsCompleted = 0;
-
-        // Notify API tracker
-        this.apiTracker.enterBurstMode();
-
-        // Start burst polling (1 req/sec for 60 seconds)
-        this.startBurstPolling();
-
-        // Set timeout to end burst after exactly 60 seconds
-        setTimeout(() => {
-            this.handleBurstComplete();
-        }, BURST_CONFIG.durationMs);
-
-        this.emit('modeEntered', { mode: 'ROUND_ROBIN_BURST', cityId });
-    }
-
-    /**
-     * Exit ROUND_ROBIN_BURST mode
-     */
-    private exitRoundRobinBurst(): void {
-        logger.info('⚡ Exiting ROUND_ROBIN_BURST mode');
-        
-        this.stopBurstMode();
-        this.burstCityId = null;
-        this.burstRequestCount = 0;
-    }
-
-    /**
-     * Start burst polling across providers
-     * 1 request per second, rotating through providers in order
-     */
-    private startBurstPolling(): void {
-        // Execute first poll immediately
-        this.executeBurstPoll();
-        
-        // Set up interval for 1 request per second
-        this.burstIntervalId = setInterval(() => {
-            this.executeBurstPoll();
-        }, BURST_CONFIG.intervalMs);
-    }
-
-    /**
-     * Stop burst polling
-     */
-    private stopBurstMode(): void {
-        this.burstModeActive = false;
-        
-        if (this.burstIntervalId) {
-            clearInterval(this.burstIntervalId);
-            this.burstIntervalId = null;
-        }
-
-        // Notify API tracker
-        this.apiTracker.exitBurstMode();
-    }
-
-    /**
-     * Execute a single burst poll
-     * Rotates through providers: Open-Meteo → Tomorrow.io → OpenWeather
-     * 
-     * CRITICAL LATENCY REQUIREMENT - SUB-5-SECOND REACTION TIME:
-     * - Burst mode is triggered by WebSocket-detected forecast changes
-     * - ALWAYS uses useCache=false to get fresh data immediately
-     * - This ensures immediate response to forecast updates
-     */
-    private async executeBurstPoll(): Promise<void> {
-        if (!this.burstModeActive) {
-            return;
-        }
-
-        // Check if we've reached 60 seconds
-        if (this.burstStartTime) {
-            const elapsed = Date.now() - this.burstStartTime.getTime();
-            if (elapsed >= BURST_CONFIG.durationMs) {
-                this.handleBurstComplete();
-                return;
-            }
-        }
-
-        // Get current provider in rotation
-        const providerName = BURST_CONFIG.providers[this.burstProviderIndex];
-        
-        // Skip Open-Meteo if quota exceeded
-        if (providerName === 'openmeteo' && this.apiTracker.isQuotaExceeded('openmeteo')) {
-            logger.warn('Open-Meteo quota exceeded, skipping in burst rotation');
-            this.advanceBurstProvider();
-            return;
-        }
-
-        // Skip if provider is rate limited
-        if (this.apiTracker.isRateLimited(providerName)) {
-            logger.debug(`Skipping rate-limited provider in burst: ${providerName}`);
-            this.advanceBurstProvider();
-            return;
-        }
-
-        // Get cities to poll
-        const cities = this.burstCityId 
-            ? [this.burstCityId]
-            : Array.from(this.state.activeCities);
-
-        if (cities.length === 0) {
-            // Fallback to all known cities
-            const allMarkets = this.dataStore.getAllMarkets();
-            const citySet = new Set<string>();
-            for (const market of allMarkets) {
-                if (market.city) {
-                    citySet.add(market.city.toLowerCase().replace(/\s+/g, '_'));
-                }
-            }
-            cities.push(...Array.from(citySet));
-        }
-
-        if (cities.length === 0) {
-            logger.debug('No cities to poll in burst mode');
-            this.advanceBurstProvider();
-            return;
-        }
-
-        // Execute poll for current provider
-        const cityId = cities[0]; // Poll first city in rotation
-        const city = findCity(cityId);
-        
-        if (!city) {
-            logger.warn(`City not found for burst poll: ${cityId}`);
-            this.advanceBurstProvider();
-            return;
-        }
-
-        try {
-            let success = false;
-
-            switch (providerName) {
-                case 'openmeteo':
-                    // Use OpenMeteoClient directly with useCache=false for burst mode
-                    // This ensures immediate detection of forecast changes
-                    const openMeteoProvider = this.providerManager.getProvider('openmeteo');
-                    if ('getHourlyForecast' in openMeteoProvider) {
-                        const openMeteoClient = openMeteoProvider as import('../weather/openmeteo-client.js').OpenMeteoClient;
-                        // CRITICAL: useCache=false ensures fresh data during burst
-                        await openMeteoClient.getHourlyForecast(city.coordinates, false);
-                        success = true;
-                    }
-                    break;
-                case 'tomorrow':
-                    // Tomorrow.io - use provider manager
-                    const tomorrowProvider = this.providerManager.getProvider(cityId, 0);
-                    if (tomorrowProvider && tomorrowProvider.name.toLowerCase().includes('tomorrow')) {
-                        await tomorrowProvider.getHourlyForecast(city.coordinates);
-                        success = true;
-                    }
-                    break;
-                case 'openweather':
-                    // OpenWeather - use provider manager
-                    const openWeatherProvider = this.providerManager.getProvider(cityId, 1);
-                    if (openWeatherProvider && openWeatherProvider.name.toLowerCase().includes('openweather')) {
-                        await openWeatherProvider.getHourlyForecast(city.coordinates);
-                        success = true;
-                    }
-                    break;
-            }
-
-            if (success) {
-                this.apiTracker.recordCall(providerName, true);
-                this.burstRequestCount++;
-                this.state.burstRequestsCompleted++;
-                
-                logger.debug(`Burst poll: ${providerName} for ${cityId} (${this.burstRequestCount}/60)`);
-
-                // Emit event for forecast update
-                eventBus.emit({
-                    type: 'PROVIDER_FETCH',
-                    payload: {
-                        cityId,
-                        provider: providerName,
-                        success: true,
-                        hasChanges: true,
-                    },
-                });
-            }
-        } catch (error) {
-            this.apiTracker.recordCall(providerName, false);
-            logger.error(`Burst poll failed: ${providerName}`, {
-                error: (error as Error).message,
-                cityId,
-            });
-
-            // Emit failure event
-            eventBus.emit({
-                type: 'PROVIDER_FETCH',
-                payload: {
-                    cityId,
-                    provider: providerName,
-                    success: false,
-                    hasChanges: false,
-                    error: (error as Error).message,
-                },
-            });
-        }
-
-        // Advance to next provider in rotation
-        this.advanceBurstProvider();
-    }
-
-    /**
-     * Advance to next provider in burst rotation
-     */
-    private advanceBurstProvider(): void {
-        this.burstProviderIndex = (this.burstProviderIndex + 1) % BURST_CONFIG.providers.length;
-    }
-
-    /**
-     * Handle burst completion (after 60 seconds)
-     */
-    private async handleBurstComplete(): Promise<void> {
-        logger.info('✅ Burst mode completed', {
-            totalRequests: this.burstRequestCount,
-            duration: '60 seconds',
-        });
-
-        // Stop burst mode
-        this.stopBurstMode();
-
-        // Transition back to appropriate mode based on urgency
-        // HIGH urgency: Open-Meteo polling (1 second)
-        // MEDIUM/LOW urgency: Meteosource polling (1 second)
-        if (this.state.currentUrgency === 'HIGH') {
-            await this.transitionTo('OPEN_METEO_POLLING', 'burst_complete');
-        } else {
-            await this.transitionTo('METEOSOURCE_POLLING', 'burst_complete');
-        }
-    }
-
-    // ====================
-    // Event Handlers
-    // ====================
-
-    /**
-     * Handle webhook trigger from Tomorrow.io
-     */
-    private async handleWebhookTrigger(cityId: string, location: Coordinates): Promise<void> {
-        logger.info(`📨 Webhook trigger received for ${cityId}`);
-
-        // Add city to active set
-        this.state.activeCities.add(cityId);
-
-        // Webhook triggers are logged but don't change polling mode
-        // Polling mode is determined by urgency windows
-        logger.debug(`Webhook received in ${this.state.currentMode} mode for ${cityId}`);
-        // Note: We don't trigger burst mode on webhook - only on forecast changes
-    }
-
-    /**
-     * Handle forecast change detected via WebSocket
-     * This is the ONLY trigger for burst mode (not during HIGH/MEDIUM urgency)
-     */
-    private async handleWebSocketForecastChange(cityId: string, changeAmount: number): Promise<void> {
-        const significantChangeThreshold = 2.0; // degrees or percentage points
-
-        // Only trigger burst if:
-        // 1. Change is significant
-        // 2. We're in LOW urgency (not in HIGH/MEDIUM window)
-        // 3. We're not already in burst mode
-        if (Math.abs(changeAmount) >= significantChangeThreshold &&
-            this.state.currentUrgency === 'LOW' &&
-            this.state.currentMode !== 'ROUND_ROBIN_BURST') {
-            
-            logger.info(`📊 Significant forecast change via WebSocket: ${changeAmount} for ${cityId}`, {
-                urgency: this.state.currentUrgency,
-            });
-
-            // Trigger burst mode
-            await this.transitionTo('ROUND_ROBIN_BURST', 'forecast_change', cityId);
-        }
+    public getCurrentDetectionWindow(): HybridControllerState['currentDetectionWindow'] {
+        return this.state.currentDetectionWindow;
     }
 
     /**
@@ -1282,64 +1771,45 @@ export class HybridWeatherController extends EventEmitter {
      */
     public async triggerBurstMode(cityId: string): Promise<void> {
         logger.info(`🚀 Manual burst mode triggered for ${cityId}`);
-        await this.transitionTo('ROUND_ROBIN_BURST', 'manual', cityId);
+        await this.transitionTo('BURST_MODE', 'manual', cityId);
     }
 
     /**
-     * Return to normal mode (Meteosource or Open-Meteo based on urgency)
-     * This enables auto-switching and transitions to the appropriate mode
+     * Return to auto mode
      */
-    public async returnToNormal(): Promise<void> {
-        logger.info('⏮️ Returning to auto mode - auto-switching enabled');
-
-        // Enable auto mode
+    public async returnToAutoMode(): Promise<void> {
+        logger.info('⏮️ Returning to auto mode');
         this.state.isAutoMode = true;
-
-        // Immediately check urgency and transition to appropriate mode
-        const now = new Date();
-        const utcHour = now.getUTCHours();
-        const utcMinute = now.getUTCMinutes();
-        const currentTime = utcHour * 60 + utcMinute;
-
-        let targetUrgency: UrgencyLevel = 'LOW';
-        for (const window of URGENCY_WINDOWS) {
-            const startTime = window.startHour * 60 + window.startMinute;
-            const endTime = window.endHour * 60 + window.endMinute;
-            if (currentTime >= startTime && currentTime < endTime) {
-                targetUrgency = window.level;
-                break;
-            }
-        }
-
-        // Update urgency state
-        this.state.currentUrgency = targetUrgency;
-
-        // Transition to appropriate mode based on urgency
-        // HIGH urgency: Open-Meteo polling (1 second)
-        // MEDIUM/LOW urgency: Meteosource polling (1 second)
-        if (targetUrgency === 'HIGH') {
-            await this.transitionTo('OPEN_METEO_POLLING', 'urgency_window_entered');
-        } else {
-            await this.transitionTo('METEOSOURCE_POLLING', targetUrgency === 'MEDIUM' ? 'urgency_window_entered' : 'manual');
-        }
-
-        this.emit('autoModeEnabled', { timestamp: new Date(), urgency: targetUrgency });
+        
+        // Check current detection window status
+        this.checkDetectionWindows();
     }
 
     /**
-     * Force transition to a specific mode (for testing/emergencies)
-     * This disables auto-switching until returnToNormal() is called
+     * Force transition to a specific mode (disables auto mode)
      */
     public async forceMode(mode: HybridWeatherMode, reason: string = 'manual'): Promise<void> {
         logger.warn(`🚨 Force mode transition to ${mode}`, { reason });
         
-        // Disable auto mode when forcing a specific mode
         this.state.isAutoMode = false;
-        logger.info('🚫 Auto-switching disabled - manual mode active');
+        logger.info('🚫 Auto mode disabled - manual mode active');
         
         await this.transitionTo(mode, reason as ModeTransitionReason);
-        
-        this.emit('autoModeDisabled', { timestamp: new Date(), forcedMode: mode, reason });
+    }
+
+    /**
+     * Get reconciliation result for a city
+     */
+    public getReconciliationResult(cityId: string): ReconciliationResult | null {
+        return this.reconcileSources(cityId);
+    }
+
+    /**
+     * Get historical learning data for a model
+     */
+    public getHistoricalData(model: ModelType, cycleHour: number): HistoricalPublicationData | undefined {
+        const key = `${model}_${cycleHour}`;
+        return this.historicalData.get(key);
     }
 
     /**
@@ -1351,13 +1821,24 @@ export class HybridWeatherController extends EventEmitter {
         modeDuration: number;
         apiStatus: ReturnType<ApiCallTracker['getStatusReport']>;
         burstActive: boolean;
-        websocketActive: boolean;
-        openMeteoPollingActive: boolean;
+        pollingActive: boolean;
+        earlyDetectionActive: boolean;
         burstProgress: { elapsedMs: number; requestsCompleted: number; totalRequests: number } | null;
-        nextUrgencyWindow: { level: UrgencyLevel; timeUntil: string } | null;
+        nextDetectionWindow: { model: ModelType; timeUntil: string } | null;
         isAutoMode: boolean;
-        cacheStats: { size: number; hitRate: number; hits: number; misses: number } | null;
-        nextModelUpdate: string | null;
+        cacheStats: { size: number };
+        fileBasedIngestion: {
+            enabled: boolean;
+            fileConfirmedCities: number;
+        };
+        dataSourceStats: {
+            cachedCities: number;
+            reconciliationReady: number;
+        };
+        historicalLearning: {
+            modelsTracked: number;
+            averageReliability: number;
+        };
     } {
         // Calculate burst progress if active
         let burstProgress = null;
@@ -1366,44 +1847,27 @@ export class HybridWeatherController extends EventEmitter {
             burstProgress = {
                 elapsedMs,
                 requestsCompleted: this.burstRequestCount,
-                totalRequests: 60, // 1 req/sec for 60 seconds
+                totalRequests: 30, // 60 seconds / 2 second interval
             };
         }
 
-        // Calculate next urgency window
-        const nextWindow = this.getNextUrgencyWindow();
+        // Calculate next detection window
+        const nextWindow = this.getNextDetectionWindow();
         
-        // Get cache stats from OpenMeteo client
-        let cacheStats = null;
-        let nextModelUpdate: string | null = null;
-        try {
-            const openMeteoProvider = this.providerManager.getProvider('openmeteo');
-            if (openMeteoProvider && 'getCacheStats' in openMeteoProvider) {
-                const openMeteoClient = openMeteoProvider as import('../weather/openmeteo-client.js').OpenMeteoClient;
-                const stats = openMeteoClient.getCacheStats?.();
-                if (stats) {
-                    cacheStats = {
-                        size: stats.size,
-                        hitRate: stats.hitRate,
-                        hits: stats.hits,
-                        misses: stats.misses,
-                    };
-                }
-                
-                // Get next model update time
-                const nextUpdate = openMeteoClient.getNextModelUpdateTime?.();
-                if (nextUpdate) {
-                    const now = new Date();
-                    const diffMs = nextUpdate.getTime() - now.getTime();
-                    const diffMins = Math.round(diffMs / 60000);
-                    nextModelUpdate = diffMins > 60 
-                        ? `${Math.floor(diffMins / 60)}h ${diffMins % 60}m`
-                        : `${diffMins}m`;
-                }
-            }
-        } catch (e) {
-            // Ignore errors when getting cache stats
+        // Calculate data source stats
+        let reconciliationReady = 0;
+        for (const [cityId, sources] of this.sourceDataCache.entries()) {
+            if (sources.size >= 2) reconciliationReady++;
         }
+        
+        // Calculate historical learning stats
+        let totalReliability = 0;
+        for (const data of this.historicalData.values()) {
+            totalReliability += data.reliabilityScore;
+        }
+        const avgReliability = this.historicalData.size > 0 
+            ? totalReliability / this.historicalData.size 
+            : 0;
 
         return {
             state: this.getState(),
@@ -1411,41 +1875,54 @@ export class HybridWeatherController extends EventEmitter {
             modeDuration: this.getCurrentModeDuration(),
             apiStatus: this.apiTracker.getStatusReport(),
             burstActive: this.burstModeActive,
-            websocketActive: this.websocketRestActive,
-            openMeteoPollingActive: this.openMeteoPollingActive,
+            pollingActive: this.pollingActive,
+            earlyDetectionActive: this.earlyDetectionActive,
             burstProgress,
-            nextUrgencyWindow: nextWindow,
+            nextDetectionWindow: nextWindow,
             isAutoMode: this.state.isAutoMode,
-            cacheStats,
-            nextModelUpdate,
+            cacheStats: { size: this.forecastCache.size },
+            fileBasedIngestion: {
+                enabled: this.fileBasedIngestionEnabled,
+                fileConfirmedCities: this.fileConfirmedCities.size,
+            },
+            dataSourceStats: {
+                cachedCities: this.sourceDataCache.size,
+                reconciliationReady,
+            },
+            historicalLearning: {
+                modelsTracked: this.historicalData.size,
+                averageReliability: parseFloat(avgReliability.toFixed(2)),
+            }
         };
     }
 
     /**
-     * Get next urgency window information
+     * Get next detection window information
      */
-    private getNextUrgencyWindow(): { level: UrgencyLevel; timeUntil: string } | null {
+    private getNextDetectionWindow(): { model: ModelType; timeUntil: string } | null {
         const now = new Date();
         const utcHour = now.getUTCHours();
         const utcMinute = now.getUTCMinutes();
-        const currentTime = utcHour * 60 + utcMinute;
+        const currentTimeMinutes = utcHour * 60 + utcMinute;
 
-        // Find next window
-        let nextWindow: UrgencyWindow | null = null;
+        let nextWindow: { model: ModelType; startMinutes: number } | null = null;
         let minTimeDiff = Infinity;
 
-        for (const window of URGENCY_WINDOWS) {
-            const startTime = window.startHour * 60 + window.startMinute;
-            let timeDiff = startTime - currentTime;
+        for (const config of DETECTION_WINDOW_CONFIGS) {
+            const cyclesSinceMidnight = Math.floor(currentTimeMinutes / (config.cycleIntervalHours * 60));
+            const cycleStartMinutes = cyclesSinceMidnight * config.cycleIntervalHours * 60;
+            const windowStartMinutes = cycleStartMinutes + config.startOffsetMinutes;
+
+            let timeDiff = windowStartMinutes - currentTimeMinutes;
             
-            // If window already passed today, check tomorrow
+            // If window already passed today, check next cycle
             if (timeDiff < 0) {
-                timeDiff += 24 * 60; // Add 24 hours
+                timeDiff += config.cycleIntervalHours * 60;
             }
 
             if (timeDiff < minTimeDiff) {
                 minTimeDiff = timeDiff;
-                nextWindow = window;
+                nextWindow = { model: config.model, startMinutes: windowStartMinutes };
             }
         }
 
@@ -1456,8 +1933,75 @@ export class HybridWeatherController extends EventEmitter {
         const timeUntil = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 
         return {
-            level: nextWindow.level,
+            model: nextWindow.model,
             timeUntil,
         };
     }
+
+    /**
+     * Get cached forecast for a specific city
+     */
+    public getCachedForecast(cityId: string): {
+        cityId: string;
+        cityName: string;
+        temperatureC: number;
+        temperatureF: number;
+        windSpeedMph: number;
+        precipitationMm: number;
+        timestamp: Date;
+        source: DataSourceType;
+        confidence: number;
+    } | null {
+        const cached = this.forecastCache.get(cityId);
+        if (!cached) {
+            return null;
+        }
+
+        if (cached.expiresAt.getTime() < Date.now()) {
+            this.forecastCache.delete(cityId);
+            return null;
+        }
+
+        return cached.data;
+    }
+
+    /**
+     * Get all cached forecasts
+     */
+    public getAllCachedForecasts(): Array<{
+        cityId: string;
+        cityName: string;
+        temperatureC: number;
+        temperatureF: number;
+        windSpeedMph: number;
+        precipitationMm: number;
+        timestamp: Date;
+        source: DataSourceType;
+        confidence: number;
+    }> {
+        const now = Date.now();
+        const results: Array<{
+            cityId: string;
+            cityName: string;
+            temperatureC: number;
+            temperatureF: number;
+            windSpeedMph: number;
+            precipitationMm: number;
+            timestamp: Date;
+            source: DataSourceType;
+            confidence: number;
+        }> = [];
+
+        for (const [cityId, entry] of this.forecastCache.entries()) {
+            if (entry.expiresAt.getTime() >= now) {
+                results.push(entry.data);
+            } else {
+                this.forecastCache.delete(cityId);
+            }
+        }
+
+        return results;
+    }
 }
+
+export default HybridWeatherController;

@@ -69,7 +69,7 @@ export class PortfolioSimulator {
     private peakValue: number;
     private maxDrawdown: number = 0;
 
-    constructor(startingCash: number = 1000000) {
+    constructor(startingCash: number = 10000) {
         this.startingCash = startingCash;
         this.cash = startingCash;
         this.peakValue = startingCash;

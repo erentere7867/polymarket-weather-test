@@ -1,13 +1,11 @@
 /**
  * Forecast Monitor
  * Polls weather APIs and updates DataStore with latest forecasts
- * Supports city priority system for high-volatility markets
  * 
  * Webhook Integration:
  * - Integrates with event bus to listen for FORECAST_TRIGGER events
  * - Delegates to FetchModeController when entering FETCH_MODE
  * - Uses IdlePollingService when in IDLE mode
- * - Maintains backward compatibility with existing polling
  */
 
 import { WeatherService } from '../weather/index.js';
@@ -22,33 +20,15 @@ import { ForecastStateMachine, forecastStateMachine } from './forecast-state-mac
 import { FetchModeController } from './fetch-mode-controller.js';
 import { IdlePollingService } from './idle-polling-service.js';
 
-interface CityPriority {
-    city: string;
-    isHighPriority: boolean;
-    volatilityScore: number;
-    lastForecastChange: Date | null;
-    changeHistory: Date[]; // Track timestamps of all changes for time-based analysis
-}
-
 export class ForecastMonitor {
     private weatherService: WeatherService;
     private store: DataStore;
     private regularPollIntervalMs: number;
-    private highPriorityPollIntervalMs: number;
     private isRunning: boolean = false;
     private regularPollTimeout: NodeJS.Timeout | null = null;
-    private highPriorityPollTimeout: NodeJS.Timeout | null = null;
     private cityCache: Map<string, { data: WeatherData, timestamp: Date }> = new Map();
     public cacheTtlMs: number = 0;
     private initializedMarkets: Set<string> = new Set();
-
-    // City priority tracking
-    private cityPriorities: Map<string, CityPriority> = new Map();
-    private highPriorityCities: Set<string> = new Set();
-
-    // Automatic priority evaluation interval
-    private priorityEvaluationIntervalMs: number = 60000; // Every 60 seconds
-    private priorityEvaluationTimeout: NodeJS.Timeout | null = null;
 
     // Callback for significant changes
     public onForecastChanged: ((marketId: string, changeAmount: number) => void) | null = null;
@@ -65,11 +45,7 @@ export class ForecastMonitor {
         this.weatherService = weatherService || new WeatherService();
         // Use config defaults
         this.regularPollIntervalMs = pollIntervalMs ?? config.forecastPollIntervalMs;
-        this.highPriorityPollIntervalMs = config.highPriorityPollIntervalMs;
         
-        // Initialize high priority cities from config
-        this.initializeHighPriorityCities();
-
         // Initialize webhook mode
         this.useWebhookMode = config.USE_WEBHOOK_MODE;
         this.stateMachine = forecastStateMachine;
@@ -80,8 +56,7 @@ export class ForecastMonitor {
             this.initializeWebhookComponents();
         }
         
-        logger.info(`ForecastMonitor initialized with ${this.regularPollIntervalMs / 1000}s regular interval, ${this.highPriorityPollIntervalMs / 1000}s high priority interval`);
-        logger.info(`High priority cities: ${Array.from(this.highPriorityCities).join(', ') || 'none'}`);
+        logger.info(`ForecastMonitor initialized with ${this.regularPollIntervalMs / 1000}s regular interval`);
         logger.info(`Webhook mode: ${this.useWebhookMode ? 'enabled' : 'disabled'}`);
     }
 
@@ -167,47 +142,6 @@ export class ForecastMonitor {
     }
 
     /**
-     * Initialize high priority cities from config
-     */
-    private initializeHighPriorityCities(): void {
-        for (const city of config.highPriorityCities) {
-            this.highPriorityCities.add(city.toLowerCase());
-        }
-    }
-
-    /**
-     * Add a city to high priority list
-     */
-    addHighPriorityCity(city: string): void {
-        const normalizedCity = city.toLowerCase();
-        this.highPriorityCities.add(normalizedCity);
-        logger.info(`Added ${city} to high priority cities`);
-    }
-
-    /**
-     * Remove a city from high priority list
-     */
-    removeHighPriorityCity(city: string): void {
-        const normalizedCity = city.toLowerCase();
-        this.highPriorityCities.delete(normalizedCity);
-        logger.info(`Removed ${city} from high priority cities`);
-    }
-
-    /**
-     * Check if a city is high priority
-     */
-    isHighPriorityCity(city: string): boolean {
-        return this.highPriorityCities.has(city.toLowerCase());
-    }
-
-    /**
-     * Get all high priority cities currently being tracked
-     */
-    getHighPriorityCities(): string[] {
-        return Array.from(this.highPriorityCities);
-    }
-
-    /**
      * Start monitoring
      */
     start(): void {
@@ -219,21 +153,16 @@ export class ForecastMonitor {
             // The FetchModeController is event-driven and starts automatically
             this.idlePollingService?.start();
             
-            // Still run regular polling as a fallback, but less frequently
-            // This maintains backward compatibility
+            // Still run regular polling as a fallback
             this.scheduleRegularPoll();
             
             logger.info('ForecastMonitor started in webhook mode with idle polling');
         } else {
-            // Legacy mode: Start both polling loops
+            // Legacy mode: Start regular polling
             this.scheduleRegularPoll();
-            this.scheduleHighPriorityPoll();
         }
         
-        // Start automatic priority evaluation
-        this.schedulePriorityEvaluation();
-        
-        logger.info('ForecastMonitor started with dual polling and automatic priority evaluation');
+        logger.info('ForecastMonitor started');
     }
 
     /**
@@ -244,14 +173,6 @@ export class ForecastMonitor {
         if (this.regularPollTimeout) {
             clearTimeout(this.regularPollTimeout);
             this.regularPollTimeout = null;
-        }
-        if (this.highPriorityPollTimeout) {
-            clearTimeout(this.highPriorityPollTimeout);
-            this.highPriorityPollTimeout = null;
-        }
-        if (this.priorityEvaluationTimeout) {
-            clearTimeout(this.priorityEvaluationTimeout);
-            this.priorityEvaluationTimeout = null;
         }
         
         // Stop webhook mode components
@@ -268,65 +189,30 @@ export class ForecastMonitor {
     }
 
     /**
-     * Schedule the next priority evaluation
-     */
-    private schedulePriorityEvaluation(): void {
-        if (!this.isRunning) return;
-        this.priorityEvaluationTimeout = setTimeout(() => this.runPriorityEvaluation(), this.priorityEvaluationIntervalMs);
-    }
-
-    /**
-     * Run priority evaluation and schedule next one
-     */
-    private runPriorityEvaluation(): void {
-        if (!this.isRunning) return;
-        
-        try {
-            this.evaluatePriorityChanges();
-        } catch (error) {
-            logger.error('Priority evaluation failed', { error: (error as Error).message });
-        }
-        
-        // Schedule next evaluation
-        this.schedulePriorityEvaluation();
-    }
-
-    /**
      * Update polling intervals dynamically
      */
-    updatePollIntervals(regularMs?: number, highPriorityMs?: number): void {
+    updatePollInterval(regularMs?: number): void {
         if (regularMs !== undefined) {
             this.regularPollIntervalMs = regularMs;
             logger.info(`Regular poll interval updated to ${regularMs}ms`);
         }
-        if (highPriorityMs !== undefined) {
-            this.highPriorityPollIntervalMs = highPriorityMs;
-            logger.info(`High priority poll interval updated to ${highPriorityMs}ms`);
-        }
         
-        // Reset timeouts with new intervals
+        // Reset timeout with new interval
         if (this.regularPollTimeout) {
             clearTimeout(this.regularPollTimeout);
             this.scheduleRegularPoll();
         }
-        if (this.highPriorityPollTimeout) {
-            clearTimeout(this.highPriorityPollTimeout);
-            this.scheduleHighPriorityPoll();
-        }
     }
 
     /**
-     * Get current polling intervals
+     * Get current polling interval
      */
-    getPollIntervals(): { regular: number; highPriority: number } {
-        return {
-            regular: this.regularPollIntervalMs,
-            highPriority: this.highPriorityPollIntervalMs
-        };
+    getPollInterval(): number {
+        return this.regularPollIntervalMs;
     }
 
     /**
-     * Schedule the next regular priority poll
+     * Schedule the next regular poll
      */
     private scheduleRegularPoll(): void {
         if (!this.isRunning) return;
@@ -334,41 +220,49 @@ export class ForecastMonitor {
     }
 
     /**
-     * Schedule the next high priority poll
-     */
-    private scheduleHighPriorityPoll(): void {
-        if (!this.isRunning) return;
-        this.highPriorityPollTimeout = setTimeout(() => this.pollHighPriority(), this.highPriorityPollIntervalMs);
-    }
-
-    /**
-     * Poll regular priority cities
+     * Poll all cities
      */
     private async pollRegular(): Promise<void> {
         if (!this.isRunning) return;
 
         try {
             const markets = this.store.getAllMarkets();
-            const regularCities = this.getCitiesByPriority(markets, false);
+            const cities = this.getCitiesFromMarkets(markets);
             
-            if (regularCities.size > 0) {
+            if (cities.size > 0) {
                 // In webhook mode, skip cities that are in FETCH_MODE
-                // (they're being handled by FetchModeController)
                 const citiesToPoll = this.useWebhookMode
-                    ? this.filterOutFetchModeCities(regularCities)
-                    : regularCities;
+                    ? this.filterOutFetchModeCities(cities)
+                    : cities;
                 
                 if (citiesToPoll.size > 0) {
-                    logger.debug(`Polling ${citiesToPoll.size} regular priority cities`);
+                    logger.debug(`Polling ${citiesToPoll.size} cities`);
                     await this.pollCities(citiesToPoll);
                 }
             }
         } catch (error) {
-            logger.error('Regular priority poll failed', { error: (error as Error).message });
+            logger.error('Regular poll failed', { error: (error as Error).message });
         }
 
-        // Schedule next regular poll
+        // Schedule next poll
         this.scheduleRegularPoll();
+    }
+
+    /**
+     * Get cities from markets
+     */
+    private getCitiesFromMarkets(markets: ParsedWeatherMarket[]): Map<string, ParsedWeatherMarket[]> {
+        const cityGroups = new Map<string, ParsedWeatherMarket[]>();
+
+        for (const market of markets) {
+            if (!market.city) continue;
+            
+            const list = cityGroups.get(market.city) || [];
+            list.push(market);
+            cityGroups.set(market.city, list);
+        }
+
+        return cityGroups;
     }
 
     /**
@@ -387,90 +281,6 @@ export class ForecastMonitor {
         }
         
         return filtered;
-    }
-
-    /**
-     * Poll high priority cities
-     */
-    private async pollHighPriority(): Promise<void> {
-        if (!this.isRunning) return;
-
-        try {
-            const markets = this.store.getAllMarkets();
-            const highPriorityCities = this.getCitiesByPriority(markets, true);
-            
-            if (highPriorityCities.size > 0) {
-                // In webhook mode, skip cities that are in FETCH_MODE
-                const citiesToPoll = this.useWebhookMode
-                    ? this.filterOutFetchModeCities(highPriorityCities)
-                    : highPriorityCities;
-                
-                if (citiesToPoll.size > 0) {
-                    logger.debug(`Polling ${citiesToPoll.size} high priority cities`);
-                    await this.pollCities(citiesToPoll);
-                }
-            }
-        } catch (error) {
-            logger.error('High priority poll failed', { error: (error as Error).message });
-        }
-
-        // Schedule next high priority poll
-        this.scheduleHighPriorityPoll();
-    }
-
-    /**
-     * Get webhook mode status
-     */
-    isWebhookModeEnabled(): boolean {
-        return this.useWebhookMode;
-    }
-
-    /**
-     * Get state machine stats (for monitoring)
-     */
-    getStateMachineStats() {
-        return this.stateMachine.getStats();
-    }
-
-    /**
-     * Get idle polling service stats (for monitoring)
-     */
-    getIdlePollingStats() {
-        return this.idlePollingService?.getStats();
-    }
-
-    /**
-     * Manually enter FETCH_MODE for a city (for testing or manual override)
-     */
-    enterFetchMode(cityId: string): void {
-        this.stateMachine.enterFetchMode(cityId, 'manual');
-    }
-
-    /**
-     * Manually exit FETCH_MODE for a city (for testing or manual override)
-     */
-    exitFetchMode(cityId: string): void {
-        this.stateMachine.exitFetchMode(cityId, 'manual');
-    }
-
-    /**
-     * Get cities grouped by priority level
-     */
-    private getCitiesByPriority(markets: ParsedWeatherMarket[], highPriority: boolean): Map<string, ParsedWeatherMarket[]> {
-        const cityGroups = new Map<string, ParsedWeatherMarket[]>();
-
-        for (const market of markets) {
-            if (!market.city) continue;
-            
-            const isHigh = this.isHighPriorityCity(market.city);
-            if (isHigh === highPriority) {
-                const list = cityGroups.get(market.city) || [];
-                list.push(market);
-                cityGroups.set(market.city, list);
-            }
-        }
-
-        return cityGroups;
     }
 
     /**
@@ -511,143 +321,38 @@ export class ForecastMonitor {
     }
 
     /**
-     * Get count of changes in the last N hours for a city
+     * Get webhook mode status
      */
-    getRecentChangeCount(city: string, hours: number = 1): number {
-        const priority = this.cityPriorities.get(city.toLowerCase());
-        if (!priority || !priority.changeHistory.length) return 0;
-        
-        const cutoffTime = new Date(Date.now() - hours * 60 * 60 * 1000);
-        return priority.changeHistory.filter(timestamp => timestamp >= cutoffTime).length;
+    isWebhookModeEnabled(): boolean {
+        return this.useWebhookMode;
     }
 
     /**
-     * Get hours since the last change for a city
+     * Get state machine stats (for monitoring)
      */
-    getHoursSinceLastChange(city: string): number | null {
-        const priority = this.cityPriorities.get(city.toLowerCase());
-        if (!priority || !priority.lastForecastChange) return null;
-        
-        const now = new Date();
-        const diffMs = now.getTime() - priority.lastForecastChange.getTime();
-        return diffMs / (1000 * 60 * 60);
+    getStateMachineStats() {
+        return this.stateMachine.getStats();
     }
 
     /**
-     * Clean up old change history entries (older than 2 hours)
+     * Get idle polling service stats (for monitoring)
      */
-    private cleanupOldChangeHistory(city: string): void {
-        const priority = this.cityPriorities.get(city.toLowerCase());
-        if (!priority) return;
-        
-        const cutoffTime = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 hours ago
-        priority.changeHistory = priority.changeHistory.filter(timestamp => timestamp >= cutoffTime);
-        
-        // Update volatility score based on remaining changes
-        priority.volatilityScore = Math.min(priority.changeHistory.length * 0.5, 10);
+    getIdlePollingStats() {
+        return this.idlePollingService?.getStats();
     }
 
     /**
-     * Detect high volatility cities based on recent forecast changes
-     * This is an optional enhancement that can dynamically adjust priorities
+     * Manually enter FETCH_MODE for a city (for testing or manual override)
      */
-    detectHighVolatilityCities(threshold: number = 2): string[] {
-        const volatileCities: string[] = [];
-        
-        for (const [city, priority] of this.cityPriorities) {
-            // Consider a city volatile if it has multiple recent changes in last hour
-            const recentChanges = this.getRecentChangeCount(city, 1);
-            if (recentChanges >= threshold) {
-                volatileCities.push(city);
-            }
-        }
-        
-        return volatileCities;
+    enterFetchMode(cityId: string): void {
+        this.stateMachine.enterFetchMode(cityId, 'manual');
     }
 
     /**
-     * Auto-detect and update high priority cities based on volatility
-     * Legacy method - use evaluatePriorityChanges for automatic promotion/demotion
+     * Manually exit FETCH_MODE for a city (for testing or manual override)
      */
-    updatePrioritiesBasedOnVolatility(): void {
-        const volatileCities = this.detectHighVolatilityCities();
-        
-        for (const city of volatileCities) {
-            if (!this.isHighPriorityCity(city)) {
-                logger.info(`Auto-promoting ${city} to high priority due to volatility`);
-                this.addHighPriorityCity(city);
-            }
-        }
-    }
-
-    /**
-     * Evaluate and apply automatic priority changes based on forecast change history
-     * - Promote to high priority: >2 changes in last hour AND not already high priority
-     * - Demote to regular priority: high priority AND no changes in last hour
-     */
-    evaluatePriorityChanges(): void {
-        const now = new Date();
-        const promotedCities: string[] = [];
-        const demotedCities: string[] = [];
-
-        // Check all cities we have data for
-        for (const [city, priority] of this.cityPriorities) {
-            const isHighPriority = this.isHighPriorityCity(city);
-            const recentChangeCount = this.getRecentChangeCount(city, 1); // Changes in last hour
-            const hoursSinceLastChange = this.getHoursSinceLastChange(city);
-
-            // Promotion criteria: >2 changes in last hour AND not high priority
-            if (!isHighPriority && recentChangeCount > 2) {
-                logger.info(`🚀 PROMOTING ${city} to high priority: ${recentChangeCount} changes in last hour`);
-                this.addHighPriorityCity(city);
-                priority.isHighPriority = true;
-                promotedCities.push(city);
-            }
-            // Demotion criteria: high priority AND no changes in last hour
-            else if (isHighPriority && hoursSinceLastChange !== null && hoursSinceLastChange >= 1) {
-                // Only demote if it was auto-promoted (not in config.highPriorityCities)
-                const isConfigPriority = config.highPriorityCities.some(
-                    c => c.toLowerCase() === city.toLowerCase()
-                );
-                if (!isConfigPriority) {
-                    logger.info(`📉 DEMOTING ${city} to regular priority: no changes for ${hoursSinceLastChange.toFixed(1)} hours`);
-                    this.removeHighPriorityCity(city);
-                    priority.isHighPriority = false;
-                    demotedCities.push(city);
-                }
-            }
-        }
-
-        // Log summary
-        if (promotedCities.length > 0 || demotedCities.length > 0) {
-            logger.info(`Priority evaluation complete: ${promotedCities.length} promoted, ${demotedCities.length} demoted`);
-        }
-    }
-
-    /**
-     * Track forecast change for volatility detection
-     */
-    private trackForecastChange(city: string): void {
-        const normalizedCity = city.toLowerCase();
-        let priority = this.cityPriorities.get(normalizedCity);
-        if (!priority) {
-            priority = {
-                city: normalizedCity,
-                isHighPriority: this.isHighPriorityCity(city),
-                volatilityScore: 0,
-                lastForecastChange: null,
-                changeHistory: []
-            };
-        }
-        
-        const now = new Date();
-        priority.changeHistory.push(now);
-        priority.lastForecastChange = now;
-        
-        // Clean up old entries and update volatility score
-        this.cleanupOldChangeHistory(normalizedCity);
-        
-        this.cityPriorities.set(normalizedCity, priority);
+    exitFetchMode(cityId: string): void {
+        this.stateMachine.exitFetchMode(cityId, 'manual');
     }
 
     private async updateCityForecasts(city: string, markets: ParsedWeatherMarket[]): Promise<void> {
@@ -779,9 +484,6 @@ export class ForecastMonitor {
                     // Log only minimal info - forecast values disabled per user request
                     logger.info(`⚡ FORECAST CHANGED for ${city} (${market.metricType})`);
                     
-                    // Track volatility for priority adjustment
-                    this.trackForecastChange(city);
-
                     if (this.onForecastChanged) {
                         this.onForecastChanged(market.market.id, changeAmount);
                     }
@@ -849,6 +551,8 @@ export class ForecastMonitor {
                     probability = this.weatherService.calculateTempExceedsProbability(low, thresholdF);
                     if (market.comparisonType === 'below') {
                         probability = 1 - probability;
+                    } else {
+                        // Market "Low > 30". Forecast 35. Exceeds(35, 30) -> High prob. Correct.
                     }
                     hasValidForecast = true;
                 }
@@ -907,9 +611,6 @@ export class ForecastMonitor {
 
             if (realChange) {
                 logger.info(`⚡ FORECAST CHANGED for ${city} (${market.metricType})`);
-                
-                // Track volatility for priority adjustment
-                this.trackForecastChange(city);
 
                 if (this.onForecastChanged) {
                     this.onForecastChanged(market.market.id, changeAmount);

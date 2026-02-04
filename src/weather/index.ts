@@ -9,6 +9,15 @@ import { WeatherProviderManager } from './provider-manager.js';
 import { findCity, KNOWN_CITIES, type CityLocation, type WeatherData, type HourlyForecast, type Coordinates } from './types.js';
 import { logger } from '../logger.js';
 
+// Export file-based ingestion components
+export { FileBasedIngestion } from './file-based-ingestion.js';
+export { ScheduleManager } from './schedule-manager.js';
+export { S3FileDetector } from './s3-file-detector.js';
+export { GRIB2Parser } from './grib2-parser.js';
+export { ApiFallbackPoller } from './api-fallback-poller.js';
+export { ConfirmationManager } from './confirmation-manager.js';
+
+// Export types
 export { type WeatherData, type HourlyForecast, type Coordinates };
 
 export class WeatherService {
@@ -202,7 +211,8 @@ export class WeatherService {
                     }
                 } else {
                     // Fallback to individual calls with rate limiting
-                    logger.warn('OpenMeteo batch not available, using individual calls with rate limiting');
+                    // Silenced: Not using OpenMeteo batch endpoint (file-based ingestion is primary)
+                    // logger.debug('OpenMeteo batch not available, using individual calls with rate limiting');
                     
                     for (const { city, originalName } of intlCities) {
                         try {

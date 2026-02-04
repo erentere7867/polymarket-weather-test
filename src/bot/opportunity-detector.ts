@@ -9,7 +9,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 // Threshold for considering market "caught up" to the forecast
-const MARKET_CAUGHT_UP_THRESHOLD = 0.05; // If price within 5% of probability, market caught up
+const MARKET_CAUGHT_UP_THRESHOLD = 0.02; // If price within 2% of probability, market caught up - trade even when market has moved partially
 
 // Default significant change (fallback)
 const DEFAULT_SIGNIFICANT_CHANGE = 1.0;
@@ -20,14 +20,67 @@ interface CapturedOpportunity {
     side: 'buy_yes' | 'buy_no';
 }
 
+// Track rejection reasons for debugging
+interface RejectionStats {
+    marketCaughtUp: number;
+    alreadyCaptured: number;
+    forecastChangeBelowThreshold: number;
+    totalChecked: number;
+}
+
 export class OpportunityDetector {
     private weatherService: WeatherService;
 
     // Track opportunities we've already acted on - prevents re-buying at higher prices
     private capturedOpportunities: Map<string, CapturedOpportunity> = new Map();
+    
+    // Track rejection reasons for debugging
+    private rejectionStats: RejectionStats = {
+        marketCaughtUp: 0,
+        alreadyCaptured: 0,
+        forecastChangeBelowThreshold: 0,
+        totalChecked: 0,
+    };
+    private lastRejectionLogTime: number = 0;
 
     constructor() {
         this.weatherService = new WeatherService();
+    }
+    
+    /**
+     * Get rejection statistics for debugging
+     */
+    getRejectionStats(): RejectionStats {
+        return { ...this.rejectionStats };
+    }
+    
+    /**
+     * Reset rejection statistics
+     */
+    resetRejectionStats(): void {
+        this.rejectionStats = {
+            marketCaughtUp: 0,
+            alreadyCaptured: 0,
+            forecastChangeBelowThreshold: 0,
+            totalChecked: 0,
+        };
+    }
+    
+    /**
+     * Log rejection reasons periodically (every 5 minutes)
+     */
+    private logRejectionStats(): void {
+        const now = Date.now();
+        if (now - this.lastRejectionLogTime > 5 * 60 * 1000) {
+            logger.info('📊 Opportunity Rejection Stats (last 5 min)', {
+                totalChecked: this.rejectionStats.totalChecked,
+                marketCaughtUp: this.rejectionStats.marketCaughtUp,
+                alreadyCaptured: this.rejectionStats.alreadyCaptured,
+                forecastChangeBelowThreshold: this.rejectionStats.forecastChangeBelowThreshold,
+            });
+            this.resetRejectionStats();
+            this.lastRejectionLogTime = now;
+        }
     }
 
     /**
@@ -69,9 +122,13 @@ export class OpportunityDetector {
         marketProbability: number,
         forecastProbability: number
     ): { skip: boolean; reason: string } {
+        this.rejectionStats.totalChecked++;
+        
         // Check 1: Has market caught up to the probability?
         const priceDiff = Math.abs(marketProbability - forecastProbability);
         if (priceDiff < MARKET_CAUGHT_UP_THRESHOLD) {
+            this.rejectionStats.marketCaughtUp++;
+            this.logRejectionStats();
             return {
                 skip: true,
                 reason: `Market caught up: price ${(marketProbability * 100).toFixed(1)}% ≈ forecast ${(forecastProbability * 100).toFixed(1)}% (diff ${(priceDiff * 100).toFixed(1)}% < ${(MARKET_CAUGHT_UP_THRESHOLD * 100).toFixed(0)}%)`
@@ -113,6 +170,9 @@ export class OpportunityDetector {
             return { skip: false, reason: '' };
         }
 
+        this.rejectionStats.alreadyCaptured++;
+        this.rejectionStats.forecastChangeBelowThreshold++;
+        this.logRejectionStats();
         return {
             skip: true,
             reason: `Already captured - forecast change below threshold`
@@ -249,6 +309,11 @@ export class OpportunityDetector {
                 marketProbability,
                 finalProbability
             );
+            // Snapshot prices at detection time to prevent race conditions during execution
+            const snapshotYesPrice = market.yesPrice;
+            const snapshotNoPrice = market.noPrice;
+            const snapshotTimestamp = new Date();
+
             if (skipCheck.skip) {
                 // Return a non-trade opportunity with the skip reason for debugging
                 return {
@@ -264,6 +329,9 @@ export class OpportunityDetector {
                     forecastValueUnit,
                     isGuaranteed,
                     certaintySigma,
+                    snapshotYesPrice,
+                    snapshotNoPrice,
+                    snapshotTimestamp,
                 };
             }
 
@@ -314,6 +382,9 @@ export class OpportunityDetector {
                 forecastValueUnit,
                 isGuaranteed,
                 certaintySigma,
+                snapshotYesPrice,
+                snapshotNoPrice,
+                snapshotTimestamp,
             };
         } catch (error) {
             logger.error(`Failed to analyze market: ${market.market.question}`, {
