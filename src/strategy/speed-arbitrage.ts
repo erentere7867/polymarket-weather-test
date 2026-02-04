@@ -100,128 +100,140 @@ export class SpeedArbitrageStrategy {
     }
 
     /**
+     * Check a specific market for speed arbitrage opportunity
+     * Optimized for single-market "Interrupt" checks
+     */
+    detectOpportunity(marketId: string): EntrySignal | null {
+        const state = this.store.getMarketState(marketId);
+        if (!state || !state.lastForecast) return null;
+
+        const market = state.market;
+        const now = Date.now();
+        const forecast = state.lastForecast;
+
+        // =====================================================
+        // SPEED ARBITRAGE CHECK #1: Did forecast change recently?
+        // =====================================================
+        const changeAge = now - forecast.changeTimestamp.getTime();
+        const isSpeedArb = forecast.valueChanged && (changeAge <= MAX_CHANGE_AGE_MS);
+
+        if (!isSpeedArb) {
+            // In strict speed mode, we only care about fresh changes
+            return null;
+        }
+
+        // =====================================================
+        // CHECK #1: Have we already captured this opportunity?
+        // =====================================================
+        if (this.isOpportunityCaptured(market.market.id, forecast.forecastValue)) {
+            return null;
+        }
+
+        // =====================================================
+        // CHECK #2: Market Reaction (Speed Arb only)
+        // =====================================================
+        const priceYesPoint = state.priceHistory.yes.history.length > 0
+            ? state.priceHistory.yes.history[state.priceHistory.yes.history.length - 1]
+            : null;
+
+        if (!priceYesPoint) return null;
+
+        const priceYes = priceYesPoint.price;
+        const priceNo = 1 - priceYes;
+
+        // For speed arb, ensure market hasn't already reacted to THIS change
+        if (priceYesPoint.timestamp.getTime() > forecast.changeTimestamp.getTime()) {
+            const priceBeforeChange = this.findPriceBeforeChange(state.priceHistory.yes.history, forecast.changeTimestamp);
+            
+            if (priceBeforeChange !== null) {
+                const diff = forecast.forecastValue - (market.threshold || 0);
+                const expectedProb = market.comparisonType === 'above' ? (diff > 0 ? 1 : 0) : (diff < 0 ? 1 : 0);
+                const priceMovedTowards = (expectedProb > 0.5 && priceYes > priceBeforeChange) ||
+                                        (expectedProb < 0.5 && priceYes < priceBeforeChange);
+                
+                if (priceMovedTowards && Math.abs(priceYes - priceBeforeChange) > 0.05) {
+                    return null; // Market beat us
+                }
+            }
+        }
+
+        // =====================================================
+        // CHECK #3: Certainty Threshold (Dynamic Sigma)
+        // =====================================================
+        let threshold = market.threshold;
+        if (threshold === undefined) return null;
+
+        // Normalize threshold to F if needed
+        if (market.thresholdUnit === 'C') {
+            threshold = (threshold * 9 / 5) + 32;
+        }
+
+        let uncertainty: number;
+        switch (market.metricType) {
+            case 'temperature_high':
+            case 'temperature_low':
+            case 'temperature_threshold':
+                uncertainty = 3; 
+                break;
+            default:
+                uncertainty = 5;
+        }
+
+        const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
+
+        // DYNAMIC THRESHOLD: Speed Arb (Fresh News) -> Accept 1.5 sigma
+        if (sigma < MIN_SIGMA_FOR_ARBITRAGE) {
+            return null;
+        }
+
+        // Determine guaranteed probability
+        const diff = forecast.forecastValue - threshold;
+        let guaranteedProb: number;
+
+        if (market.comparisonType === 'above') {
+            guaranteedProb = diff > 0 ? 1.0 : 0.0;
+        } else if (market.comparisonType === 'below') {
+            guaranteedProb = diff < 0 ? 1.0 : 0.0;
+        } else {
+            return null;
+        }
+
+        // Calculate edge
+        const edge = this.edgeCalculator.calculateEdge(
+            market,
+            guaranteedProb,
+            priceYes,
+            priceNo
+        );
+
+        // Require slightly higher edge for stale data to cover spread/risk
+        const minEdge = 0.05; // 5% edge for speed arb
+
+        if (edge && Math.abs(edge.adjustedEdge) >= minEdge) {
+            logger.info(`🚀 SPEED ARB OPPORTUNITY DETECTED:`, {
+                market: market.market.question.substring(0, 50),
+                forecast: `${forecast.forecastValue.toFixed(1)} (Threshold: ${threshold})`,
+                sigma: sigma.toFixed(1),
+                edge: (edge.adjustedEdge * 100).toFixed(1) + '%',
+                price: (priceYes * 100).toFixed(1) + '%',
+            });
+
+            return this.entryOptimizer.optimizeEntry(edge);
+        }
+
+        return null;
+    }
+
+    /**
      * Scan all tracked markets for SPEED ARBITRAGE opportunities
-     * 
-     * ONLY returns opportunities where:
-     * 1. Forecast just changed (we have fresh data)
-     * 2. Market price hasn't reacted yet (stale)
-     * 3. The new forecast indicates a near-certain outcome
      */
     detectOpportunities(): EntrySignal[] {
         const markets = this.store.getAllMarkets();
         const opportunities: EntrySignal[] = [];
-        const now = Date.now();
-
-        // Pre-allocate threshold map to avoid repeated lookups
-        const thresholdCache = new Map<string, number | undefined>();
 
         for (const market of markets) {
-            const state = this.store.getMarketState(market.market.id);
-            if (!state || !state.lastForecast) continue;
-
-            // Cache threshold normalization to avoid repeated calculations
-            let cachedThreshold = thresholdCache.get(market.market.id);
-            if (cachedThreshold === undefined && market.threshold !== undefined) {
-                cachedThreshold = market.thresholdUnit === 'C'
-                    ? (market.threshold * 9 / 5) + 32
-                    : market.threshold;
-                thresholdCache.set(market.market.id, cachedThreshold);
-            }
-
-            // =====================================================
-            // SPEED ARBITRAGE CHECK #1: Did forecast change recently?
-            // =====================================================
-            const forecast = state.lastForecast;
-            const changeAge = now - forecast.changeTimestamp.getTime();
-            const isSpeedArb = forecast.valueChanged && (changeAge <= MAX_CHANGE_AGE_MS);
-
-            // Check if we've already processed this specific forecast update
-            const lastProcessed = this.processedForecasts.get(market.market.id);
-            if (lastProcessed === forecast.changeTimestamp.getTime()) {
-                continue; // Already analyzed this update
-            }
-
-            // Mark as processed immediately (we will analyze it now, don't repeat)
-            this.processedForecasts.set(market.market.id, forecast.changeTimestamp.getTime());
-
-            // Skip non-speed-arb opportunities for performance
-            if (!isSpeedArb) {
-                continue;
-            }
-
-            // Quick logging for speed arb (only when fresh)
-            logger.info(`⚡ Analyzing fresh change for ${market.market.question.substring(0, 30)}... Age: ${changeAge}ms`);
-
-            // =====================================================
-            // CHECK #1: Have we already captured this opportunity?
-            // =====================================================
-            if (this.isOpportunityCaptured(market.market.id, forecast.forecastValue)) {
-                continue;
-            }
-
-            // =====================================================
-            // CHECK #2: Get current price (fast path)
-            // =====================================================
-            // Use current market price directly instead of history lookup
-            const priceYes = state.market.yesPrice;
-            const priceNo = state.market.noPrice;
-
-            if (!priceYes || !priceNo) {
-                // Fallback to history if market prices not available
-                const priceYesPoint = state.priceHistory.yes.history.length > 0
-                    ? state.priceHistory.yes.history[state.priceHistory.yes.history.length - 1]
-                    : null;
-                if (!priceYesPoint) continue;
-                // Continue with history-based price...
-            }
-
-            // Skip price reaction check for speed - we want to be first
-            // The skipPriceCheck flag is handled in entry optimizer
-
-            // =====================================================
-            // CHECK #3: Certainty Threshold (Fast calculation)
-            // =====================================================
-            const threshold = thresholdCache.get(market.market.id);
-            if (threshold === undefined) continue;
-
-            // Fast sigma calculation (temperature markets only for speed)
-            const uncertainty = 3; // Fixed for temperature markets
-            const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
-
-            if (sigma < MIN_SIGMA_FOR_ARBITRAGE) {
-                continue;
-            }
-
-            // Improved probability calculation using normal CDF approximation
-            // Instead of binary 0%/100%, use nuanced probability based on distance from threshold
-            // Skip if comparison type is not 'above' or 'below'
-            if (market.comparisonType !== 'above' && market.comparisonType !== 'below') {
-                continue;
-            }
-            const guaranteedProb = this.calculateProbability(
-                forecast.forecastValue,
-                threshold,
-                market.comparisonType
-            );
-
-            // Calculate edge
-            const edge = this.edgeCalculator.calculateEdge(
-                market,
-                guaranteedProb,
-                priceYes,
-                priceNo
-            );
-
-            // Accept any positive edge for speed arb
-            if (edge) {
-                logger.info(`🚀 SPEED ARB OPPORTUNITY:`, {
-                    market: market.market.question.substring(0, 50),
-                    sigma: sigma.toFixed(1),
-                    edge: (edge.adjustedEdge * 100).toFixed(1) + '%',
-                    price: (priceYes * 100).toFixed(1) + '%',
-                });
-
-                const signal = this.entryOptimizer.optimizeEntry(edge);
+            const signal = this.detectOpportunity(market.market.id);
+            if (signal) {
                 opportunities.push(signal);
             }
         }
@@ -306,4 +318,5 @@ export class SpeedArbitrageStrategy {
         return null;
     }
 }
+
 

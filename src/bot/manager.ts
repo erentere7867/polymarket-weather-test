@@ -14,6 +14,8 @@ import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { TradingClient } from '../polymarket/clob-client.js';
 import { OpportunityDetector } from './opportunity-detector.js';
 import { OrderExecutor } from './order-executor.js';
+import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
+import { EntrySignal } from '../strategy/entry-optimizer.js';
 import { DataStore } from '../realtime/data-store.js';
 import { PriceTracker } from '../realtime/price-tracker.js';
 import { ForecastMonitor } from '../realtime/forecast-monitor.js';
@@ -86,6 +88,7 @@ export class BotManager {
     private weatherScanner: WeatherScanner;
     private tradingClient: TradingClient;
     private opportunityDetector: OpportunityDetector;
+    private speedStrategy: SpeedArbitrageStrategy;
     private orderExecutor: OrderExecutor;
     private dataStore: DataStore;
     private priceTracker: PriceTracker;
@@ -120,9 +123,10 @@ export class BotManager {
     constructor() {
         this.weatherScanner = new WeatherScanner();
         this.tradingClient = new TradingClient();
-        this.orderExecutor = new OrderExecutor(this.tradingClient);
+        this.opportunityDetector = new OpportunityDetector();
         this.dataStore = new DataStore();
-        this.opportunityDetector = new OpportunityDetector(this.dataStore);
+        this.speedStrategy = new SpeedArbitrageStrategy(this.dataStore);
+        this.orderExecutor = new OrderExecutor(this.tradingClient);
         this.priceTracker = new PriceTracker(this.dataStore);
         this.forecastMonitor = new ForecastMonitor(this.dataStore);
         
@@ -203,105 +207,12 @@ export class BotManager {
         // Start PriceTracker (handles market scanning and WS updates)
         await this.priceTracker.start(this.weatherScanner, 60000);
 
-        // Initialize and start hybrid controller
-        const { ForecastStateMachine } = await import('../realtime/forecast-state-machine.js');
-        const stateMachine = new ForecastStateMachine();
-        this.hybridController = new HybridWeatherController(
-            stateMachine,
-            this.dataStore
-        );
-        
-        // NOTE: Forecast change triggers are consolidated in setupCrossMarketListeners()
-        // via eventBus.on('FORECAST_CHANGED') which has proper debouncing and guards.
-        // The ForecastMonitor.onForecastChanged callback is NOT used to avoid duplicate triggers.
+        // Setup forecast monitor
+        this.forecastMonitor.onForecastChanged = async (marketId, change) => {
+            // FAST PATH: Handle specific change immediately
+            await this.handleForecastChange(marketId, change);
 
-        // Setup file-based ingestion event handlers via global event bus
-        eventBus.on('FILE_CONFIRMED', (event) => {
-            if (event.type === 'FILE_CONFIRMED') {
-                const data = event.payload;
-                logger.info(`[BotManager] File confirmed: ${data.model} ${String(data.cycleHour).padStart(2, '0')}Z`);
-                this.trackDataSourceConfidence('file', 1.0);
-            }
-        });
-
-        // Setup hybrid controller event listeners
-        this.setupHybridControllerListeners();
-
-        // Setup cross-market arbitrage event listeners
-        this.setupCrossMarketListeners();
-
-        logger.info('Bot initialized successfully');
-    }
-
-    /**
-     * Setup hybrid controller event listeners
-     */
-    private setupHybridControllerListeners(): void {
-        if (!config.ENABLE_ADAPTIVE_DETECTION_WINDOWS) return;
-
-        // Listen for early detection triggers
-        this.hybridController.on('earlyDetectionTriggered', (trigger) => {
-            logger.info(`🚨 Early detection triggered: ${trigger.triggerSource} (confidence: ${(trigger.confidence * 100).toFixed(0)}%)`);
-        });
-
-        // Listen for mode transitions
-        this.hybridController.on('modeTransition', (transition) => {
-            logger.debug(`Mode transition: ${transition.from} → ${transition.to}`, {
-                reason: transition.reason,
-                duration: Date.now() - this.hybridController.getCurrentModeDuration(),
-            });
-        });
-
-        // Listen for forecast batch updates
-        this.hybridController.on('FORECAST_BATCH_UPDATED', (data) => {
-            logger.debug(`Forecast batch updated: ${data.totalCities} cities from ${data.provider}`);
-        });
-    }
-
-    /**
-     * Setup cross-market arbitrage listeners and forecast change triggers
-     */
-    private setupCrossMarketListeners(): void {
-        // Listen for forecast updates - ALWAYS trigger cycles, not just for cross-market
-        eventBus.on('FORECAST_CHANGED', async (event) => {
-            const payload = event.payload as {
-                cityId: string;
-                newValue: number;
-                changeAmount?: number;
-                source?: string;
-                confidence?: number;
-            };
-            
-            // Update cross-market arbitrage data if enabled
-            if (config.ENABLE_CROSS_MARKET_ARBITRAGE && payload.cityId && payload.newValue !== undefined) {
-                this.crossMarketArbitrage.updateForecast(
-                    payload.cityId,
-                    payload.newValue,
-                    payload.confidence || 0.5
-                );
-            }
-            
-            // CRITICAL: Trigger immediate trading cycle on forecast change
-            // This ensures forecast changes are immediately analyzed for opportunities
-            if (!this.isRunning) return;
-            
-            // Debounce: don't trigger if we just triggered recently
-            const now = Date.now();
-            if (this.lastForecastTriggeredCycle && 
-                (now - this.lastForecastTriggeredCycle.getTime()) < this.FORECAST_CYCLE_DEBOUNCE_MS) {
-                logger.debug(`Debouncing forecast-triggered cycle (${payload.cityId})`);
-                return;
-            }
-            
-            // Guard: don't trigger if cycle already running
-            if (this.isCycleRunning) {
-                logger.debug(`Skipping forecast-triggered cycle: cycle already running (${payload.cityId})`);
-                return;
-            }
-            
-            logger.info(`🚀 FORECAST_CHANGED triggering immediate trading cycle for ${payload.cityId}`);
-            this.lastForecastTriggeredCycle = new Date();
-            
+            logger.info(`🚨 INTERRUPT: Significant forecast change detected! Triggering full scan.`);
             // Interrupt current delay to run cycle immediately
             if (this.currentDelayTimeout) {
                 clearTimeout(this.currentDelayTimeout);
@@ -321,7 +232,35 @@ export class BotManager {
     }
 
     /**
-     * Run a single scan cycle with integrated components
+     * Handle a specific forecast change event (Fast Path)
+     */
+    async handleForecastChange(marketId: string, changeAmount: number): Promise<void> {
+        try {
+            logger.info(`⚡ FAST PATH: Checking speed arbitrage for ${marketId} (change: ${changeAmount.toFixed(1)})`);
+            
+            const signal = this.speedStrategy.detectOpportunity(marketId);
+            
+            if (signal) {
+                const opp = this.convertSignalToOpportunity(signal);
+                if (opp) {
+                    logger.info(`🚀 FAST PATH: Executing Speed Arb trade for ${opp.market.market.question.substring(0, 40)}...`);
+                    
+                    const result = await this.orderExecutor.executeOpportunity(opp);
+                    
+                    if (result.executed && opp.forecastValue !== undefined && opp.action !== 'none') {
+                        this.stats.tradesExecuted++;
+                        this.speedStrategy.markOpportunityCaptured(marketId, opp.forecastValue);
+                        this.opportunityDetector.markOpportunityCaptured(marketId, opp.forecastValue, opp.action);
+                    }
+                }
+            }
+        } catch (error) {
+            logger.error(`Error in fast path execution for ${marketId}`, { error: (error as Error).message });
+        }
+    }
+
+    /**
+     * Run a single scan cycle
      */
     async runCycle(): Promise<void> {
         // Guard: prevent concurrent cycles
@@ -366,41 +305,35 @@ export class BotManager {
             }
 
             // Step 2: Analyze markets for opportunities
+            // Run both strategies: Standard Value Arb (OpportunityDetector) AND Speed Arb (SpeedArbitrageStrategy)
             logger.info('Analyzing markets for opportunities...');
-            const opportunities = await this.opportunityDetector.analyzeMarkets(actionableMarkets);
-            this.stats.opportunitiesDetected += opportunities.length;
-
-            // Step 3: Detect cross-market opportunities if enabled
-            let correlatedOpportunities: TradingOpportunity[] = [];
-            if (config.ENABLE_CROSS_MARKET_ARBITRAGE && opportunities.length > 0) {
-                correlatedOpportunities = this.detectCorrelatedOpportunities(opportunities, allMarkets);
-                if (correlatedOpportunities.length > 0) {
-                    logger.info(`Found ${correlatedOpportunities.length} cross-market opportunities`);
-                }
-            }
-
-            // Combine single-market and cross-market opportunities
-            const allOpportunities = [...opportunities, ...correlatedOpportunities];
             
-            // Step 4: Apply market impact analysis if enabled
-            let finalOpportunities = allOpportunities;
-            if (config.ENABLE_MARKET_IMPACT_MODEL) {
-                finalOpportunities = await this.applyMarketImpactAnalysis(allOpportunities);
-            }
+            const [valueOpportunities, speedSignals] = await Promise.all([
+                this.opportunityDetector.analyzeMarkets(actionableMarkets),
+                Promise.resolve(this.speedStrategy.detectOpportunities()) // Synchronous but run in flow
+            ]);
 
-            this.stats.opportunitiesFound += finalOpportunities.length;
+            // Convert speed signals to TradingOpportunities
+            const speedOpportunities = speedSignals
+                .map(signal => this.convertSignalToOpportunity(signal))
+                .filter((opp): opp is TradingOpportunity => opp !== null);
 
-            if (finalOpportunities.length === 0) {
+            // Merge opportunities, prioritizing Speed Arb
+            const mergedOpportunities = this.mergeOpportunities(valueOpportunities, speedOpportunities);
+
+            this.stats.opportunitiesFound += mergedOpportunities.length;
+
+            if (mergedOpportunities.length === 0) {
                 logger.info('No trading opportunities found this cycle');
             } else {
-                logger.info(`Found ${finalOpportunities.length} trading opportunities (${opportunities.length} single-market, ${correlatedOpportunities.length} cross-market)`);
-                this.logOpportunities(finalOpportunities);
+                logger.info(`Found ${mergedOpportunities.length} trading opportunities (${speedOpportunities.length} Speed Arb, ${valueOpportunities.length} Value Arb)`);
+                this.logOpportunities(mergedOpportunities);
             }
 
-            // Step 5: Execute trades
-            if (finalOpportunities.length > 0) {
+            // Step 3: Execute trades
+            if (mergedOpportunities.length > 0) {
                 logger.info('Executing trades...');
-                const results = await this.orderExecutor.executeOpportunities(finalOpportunities);
+                const results = await this.orderExecutor.executeOpportunities(mergedOpportunities);
 
                 const successfulTrades = results.filter(r => r.executed);
                 this.stats.tradesExecuted += successfulTrades.length;
@@ -413,15 +346,20 @@ export class BotManager {
                 for (const result of successfulTrades) {
                     const opp = result.opportunity;
                     if (opp.forecastValue !== undefined && (opp.action === 'buy_yes' || opp.action === 'buy_no')) {
+                        // Notify both strategies
                         this.opportunityDetector.markOpportunityCaptured(
                             opp.market.market.id,
                             opp.forecastValue,
                             opp.action
                         );
+                        this.speedStrategy.markOpportunityCaptured(
+                            opp.market.market.id,
+                            opp.forecastValue
+                        );
                     }
                 }
 
-                logger.info(`Executed ${successfulTrades.length}/${finalOpportunities.length} trades`);
+                logger.info(`Executed ${successfulTrades.length}/${mergedOpportunities.length} trades`);
             }
 
             // Step 6: Update rejection stats from opportunity detector
@@ -449,213 +387,52 @@ export class BotManager {
     }
 
     /**
-     * Detect correlated opportunities using cross-market arbitrage
+     * Merge opportunities from different strategies, removing duplicates
      */
-    private detectCorrelatedOpportunities(
-        opportunities: TradingOpportunity[],
-        allMarkets: ParsedWeatherMarket[]
-    ): TradingOpportunity[] {
-        const correlatedOpps: TradingOpportunity[] = [];
+    private mergeOpportunities(valueArb: TradingOpportunity[], speedArb: TradingOpportunity[]): TradingOpportunity[] {
+        const map = new Map<string, TradingOpportunity>();
 
-        for (const opp of opportunities) {
-            if (!opp.market.city) continue;
-
-            // Find correlated market pairs
-            const correlatedPairs = this.crossMarketArbitrage.findCorrelatedMarkets(
-                opp.market,
-                allMarkets,
-                {
-                    marketId: opp.market.market.id,
-                    side: opp.action === 'buy_yes' ? 'yes' : 'no',
-                    rawEdge: opp.edge,
-                    adjustedEdge: opp.edge,
-                    confidence: opp.confidence,
-                    KellyFraction: 0,
-                    reason: opp.reason,
-                    isGuaranteed: opp.isGuaranteed || false,
-                }
-            );
-
-            for (const pair of correlatedPairs) {
-                // Only exploit high-quality correlations
-                if (pair.lagExploitationPotential < 0.5) continue;
-
-                // Create a correlated opportunity
-                const correlatedOpp: TradingOpportunity = {
-                    ...opp,
-                    market: pair.correlatedMarket,
-                    reason: `${opp.reason} (Cross-Market: ${pair.correlation.correlationCoefficient.toFixed(2)} correlation)`,
-                    confidence: opp.confidence * pair.correlation.confidence,
-                    // Adjust edge based on correlation
-                    edge: opp.edge * pair.correlation.correlationCoefficient,
-                };
-
-                correlatedOpps.push(correlatedOpp);
-            }
+        // Add Value Arb first
+        for (const opp of valueArb) {
+            map.set(opp.market.market.id, opp);
         }
 
-        return correlatedOpps;
-    }
-
-    /**
-     * Apply market impact analysis to opportunities
-     */
-    private async applyMarketImpactAnalysis(
-        opportunities: TradingOpportunity[]
-    ): Promise<TradingOpportunity[]> {
-        const analyzedOpps: TradingOpportunity[] = [];
-
-        for (const opp of opportunities) {
-            // Build liquidity profile from market data
-            // Use market volume from market object or default to $50k
-            const marketVolume = (opp.market.market as any).volume
-                ? parseFloat((opp.market.market as any).volume)
-                : 50000;
-            const liquidity: LiquidityProfile = {
-                dailyVolume: marketVolume,
-                averageTradeSize: marketVolume / 100,
-                bidDepth: opp.market.yesPrice * marketVolume * 0.1,
-                askDepth: opp.market.noPrice * marketVolume * 0.1,
-                spread: Math.abs(opp.market.yesPrice + opp.market.noPrice - 1),
-                volatility: this.marketModel.getPriceVelocity(opp.market.market.id, 'yes'),
-            };
-
-            // Calculate position size
-            const positionSize = this.calculatePositionSize(opp);
-
-            // Estimate market impact
-            const impactEstimate = this.marketImpactModel.estimateCompleteImpact(
-                positionSize,
-                liquidity
-            );
-
-            // Log impact estimate for learning
-            this.performanceMetrics.impactEstimates.push({
-                marketId: opp.market.market.id,
-                estimatedImpact: impactEstimate.totalCost,
-                actualImpact: 0, // Will be updated after execution
-                timestamp: new Date(),
-            });
-
-            // Keep only last 100 impact estimates
-            if (this.performanceMetrics.impactEstimates.length > 100) {
-                this.performanceMetrics.impactEstimates.shift();
+        // Add Speed Arb (overwriting Value Arb if duplicate - assume Speed is fresher/better)
+        for (const opp of speedArb) {
+            if (map.has(opp.market.market.id)) {
+                logger.info(`⚡ Upgrading opportunity to SPEED ARB: ${opp.market.market.question.substring(0, 40)}...`);
             }
-
-            // Check if impact is acceptable
-            if (impactEstimate.totalCost > config.MAX_MARKET_IMPACT_THRESHOLD) {
-                logger.warn(`Skipping opportunity due to high market impact`, {
-                    market: opp.market.market.question.substring(0, 50),
-                    impact: `${(impactEstimate.totalCost * 100).toFixed(2)}%`,
-                    threshold: `${(config.MAX_MARKET_IMPACT_THRESHOLD * 100).toFixed(2)}%`,
-                });
-                this.performanceMetrics.rejectionReasons.marketImpactTooHigh++;
-                continue;
-            }
-
-            // Adjust opportunity with impact-adjusted edge
-            const adjustedOpp: TradingOpportunity = {
-                ...opp,
-                edge: opp.edge - impactEstimate.totalCost,
-                reason: `${opp.reason} (Impact: ${(impactEstimate.totalCost * 100).toFixed(2)}%)`,
-            };
-
-            analyzedOpps.push(adjustedOpp);
+            map.set(opp.market.market.id, opp);
         }
 
-        return analyzedOpps;
+        return Array.from(map.values());
     }
 
     /**
-     * Calculate position size for an opportunity
+     * Convert EntrySignal (from Speed Arb) to TradingOpportunity (for OrderExecutor)
      */
-    private calculatePositionSize(opportunity: TradingOpportunity): number {
-        const maxSize = config.maxPositionSize;
-        const edge = Math.abs(opportunity.edge);
-        const confidence = opportunity.confidence;
+    private convertSignalToOpportunity(signal: EntrySignal): TradingOpportunity | null {
+        const marketState = this.dataStore.getMarketState(signal.marketId);
+        if (!marketState) return null;
 
-        // Kelly fraction = edge * confidence
-        const kellyFraction = edge * confidence;
-        const halfKelly = kellyFraction * 0.5;
+        const market = marketState.market;
+        const forecast = marketState.lastForecast;
 
-        // Calculate USDC amount
-        const usdcAmount = maxSize * Math.min(halfKelly * 10, 1);
-
-        // Calculate number of shares
-        const price = opportunity.action === 'buy_yes'
-            ? opportunity.market.yesPrice
-            : opportunity.market.noPrice;
-
-        if (price <= 0) return 0;
-
-        const shares = Math.floor(usdcAmount / price);
-
-        return Math.max(1, Math.min(shares, Math.floor(maxSize / price)));
-    }
-
-    /**
-     * Track execution results for performance metrics
-     */
-    private trackExecutionResults(
-        results: Array<{ opportunity: TradingOpportunity; executed: boolean; error?: string }>,
-        singleMarketOpps: TradingOpportunity[],
-        crossMarketOpps: TradingOpportunity[]
-    ): void {
-        for (const result of results) {
-            if (!result.executed && result.error) {
-                // Track rejection reasons
-                if (result.error.includes('edge')) {
-                    this.performanceMetrics.rejectionReasons.edgeDegraded++;
-                } else if (result.error.includes('drift')) {
-                    this.performanceMetrics.rejectionReasons.priceDrift++;
-                }
-            }
-
-            // Track cross-market vs single-market
-            const isCrossMarket = crossMarketOpps.some(
-                o => o.market.market.id === result.opportunity.market.market.id
-            );
-
-            if (result.executed) {
-                if (isCrossMarket) {
-                    this.performanceMetrics.crossMarketTrades.count++;
-                } else {
-                    this.performanceMetrics.singleMarketTrades.count++;
-                }
-            }
-
-            // Track by data source
-            const source = result.opportunity.weatherDataSource || 'api';
-            if (source.includes('file') || source.includes('s3')) {
-                this.performanceMetrics.opportunitiesBySource.file.executed += result.executed ? 1 : 0;
-            } else if (source.includes('webhook')) {
-                this.performanceMetrics.opportunitiesBySource.webhook.executed += result.executed ? 1 : 0;
-            } else {
-                this.performanceMetrics.opportunitiesBySource.api.executed += result.executed ? 1 : 0;
-            }
-        }
-    }
-
-    /**
-     * Update rejection stats from opportunity detector
-     */
-    private updateRejectionStats(): void {
-        const rejectionStats = this.opportunityDetector.getRejectionStats();
-        this.performanceMetrics.rejectionReasons.marketCaughtUp += rejectionStats.marketCaughtUp;
-        this.performanceMetrics.rejectionReasons.alreadyCaptured += rejectionStats.alreadyCaptured;
-        this.performanceMetrics.rejectionReasons.forecastChangeBelowThreshold += rejectionStats.forecastChangeBelowThreshold;
-    }
-
-    /**
-     * Track data source confidence
-     */
-    private trackDataSourceConfidence(source: 'file' | 'api' | 'webhook', confidence: number): void {
-        this.performanceMetrics.dataSourceConfidence[source].push(confidence);
-        
-        // Keep only last 100 confidence scores
-        if (this.performanceMetrics.dataSourceConfidence[source].length > 100) {
-            this.performanceMetrics.dataSourceConfidence[source].shift();
-        }
+        return {
+            market: market,
+            forecastProbability: signal.side === 'yes' 
+                ? market.yesPrice + signal.estimatedEdge 
+                : 1 - (market.noPrice + signal.estimatedEdge), // Approx
+            marketProbability: signal.side === 'yes' ? market.yesPrice : market.noPrice,
+            edge: signal.estimatedEdge * (signal.side === 'yes' ? 1 : -1), // Positive edge = Buy YES
+            action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
+            confidence: signal.confidence,
+            reason: `⚡ SPEED ARB: ${signal.reason}`,
+            weatherDataSource: 'noaa', // Default assumption for speed arb
+            forecastValue: forecast?.forecastValue,
+            forecastValueUnit: market.thresholdUnit || '°F',
+            isGuaranteed: signal.isGuaranteed
+        };
     }
 
     /**
