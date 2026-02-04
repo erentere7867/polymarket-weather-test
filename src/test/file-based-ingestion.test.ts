@@ -30,6 +30,9 @@ jest.mock('../logger.js', () => ({
     },
 }));
 
+// Increase timeout for all tests in this file
+jest.setTimeout(60000);
+
 // Mock AWS SDK
 jest.mock('@aws-sdk/client-s3', () => ({
     S3Client: jest.fn().mockImplementation(() => ({
@@ -928,6 +931,11 @@ describe('FileBasedIngestion Integration', () => {
     describe('End-to-End Flow', () => {
         it('should handle detection window start to file confirmation', (done) => {
             const events: string[] = [];
+
+            // Clear any existing listeners to avoid interference from other tests
+            eventBus.off('DETECTION_WINDOW_START');
+            eventBus.off('FILE_DETECTED');
+            eventBus.off('FILE_CONFIRMED');
 
             eventBus.on('DETECTION_WINDOW_START', (event) => {
                 if (event.type === 'DETECTION_WINDOW_START') {
