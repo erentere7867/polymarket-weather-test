@@ -1,6 +1,18 @@
 /**
- * Real-Time Simulation Runner v2
- * Orchestrates the full Speed Arbitrage engine with real-time data
+ * Real-Time Simulation Runner v4
+ * Orchestrates the Confidence Compression trading engine with real-time data
+ * 
+ * v4 Changes:
+ * - Replaced Speed Arbitrage with Confidence Compression Strategy
+ * - Trades on run-to-run stability, NOT latency
+ * - Implements model hierarchy (HRRR/ECMWF primary)
+ * - Never trades on first run
+ * 
+ * Features:
+ * - Realistic market impact simulation
+ * - Cross-market correlation simulation
+ * - Performance metrics by strategy component
+ * - Parameter optimization framework
  */
 
 import { ParsedWeatherMarket } from '../polymarket/types.js';
@@ -10,49 +22,250 @@ import { PortfolioSimulator } from './portfolio.js';
 import { logger } from '../logger.js';
 import { config, getEnvVarNumber } from '../config.js';
 
-// v2 Engine Components
+// v3 Engine Components
 import { DataStore } from '../realtime/data-store.js';
+import { EventBus, eventBus } from '../realtime/event-bus.js';
 import { PriceTracker } from '../realtime/price-tracker.js';
 import { ForecastMonitor } from '../realtime/forecast-monitor.js';
-import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
+import { ConfidenceCompressionStrategy } from '../strategy/confidence-compression-strategy.js';
 import { ExitOptimizer } from '../strategy/exit-optimizer.js';
+import { EntryOptimizer } from '../strategy/entry-optimizer.js';
 import { MarketModel } from '../probability/market-model.js';
+import { MarketImpactModel, LiquidityProfile } from '../strategy/market-impact.js';
+import { CrossMarketArbitrage } from '../strategy/cross-market-arbitrage.js';
+
+/**
+ * Performance metrics by strategy component
+ */
+interface ComponentPerformance {
+    confidenceCompression: {
+        signalsGenerated: number;
+        tradesExecuted: number;
+        totalPnl: number;
+        avgExecutionTimeMs: number;
+        firstRunBlocks: number;
+        stabilityBlocks: number;
+        confidenceBlocks: number;
+    };
+    crossMarketArbitrage: {
+        opportunitiesDetected: number;
+        tradesExecuted: number;
+        totalPnl: number;
+        correlationAccuracy: number;
+    };
+    entryOptimizer: {
+        optimizationsPerformed: number;
+        avgSlippageEstimate: number;
+        avgActualSlippage: number;
+        positionScalingEvents: number;
+    };
+    exitOptimizer: {
+        exitsTriggered: number;
+        trailingStopHits: number;
+        takeProfitHits: number;
+        stopLossHits: number;
+        totalPnl: number;
+    };
+    marketImpactModel: {
+        estimatesMade: number;
+        avgEstimatedImpact: number;
+        avgActualImpact: number;
+        accuracyScore: number;
+    };
+}
+
+/**
+ * Parameter optimization framework
+ */
+interface OptimizationParameter {
+    name: string;
+    currentValue: number;
+    minValue: number;
+    maxValue: number;
+    stepSize: number;
+    testResults: Array<{
+        value: number;
+        pnl: number;
+        sharpeRatio: number;
+        maxDrawdown: number;
+    }>;
+}
+
+/**
+ * Market impact simulation parameters
+ */
+interface MarketImpactSimulation {
+    baseImpactRate: number;      // Base impact per unit of volume
+    impactDecayMs: number;       // How quickly impact decays
+    volatilityFactor: number;    // How much volatility affects impact
+    liquidityFactor: number;     // How liquidity affects impact
+}
+
+/**
+ * Cross-market correlation simulation
+ */
+interface CorrelationSimulation {
+    correlationStrength: number;     // 0-1 correlation between markets
+    lagMs: number;                   // Lag between correlated markets
+    noiseLevel: number;              // Random noise in correlation
+}
 
 export class SimulationRunner {
     private store: DataStore;
     private priceTracker: PriceTracker;
     private forecastMonitor: ForecastMonitor;
-    private strategy: SpeedArbitrageStrategy;
+    private strategy: ConfidenceCompressionStrategy;
     private simulator: PortfolioSimulator;
     private scanner: WeatherScanner;
     private exitOptimizer: ExitOptimizer;
+    private entryOptimizer: EntryOptimizer;
     private marketModel: MarketModel;
+    private marketImpactModel: MarketImpactModel;
+    private crossMarketArbitrage: CrossMarketArbitrage;
 
     private isRunning: boolean = false;
     private cycles: number = 0;
     private maxCycles: number;
     private lastLogTime: number = 0;
 
-    constructor(startingCapital: number = 1000000, maxCycles: number = 20) {
-        // Initialize v2 Engine
+    // Performance tracking
+    private componentPerformance: ComponentPerformance;
+    private optimizationParameters: OptimizationParameter[] = [];
+
+    // Market impact simulation
+    private marketImpactSim: MarketImpactSimulation;
+    private priceImpactHistory: Map<string, Array<{ timestamp: number; impact: number }>> = new Map();
+
+    // Cross-market correlation simulation
+    private correlationSim: CorrelationSimulation;
+    private correlatedMarketGroups: Map<string, string[]> = new Map();
+
+    constructor(startingCapital: number = 10000, maxCycles: number = 20) {
+        logger.info(`[SimulationRunner] Initializing v3 with startingCapital: $${startingCapital}`);
+
+        // Initialize v3 Engine
         this.store = new DataStore();
         this.priceTracker = new PriceTracker(this.store);
         this.forecastMonitor = new ForecastMonitor(this.store);
-        this.strategy = new SpeedArbitrageStrategy(this.store);
+        this.strategy = new ConfidenceCompressionStrategy(this.store);
         this.marketModel = new MarketModel(this.store);
         this.exitOptimizer = new ExitOptimizer(this.marketModel);
+        this.marketImpactModel = new MarketImpactModel();
+        this.entryOptimizer = new EntryOptimizer(
+            this.marketModel,
+            this.marketImpactModel,
+            config.maxPositionSize
+        );
+        this.crossMarketArbitrage = new CrossMarketArbitrage();
 
         // Initialize Simulator
         this.simulator = new PortfolioSimulator(startingCapital);
+        logger.info(`[SimulationRunner] PortfolioSimulator initialized. Cash: $${this.simulator.getCashBalance()}, Stats:`, this.simulator.getStats());
 
         // Scanner
         this.scanner = new WeatherScanner();
 
         this.maxCycles = maxCycles;
+
+        // Initialize performance tracking
+        this.componentPerformance = {
+            confidenceCompression: {
+                signalsGenerated: 0,
+                tradesExecuted: 0,
+                totalPnl: 0,
+                avgExecutionTimeMs: 0,
+                firstRunBlocks: 0,
+                stabilityBlocks: 0,
+                confidenceBlocks: 0,
+            },
+            crossMarketArbitrage: {
+                opportunitiesDetected: 0,
+                tradesExecuted: 0,
+                totalPnl: 0,
+                correlationAccuracy: 0,
+            },
+            entryOptimizer: {
+                optimizationsPerformed: 0,
+                avgSlippageEstimate: 0,
+                avgActualSlippage: 0,
+                positionScalingEvents: 0,
+            },
+            exitOptimizer: {
+                exitsTriggered: 0,
+                trailingStopHits: 0,
+                takeProfitHits: 0,
+                stopLossHits: 0,
+                totalPnl: 0,
+            },
+            marketImpactModel: {
+                estimatesMade: 0,
+                avgEstimatedImpact: 0,
+                avgActualImpact: 0,
+                accuracyScore: 0,
+            },
+        };
+
+        // Initialize market impact simulation
+        this.marketImpactSim = {
+            baseImpactRate: 0.001,    // 0.1% base impact
+            impactDecayMs: 60000,      // 1 minute decay
+            volatilityFactor: 0.5,
+            liquidityFactor: 0.3,
+        };
+
+        // Initialize correlation simulation
+        this.correlationSim = {
+            correlationStrength: 0.75,
+            lagMs: 300000,             // 5 minute lag
+            noiseLevel: 0.1,
+        };
+
+        // Setup optimization parameters
+        this.initializeOptimizationParameters();
+    }
+
+    /**
+     * Initialize parameter optimization framework
+     */
+    private initializeOptimizationParameters(): void {
+        this.optimizationParameters = [
+            {
+                name: 'takeProfit',
+                currentValue: 0.10,
+                minValue: 0.05,
+                maxValue: 0.20,
+                stepSize: 0.01,
+                testResults: [],
+            },
+            {
+                name: 'stopLoss',
+                currentValue: -0.15,
+                minValue: -0.25,
+                maxValue: -0.05,
+                stepSize: 0.01,
+                testResults: [],
+            },
+            {
+                name: 'minEdgeThreshold',
+                currentValue: config.minEdgeThreshold,
+                minValue: 0.05,
+                maxValue: 0.20,
+                stepSize: 0.01,
+                testResults: [],
+            },
+            {
+                name: 'maxPositionSize',
+                currentValue: config.maxPositionSize,
+                minValue: 5,
+                maxValue: 100,
+                stepSize: 5,
+                testResults: [],
+            },
+        ];
     }
 
     async start(): Promise<void> {
-        logger.info('🚀 Starting Speed Arbitrage Simulation v2...');
+        logger.info('🚀 Starting Speed Arbitrage Simulation v3...');
         this.isRunning = true;
 
         // 1. Initial Market Scan
@@ -70,6 +283,9 @@ export class SimulationRunner {
             this.store.addMarket(market);
         }
 
+        // Setup correlated market groups for simulation
+        this.setupCorrelatedMarketGroups(markets);
+
         // 2. Connect to Real-Time Data
         await this.priceTracker.start(this.scanner, 60000); // 60s scan for new markets
         this.forecastMonitor.start();
@@ -80,14 +296,57 @@ export class SimulationRunner {
             this.executeImmediateOpportunity(marketId);
         };
 
+        // 4. Listen for FORECAST_CHANGE events to populate run history store
+        // This is CRITICAL for confidence compression strategy to work
+        eventBus.on('FORECAST_CHANGE', (event) => {
+            if (event.type === 'FORECAST_CHANGE') {
+                const { cityId, cityName, variable, oldValue, newValue, model, cycleHour, timestamp, source } = event.payload;
+                const runDate = new Date(timestamp);
+
+                // Extract temperature and precipitation from the event
+                const isTemp = variable === 'TEMPERATURE';
+                const isPrecip = variable === 'PRECIPITATION';
+
+                if (isTemp) {
+                    // Value is in Celsius from file-based ingestion
+                    const tempC = newValue;
+                    this.strategy.processModelRun(
+                        cityId,
+                        model,
+                        cycleHour,
+                        runDate,
+                        tempC,
+                        false, // precipFlag
+                        0,     // precipAmountMm
+                        source
+                    );
+                    logger.info(`[Runner] Processed temperature run: ${cityId}/${model} = ${tempC.toFixed(1)}°C (source: ${source})`);
+                } else if (isPrecip) {
+                    const precipMm = newValue;
+                    this.strategy.processModelRun(
+                        cityId,
+                        model,
+                        cycleHour,
+                        runDate,
+                        0,     // maxTempC (not available)
+                        precipMm > 0.1, // precipFlag
+                        precipMm,
+                        source
+                    );
+                    logger.info(`[Runner] Processed precipitation run: ${cityId}/${model} = ${precipMm.toFixed(1)}mm (source: ${source})`);
+                }
+            }
+        });
+
         // Wait a bit for initial data to populate
         const startupDelayMs = getEnvVarNumber('STARTUP_DELAY_MS', 1000);
         logger.info(`Waiting ${startupDelayMs}ms for initial data...`);
         await new Promise(r => setTimeout(r, startupDelayMs));
 
         // 5. Main Loop
-        // We run the loop faster (e.g. 250ms) to simulate "Real-Time" without spamming logs
-        const loopInterval = 250;
+        // Use 1000ms (1 second) interval for normal operation to reduce CPU usage
+        // and make cycles counter more meaningful in dashboard
+        const loopInterval = 1000;
 
         while (this.isRunning && this.cycles < this.maxCycles) {
             this.cycles++;
@@ -100,75 +359,293 @@ export class SimulationRunner {
         this.stop();
     }
 
+    /**
+     * Setup correlated market groups for cross-market simulation
+     */
+    private setupCorrelatedMarketGroups(markets: ParsedWeatherMarket[]): void {
+        // Group markets by city proximity (simplified)
+        const cityGroups = new Map<string, ParsedWeatherMarket[]>();
+
+        for (const market of markets) {
+            if (!market.city) continue;
+
+            const cityKey = market.city.toLowerCase().replace(/\s+/g, '_');
+            if (!cityGroups.has(cityKey)) {
+                cityGroups.set(cityKey, []);
+            }
+            cityGroups.get(cityKey)!.push(market);
+        }
+
+        // Find correlated cities
+        for (const [city, cityMarkets] of cityGroups) {
+            const correlatedCities = this.crossMarketArbitrage.getCorrelatedCities(city, 0.6);
+
+            for (const corr of correlatedCities) {
+                const correlatedMarkets = cityGroups.get(corr.cityId) || [];
+
+                // Link markets between correlated cities
+                for (const market of cityMarkets) {
+                    const existing = this.correlatedMarketGroups.get(market.market.id) || [];
+                    for (const corrMarket of correlatedMarkets) {
+                        if (!existing.includes(corrMarket.market.id)) {
+                            existing.push(corrMarket.market.id);
+                        }
+                    }
+                    this.correlatedMarketGroups.set(market.market.id, existing);
+                }
+            }
+        }
+
+        logger.info(`[Simulation] Setup ${this.correlatedMarketGroups.size} correlated market groups`);
+    }
+
     private async runCycle(): Promise<void> {
         const time = new Date().toLocaleTimeString();
         // logger.info(`[Cycle ${this.cycles}] ${time} - Analyzing...`);
 
-        // 1. Update Portfolio Prices
+        // 1. Update Portfolio Prices with market impact simulation
         this.updatePortfolioPrices();
 
-        // 2. Detect Opportunities
+        // 2. Detect Cross-Market Opportunities
+        if (config.ENABLE_CROSS_MARKET_ARBITRAGE) {
+            await this.detectCrossMarketOpportunities();
+        }
+
+        // 3. Detect Speed Arbitrage Opportunities
+        const startTime = Date.now();
         const signals = this.strategy.detectOpportunities();
+        const executionTime = Date.now() - startTime;
+
         if (signals.length > 0) {
-            logger.info(`🔎 Found ${signals.length} opportunities`);
+            logger.info(`🔎 Found ${signals.length} confidence compression opportunities`);
+            this.componentPerformance.confidenceCompression.signalsGenerated += signals.length;
+
+            // Update average execution time
+            const current = this.componentPerformance.confidenceCompression;
+            current.avgExecutionTimeMs =
+                (current.avgExecutionTimeMs * current.tradesExecuted + executionTime) /
+                (current.tradesExecuted + 1);
         }
 
-        // 3. Execute Trades (Simulated)
+        // 4. Execute Trades (Simulated) with market impact
         for (const signal of signals) {
-            logger.info(`Processing signal for ${signal.marketId} (Size: ${signal.size})`);
-
-            const state = this.store.getMarketState(signal.marketId);
-            if (!state) {
-                logger.error(`State missing for ${signal.marketId}`);
-                continue;
-            }
-
-            const size = signal.size;
-
-            // Lower minimum size threshold to match portfolio.ts (was 10, now 5)
-            if (size < 5) {
-                logger.warn(`Size too small: ${size}`);
-                continue;
-            }
-
-            // Check if we already have a position
-            const existingPos = this.simulator.getAllPositions().find(p => p.marketId === signal.marketId && p.side === signal.side);
-            if (existingPos) {
-                logger.info(`Existing position found for ${signal.marketId}`);
-                continue;
-            }
-
-            // Execute
-            try {
-                const position = this.simulator.openPosition({
-                    market: state.market,
-                    forecastProbability: 0,
-                    marketProbability: 0,
-                    edge: signal.estimatedEdge,
-                    action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
-                    confidence: signal.confidence,
-                    reason: signal.reason,
-                    weatherDataSource: 'noaa',
-                    isGuaranteed: signal.isGuaranteed || false
-                }, size);
-
-                if (!position) {
-                    logger.warn(`openPosition returned null for ${signal.marketId}`);
-                } else {
-                    logger.info(`Trade executed successfully: ${position.id}`);
-                }
-
-                // Mark this opportunity as captured to prevent re-buying at higher prices
-                if (position && state.lastForecast) {
-                    this.strategy.markOpportunityCaptured(signal.marketId, state.lastForecast.forecastValue);
-                }
-            } catch (e) {
-                logger.error(`Exception in openPosition: ${(e as Error).message}`);
-            }
+            await this.executeTradeWithImpact(signal);
         }
 
-        // 4. Check Take Profit / Stop Loss (Smart Exit)
+        // 5. Check Take Profit / Stop Loss (Smart Exit) with trailing stops
+        await this.checkExits();
+
+        // 6. Log Performance Metrics every 10 cycles
+        if (this.cycles % 10 === 0) {
+            this.logPerformanceMetrics();
+        }
+
+        // 5. Log Forecast Status every 10 minutes
+        const now = Date.now();
+        if (now - this.lastLogTime >= 600000) { // 10 minutes
+            // this.logForecastStatus();
+            this.lastLogTime = now;
+        }
+    }
+
+    /**
+     * Detect cross-market arbitrage opportunities
+     */
+    private async detectCrossMarketOpportunities(): Promise<void> {
+        const markets = this.store.getAllMarkets();
+        const allSignals: Array<{
+            marketId: string;
+            side: 'yes' | 'no';
+            size: number;
+            estimatedEdge: number;
+            confidence: number;
+            reason: string;
+            isGuaranteed?: boolean;
+        }> = [];
+
+        // Get all current signals
+        const signals = this.strategy.detectOpportunities();
+        allSignals.push(...signals);
+
+        // Check for correlated opportunities
+        for (const signal of signals) {
+            const correlatedMarkets = this.correlatedMarketGroups.get(signal.marketId) || [];
+
+            for (const correlatedMarketId of correlatedMarkets) {
+                // Simulate lagged price movement
+                const state = this.store.getMarketState(correlatedMarketId);
+                if (!state) continue;
+
+                // Simulate correlation-based price prediction
+                const correlation = this.crossMarketArbitrage.getCorrelation(
+                    signal.marketId,
+                    correlatedMarketId
+                );
+
+                if (correlation && correlation.correlationCoefficient > config.MIN_CROSS_MARKET_CORRELATION) {
+                    this.componentPerformance.crossMarketArbitrage.opportunitiesDetected++;
+
+                    logger.debug(`[CrossMarket] Detected opportunity: ${signal.marketId} -> ${correlatedMarketId} ` +
+                        `(correlation: ${correlation.correlationCoefficient.toFixed(2)})`);
+                }
+            }
+        }
+    }
+
+    /**
+     * Execute trade with market impact simulation
+     */
+    private async executeTradeWithImpact(signal: {
+        marketId: string;
+        side: 'yes' | 'no';
+        size: number;
+        estimatedEdge: number;
+        confidence: number;
+        reason: string;
+        isGuaranteed?: boolean;
+    }): Promise<void> {
+        logger.info(`Processing signal for ${signal.marketId} (Size: ${signal.size})`);
+
+        const state = this.store.getMarketState(signal.marketId);
+        if (!state) {
+            logger.error(`State missing for ${signal.marketId}`);
+            return;
+        }
+
+        let size = signal.size;
+
+        // Lower minimum size threshold to match portfolio.ts (was 10, now 5)
+        if (size < 5) {
+            logger.warn(`Size too small: ${size}`);
+            return;
+        }
+
+        // Check if we already have a position
+        const existingPos = this.simulator.getAllPositions().find(p => p.marketId === signal.marketId && p.side === signal.side);
+        if (existingPos) {
+            logger.info(`Existing position found for ${signal.marketId}`);
+            return;
+        }
+
+        // Simulate market impact
+        const marketVolume = parseFloat(state.market.market.volume || '50000');
+        const liquidity: LiquidityProfile = {
+            dailyVolume: marketVolume,
+            averageTradeSize: marketVolume / 100,
+            bidDepth: state.market.yesPrice * marketVolume * 0.1,
+            askDepth: state.market.noPrice * marketVolume * 0.1,
+            spread: Math.abs(state.market.yesPrice + state.market.noPrice - 1),
+            volatility: Math.abs(this.marketModel.getPriceVelocity(signal.marketId, 'yes')),
+        };
+
+        // Get impact estimate
+        const impactEstimate = this.marketImpactModel.estimateCompleteImpact(size, liquidity);
+
+        // Track impact model performance
+        this.componentPerformance.marketImpactModel.estimatesMade++;
+        const currentImpact = this.componentPerformance.marketImpactModel;
+        currentImpact.avgEstimatedImpact =
+            (currentImpact.avgEstimatedImpact * (currentImpact.estimatesMade - 1) + impactEstimate.totalCost) /
+            currentImpact.estimatesMade;
+
+        // Simulate actual impact (with some randomness)
+        const actualImpact = this.simulateMarketImpact(size, marketVolume, liquidity);
+        currentImpact.avgActualImpact =
+            (currentImpact.avgActualImpact * (currentImpact.estimatesMade - 1) + actualImpact) /
+            currentImpact.estimatesMade;
+
+        // Update accuracy score
+        const estimateError = Math.abs(impactEstimate.totalCost - actualImpact);
+        currentImpact.accuracyScore = Math.max(0, 1 - estimateError * 10);
+
+        // Apply impact to execution price
+        const priceAdjustment = 1 + actualImpact;
+
+        // Track entry optimizer performance
+        this.componentPerformance.entryOptimizer.optimizationsPerformed++;
+        this.componentPerformance.entryOptimizer.avgSlippageEstimate =
+            (this.componentPerformance.entryOptimizer.avgSlippageEstimate *
+                (this.componentPerformance.entryOptimizer.optimizationsPerformed - 1) +
+                impactEstimate.slippageEstimate) / this.componentPerformance.entryOptimizer.optimizationsPerformed;
+
+        // Check if position scaling is needed
+        if (config.ENABLE_POSITION_SCALING && size > config.POSITION_SCALE_THRESHOLD) {
+            this.componentPerformance.entryOptimizer.positionScalingEvents++;
+            logger.info(`[PositionScaling] Scaling position for ${signal.marketId}: ${size} -> ${Math.floor(size / 2)}`);
+            size = Math.floor(size / 2);
+        }
+
+        // Execute
+        try {
+            const position = this.simulator.openPosition({
+                market: state.market,
+                forecastProbability: 0,
+                marketProbability: 0,
+                edge: signal.estimatedEdge,
+                action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
+                confidence: signal.confidence,
+                reason: signal.reason,
+                weatherDataSource: 'noaa',
+                isGuaranteed: signal.isGuaranteed || false,
+                snapshotYesPrice: state.market.yesPrice * priceAdjustment,
+                snapshotNoPrice: state.market.noPrice * priceAdjustment,
+                snapshotTimestamp: new Date(),
+            }, size);
+
+            if (!position) {
+                logger.warn(`openPosition returned null for ${signal.marketId}`);
+            } else {
+                logger.info(`Trade executed successfully: ${position.id} (Impact: ${(actualImpact * 100).toFixed(2)}%)`);
+                this.componentPerformance.confidenceCompression.tradesExecuted++;
+            }
+
+            // Mark this opportunity as captured to prevent re-buying at higher prices
+            if (position && state.lastForecast) {
+                this.strategy.markOpportunityCaptured(signal.marketId, state.lastForecast.forecastValue);
+            }
+        } catch (e) {
+            logger.error(`Exception in openPosition: ${(e as Error).message}`);
+        }
+    }
+
+    /**
+     * Simulate realistic market impact
+     */
+    private simulateMarketImpact(orderSize: number, dailyVolume: number, liquidity: LiquidityProfile): number {
+        // Base impact from square-root law
+        const participationRate = orderSize / dailyVolume;
+        const baseImpact = this.marketImpactSim.baseImpactRate * Math.sqrt(participationRate);
+
+        // Adjust for liquidity
+        const liquidityScore = Math.min(1, dailyVolume / 100000);
+        const liquidityAdjustment = 1 / (liquidityScore + 0.1);
+
+        // Adjust for volatility
+        const volatilityAdjustment = 1 + (liquidity.volatility * this.marketImpactSim.volatilityFactor);
+
+        // Add random noise
+        const noise = (Math.random() - 0.5) * 2 * this.correlationSim.noiseLevel;
+
+        const totalImpact = baseImpact * liquidityAdjustment * volatilityAdjustment * (1 + noise);
+
+        // Store impact for decay calculation
+        if (!this.priceImpactHistory.has(liquidity.toString())) {
+            this.priceImpactHistory.set(liquidity.toString(), []);
+        }
+        this.priceImpactHistory.get(liquidity.toString())!.push({
+            timestamp: Date.now(),
+            impact: totalImpact,
+        });
+
+        return Math.min(totalImpact, 0.10); // Cap at 10%
+    }
+
+    /**
+     * Check exits with trailing stops
+     */
+    private async checkExits(): Promise<void> {
         const openPositions = this.simulator.getOpenPositions();
+
         for (const pos of openPositions) {
             const state = this.store.getMarketState(pos.marketId);
             const forecastProb = state?.lastForecast?.probability || 0.5;
@@ -187,23 +664,162 @@ export class SimulationRunner {
             }, forecastProb);
 
             if (exitSignal.shouldExit) {
-                this.simulator.closePosition(pos.id, pos.currentPrice, exitSignal.reason);
+                // Track exit performance
+                this.componentPerformance.exitOptimizer.exitsTriggered++;
+
+                if (exitSignal.reason?.includes('Trailing Stop')) {
+                    this.componentPerformance.exitOptimizer.trailingStopHits++;
+                } else if (exitSignal.reason?.includes('Take Profit')) {
+                    this.componentPerformance.exitOptimizer.takeProfitHits++;
+                } else if (exitSignal.reason?.includes('Stop Loss')) {
+                    this.componentPerformance.exitOptimizer.stopLossHits++;
+                }
+
+                this.componentPerformance.exitOptimizer.totalPnl += pos.unrealizedPnL;
+
+                this.simulator.closePosition(pos.id, pos.currentPrice, exitSignal.reason || 'Unknown');
             }
         }
+    }
 
-        // 5. Log Forecast Status every 10 minutes
+    private updatePortfolioPrices(): void {
+        const markets = this.store.getAllMarkets();
+
+        // Create a map of current prices for the simulator
+        // Simulator expects "Market objects" with updated prices
+        // But simulator.updatePrices() is not implemented to take a map in v1.
+        // Let's look at how simulator updates prices.
+        // It has `updatePrices(scannedMarkets: ParsedWeatherMarket[])`
+
+        // We need to create "Updated Markets" with current prices from DataStore
+        const updatedMarkets: ParsedWeatherMarket[] = markets.map(m => {
+            const state = this.store.getMarketState(m.market.id);
+            if (!state) return m;
+
+            // Get latest prices from history
+            const lastYes = state.priceHistory.yes.history[state.priceHistory.yes.history.length - 1];
+            const lastNo = state.priceHistory.no.history[state.priceHistory.no.history.length - 1];
+
+            // Apply decayed impact from previous trades
+            const decayedImpact = this.calculateDecayedImpact(m.market.id);
+
+            return {
+                ...m,
+                yesPrice: Math.max(0.01, Math.min(0.99, (lastYes ? lastYes.price : m.yesPrice) + decayedImpact)),
+                noPrice: Math.max(0.01, Math.min(0.99, (lastNo ? lastNo.price : m.noPrice) - decayedImpact)),
+            };
+        });
+
+        this.simulator.updatePrices(updatedMarkets);
+    }
+
+    /**
+     * Calculate decayed impact from previous trades
+     */
+    private calculateDecayedImpact(marketId: string): number {
+        const history = this.priceImpactHistory.get(marketId) || [];
         const now = Date.now();
-        if (now - this.lastLogTime >= 600000) { // 10 minutes
-            // this.logForecastStatus();
-            this.lastLogTime = now;
-        }
+        let totalImpact = 0;
 
-        /*
-        // 5. Print Stats every 5 cycles
-        if (this.cycles % 5 === 0) {
-            this.simulator.printSummary();
+        // Clean old entries and calculate decayed impact
+        const validHistory = history.filter(h => {
+            const age = now - h.timestamp;
+            if (age > this.marketImpactSim.impactDecayMs * 5) return false;
+
+            // Calculate decay
+            const decayFactor = Math.exp(-age / this.marketImpactSim.impactDecayMs);
+            totalImpact += h.impact * decayFactor;
+            return true;
+        });
+
+        this.priceImpactHistory.set(marketId, validHistory);
+        return totalImpact;
+    }
+
+    /**
+     * Log performance metrics
+     */
+    private logPerformanceMetrics(): void {
+        const perf = this.componentPerformance;
+
+        logger.info('📊 Component Performance Metrics:');
+        logger.info(`  Confidence Compression: ${perf.confidenceCompression.signalsGenerated} signals, ${perf.confidenceCompression.tradesExecuted} trades, ` +
+            `${perf.confidenceCompression.avgExecutionTimeMs.toFixed(1)}ms avg execution`);
+        logger.info(`  Cross-Market: ${perf.crossMarketArbitrage.opportunitiesDetected} opportunities detected`);
+        logger.info(`  Entry Optimizer: ${perf.entryOptimizer.optimizationsPerformed} optimizations, ` +
+            `${perf.entryOptimizer.positionScalingEvents} scaling events`);
+        logger.info(`  Exit Optimizer: ${perf.exitOptimizer.exitsTriggered} exits ` +
+            `(${perf.exitOptimizer.trailingStopHits} trailing, ${perf.exitOptimizer.takeProfitHits} TP, ${perf.exitOptimizer.stopLossHits} SL)`);
+        logger.info(`  Market Impact Model: ${perf.marketImpactModel.estimatesMade} estimates, ` +
+            `${(perf.marketImpactModel.accuracyScore * 100).toFixed(1)}% accuracy ` +
+            `(est: ${(perf.marketImpactModel.avgEstimatedImpact * 100).toFixed(2)}%, ` +
+            `actual: ${(perf.marketImpactModel.avgActualImpact * 100).toFixed(2)}%)`);
+    }
+
+    /**
+     * Run parameter optimization
+     */
+    async runParameterOptimization(): Promise<void> {
+        logger.info('🔬 Starting parameter optimization...');
+
+        const startingCapital = this.simulator.getCashBalance();
+
+        for (const param of this.optimizationParameters) {
+            logger.info(`  Testing parameter: ${param.name}`);
+
+            for (let value = param.minValue; value <= param.maxValue; value += param.stepSize) {
+                // Reset simulator
+                this.simulator = new PortfolioSimulator(startingCapital);
+
+                // Apply parameter
+                if (param.name === 'takeProfit' || param.name === 'stopLoss') {
+                    this.exitOptimizer.updateConfig(
+                        param.name === 'takeProfit' ? value : 0.10,
+                        param.name === 'stopLoss' ? value : -0.15
+                    );
+                }
+
+                // Run simulation (simplified - just a few cycles)
+                const cyclesToRun = 10;
+                for (let i = 0; i < cyclesToRun && this.isRunning; i++) {
+                    await this.runCycle();
+                }
+
+                // Record results
+                const stats = this.simulator.getStats();
+                param.testResults.push({
+                    value,
+                    pnl: stats.totalPnL,
+                    sharpeRatio: this.calculateSharpeRatio(),
+                    maxDrawdown: this.calculateMaxDrawdown(),
+                });
+
+                logger.info(`    Value ${value.toFixed(2)}: PnL $${stats.totalPnL.toFixed(2)}`);
+            }
+
+            // Find optimal value
+            const bestResult = param.testResults.reduce((best, current) =>
+                current.pnl > best.pnl ? current : best
+            );
+
+            logger.info(`  Optimal ${param.name}: ${bestResult.value.toFixed(2)} (PnL: $${bestResult.pnl.toFixed(2)})`);
         }
-        */
+    }
+
+    /**
+     * Calculate Sharpe ratio (simplified)
+     */
+    private calculateSharpeRatio(): number {
+        // Simplified calculation - would need returns history for proper calculation
+        return 1.5; // Placeholder
+    }
+
+    /**
+     * Calculate max drawdown (simplified)
+     */
+    private calculateMaxDrawdown(): number {
+        // Simplified calculation - would need equity curve for proper calculation
+        return 0.05; // Placeholder
     }
 
     private logForecastStatus(): void {
@@ -244,34 +860,6 @@ export class SimulationRunner {
         logger.info('----------------------------------------');
     }
 
-    private updatePortfolioPrices(): void {
-        const markets = this.store.getAllMarkets();
-
-        // Create a map of current prices for the simulator
-        // Simulator expects "Market objects" with updated prices
-        // But simulator.updatePrices() is not implemented to take a map in v1.
-        // Let's look at how simulator updates prices.
-        // It has `updatePrices(scannedMarkets: ParsedWeatherMarket[])`
-
-        // We need to create "Updated Markets" with current prices from DataStore
-        const updatedMarkets: ParsedWeatherMarket[] = markets.map(m => {
-            const state = this.store.getMarketState(m.market.id);
-            if (!state) return m;
-
-            // Get latest prices from history
-            const lastYes = state.priceHistory.yes.history[state.priceHistory.yes.history.length - 1];
-            const lastNo = state.priceHistory.no.history[state.priceHistory.no.history.length - 1];
-
-            return {
-                ...m,
-                yesPrice: lastYes ? lastYes.price : m.yesPrice,
-                noPrice: lastNo ? lastNo.price : m.noPrice
-            };
-        });
-
-        this.simulator.updatePrices(updatedMarkets);
-    }
-
     // API Accessors
     getSimulator(): PortfolioSimulator {
         return this.simulator;
@@ -289,6 +877,20 @@ export class SimulationRunner {
         return this.isRunning;
     }
 
+    /**
+     * Get component performance metrics
+     */
+    getComponentPerformance(): ComponentPerformance {
+        return { ...this.componentPerformance };
+    }
+
+    /**
+     * Get optimization parameters with results
+     */
+    getOptimizationParameters(): OptimizationParameter[] {
+        return this.optimizationParameters.map(p => ({ ...p }));
+    }
+
     updateSettings(settings: { takeProfit: number; stopLoss: number; skipPriceCheck?: boolean }): void {
         // Convert percentage (e.g. 5) to fraction (0.05) if needed, but assuming input is fraction or %?
         // Let's assume input is raw number from UI (e.g. 5 for 5%) -> div 100
@@ -298,10 +900,8 @@ export class SimulationRunner {
 
         this.exitOptimizer.updateConfig(settings.takeProfit, settings.stopLoss);
 
-        // Update skipPriceCheck if provided
-        if (settings.skipPriceCheck !== undefined) {
-            this.strategy.setSkipPriceCheck(settings.skipPriceCheck);
-        }
+        // Update skipPriceCheck if provided (not applicable for confidence compression)
+        // The new strategy doesn't use skipPriceCheck as it relies on stability analysis
 
         logger.info('Simulation settings updated');
     }
@@ -309,14 +909,19 @@ export class SimulationRunner {
     getSettings(): { takeProfit: number; stopLoss: number; skipPriceCheck: boolean } {
         return {
             ...this.exitOptimizer.getConfig(),
-            skipPriceCheck: this.strategy.getSkipPriceCheck()
+            skipPriceCheck: false // Not applicable for confidence compression strategy
         };
     }
 
     stop(): void {
         logger.info('Stopping simulation...');
+        this.isRunning = false;
         // this.priceTracker.disconnect(); // Removed in v2 optimization
         this.forecastMonitor.stop();
+
+        // Log final performance metrics
+        this.logPerformanceMetrics();
+
         this.simulator.printSummary();
     }
 
@@ -352,7 +957,10 @@ export class SimulationRunner {
                     confidence: signal.confidence,
                     reason: signal.reason + ' (IMMEDIATE)',
                     weatherDataSource: 'noaa',
-                    isGuaranteed: signal.isGuaranteed || false
+                    isGuaranteed: signal.isGuaranteed || false,
+                    snapshotYesPrice: state.market.yesPrice,
+                    snapshotNoPrice: state.market.noPrice,
+                    snapshotTimestamp: new Date(),
                 }, size);
 
                 if (position && state.lastForecast) {
@@ -382,48 +990,35 @@ export class SimulationRunner {
 
     /**
      * Update forecast poll interval dynamically (dashboard control)
-     * Updates both regular and high priority intervals proportionally
      */
     updatePollInterval(newIntervalMs: number): void {
-        // Keep the ratio between high priority and regular intervals
-        const currentIntervals = this.forecastMonitor.getPollIntervals();
-        const ratio = currentIntervals.highPriority / currentIntervals.regular;
-        const newHighPriorityMs = Math.round(newIntervalMs * ratio);
-        this.forecastMonitor.updatePollIntervals(newIntervalMs, newHighPriorityMs);
+        this.forecastMonitor.updatePollInterval(newIntervalMs);
     }
 
     /**
-     * Get current poll interval (returns regular interval for backward compatibility)
+     * Get current poll interval
      */
     getPollInterval(): number {
-        return this.forecastMonitor.getPollIntervals().regular;
+        // Access the private pollIntervalMs from forecastMonitor if possible
+        // Otherwise return default
+        return (this.forecastMonitor as any).pollIntervalMs || config.forecastPollIntervalMs;
     }
 
     /**
-     * Get detailed poll intervals for both priority levels
+     * Update market impact simulation parameters
      */
-    getPollIntervals(): { regular: number; highPriority: number } {
-        return this.forecastMonitor.getPollIntervals();
+    updateMarketImpactSim(params: Partial<MarketImpactSimulation>): void {
+        this.marketImpactSim = { ...this.marketImpactSim, ...params };
+        logger.info('Market impact simulation parameters updated', this.marketImpactSim);
     }
 
     /**
-     * Add a city to high priority list
+     * Update correlation simulation parameters
      */
-    addHighPriorityCity(city: string): void {
-        this.forecastMonitor.addHighPriorityCity(city);
-    }
-
-    /**
-     * Remove a city from high priority list
-     */
-    removeHighPriorityCity(city: string): void {
-        this.forecastMonitor.removeHighPriorityCity(city);
-    }
-
-    /**
-     * Get all high priority cities
-     */
-    getHighPriorityCities(): string[] {
-        return this.forecastMonitor.getHighPriorityCities();
+    updateCorrelationSim(params: Partial<CorrelationSimulation>): void {
+        this.correlationSim = { ...this.correlationSim, ...params };
+        logger.info('Correlation simulation parameters updated', this.correlationSim);
     }
 }
+
+export default SimulationRunner;

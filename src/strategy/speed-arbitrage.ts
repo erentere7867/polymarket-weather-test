@@ -11,13 +11,14 @@ import { BayesianModel } from '../probability/bayesian-model.js';
 import { MarketModel } from '../probability/market-model.js';
 import { EdgeCalculator, CalculatedEdge } from '../probability/edge-calculator.js';
 import { EntryOptimizer, EntrySignal } from './entry-optimizer.js';
+import { MarketImpactModel } from './market-impact.js';
 import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
 // Maximum age of a forecast change before it's considered "stale" (market has caught up)
-// Tightened to 30 seconds - strictly fresh news only
-const MAX_CHANGE_AGE_MS = 30000;
+// RELAXED: 120 seconds - markets take time to react to forecast changes
+const MAX_CHANGE_AGE_MS = 120000;
 
 // Minimum change threshold to trigger detection
 // RELAXED: 0.0 sigma = trade on ANY deviation (Maximum Aggression)
@@ -27,6 +28,7 @@ export class SpeedArbitrageStrategy {
     private store: DataStore;
     private bayesian: BayesianModel;
     private marketModel: MarketModel;
+    private marketImpactModel: MarketImpactModel;
     private edgeCalculator: EdgeCalculator;
     private entryOptimizer: EntryOptimizer;
 
@@ -44,8 +46,9 @@ export class SpeedArbitrageStrategy {
         this.store = store;
         this.bayesian = new BayesianModel();
         this.marketModel = new MarketModel(store);
+        this.marketImpactModel = new MarketImpactModel();
         this.edgeCalculator = new EdgeCalculator(this.marketModel);
-        this.entryOptimizer = new EntryOptimizer(this.marketModel);
+        this.entryOptimizer = new EntryOptimizer(this.marketModel, this.marketImpactModel);
     }
 
     /**
@@ -236,6 +239,70 @@ export class SpeedArbitrageStrategy {
         }
 
         return opportunities;
+    }
+
+    /**
+     * Calculate probability using normal CDF approximation
+     * Instead of binary 0%/100%, uses nuanced probability based on distance from threshold
+     *
+     * @param forecastValue - The forecasted value (e.g., temperature)
+     * @param threshold - The market threshold
+     * @param comparisonType - 'above' or 'below'
+     * @returns Probability between 0 and 1
+     */
+    private calculateProbability(
+        forecastValue: number,
+        threshold: number,
+        comparisonType: 'above' | 'below'
+    ): number {
+        const UNCERTAINTY = 3; // Fixed uncertainty of 3°F
+        const diff = forecastValue - threshold;
+        const sigma = diff / UNCERTAINTY;
+        
+        // Normal CDF approximation using error function
+        // P(X > threshold) = 1 - CDF(sigma) for "above" markets
+        // P(X < threshold) = CDF(sigma) for "below" markets
+        const cdf = this.normalCDF(sigma);
+        
+        if (comparisonType === 'above') {
+            // Probability that temp is ABOVE threshold
+            return 1 - cdf;
+        } else {
+            // Probability that temp is BELOW threshold
+            return cdf;
+        }
+    }
+    
+    /**
+     * Normal CDF approximation (Abramowitz and Stegun formula)
+     * Accurate to within 7.5e-8
+     */
+    private normalCDF(x: number): number {
+        // Handle extreme values
+        if (x < -6) return 0;
+        if (x > 6) return 1;
+        
+        const b1 = 0.319381530;
+        const b2 = -0.356563782;
+        const b3 = 1.781477937;
+        const b4 = -1.821255978;
+        const b5 = 1.330274429;
+        const p = 0.2316419;
+        const c = 0.39894228;
+        
+        const absX = Math.abs(x);
+        const t = 1 / (1 + p * absX);
+        
+        const phi = c * Math.exp(-(x * x) / 2);
+        const poly = b1 * t + b2 * t * t + b3 * Math.pow(t, 3) + b4 * Math.pow(t, 4) + b5 * Math.pow(t, 5);
+        
+        let result = 1 - phi * poly;
+        
+        if (x < 0) {
+            result = 1 - result;
+        }
+        
+        return Math.max(0, Math.min(1, result));
     }
 
     /**

@@ -4,8 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Speed Arbitrage Bot | Dashboard</title>
+    <title>Weather Ingestion Dashboard | Speed Arbitrage Bot</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="dashboard.css">
     <style>
         body {
             background-color: #0f172a;
@@ -19,6 +20,104 @@
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.1);
         }
+
+        .provider-healthy {
+            color: #10b981;
+        }
+
+        .provider-error {
+            color: #ef4444;
+        }
+
+        .provider-rate-limited {
+            color: #f59e0b;
+        }
+
+        .timeline-item {
+            position: relative;
+            padding-left: 24px;
+        }
+
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: 6px;
+            top: 8px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        .timeline-item::after {
+            content: '';
+            position: absolute;
+            left: 9px;
+            top: 20px;
+            width: 2px;
+            height: calc(100% - 12px);
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .timeline-item:last-child::after {
+            display: none;
+        }
+
+        /* Progress bar styles */
+        .progress-bar {
+            transition: width 0.3s ease;
+        }
+
+        /* Button hover effects */
+        .btn-mode {
+            transition: all 0.2s ease;
+        }
+        .btn-mode:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+        .btn-mode:active {
+            transform: translateY(0);
+        }
+
+        /* Latency chart styles */
+        .latency-chart {
+            width: 100%;
+            height: 60px;
+            background: rgba(15, 23, 42, 0.5);
+            border-radius: 4px;
+        }
+
+        /* Event log container */
+        .event-log-container {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        /* City coverage grid */
+        .city-coverage-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1rem;
+        }
+
+        /* Refresh button styles */
+        .refresh-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: rgba(59, 130, 246, 0.2);
+            border: 1px solid rgba(59, 130, 246, 0.5);
+            border-radius: 0.5rem;
+            color: #60a5fa;
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .refresh-btn:hover {
+            background: rgba(59, 130, 246, 0.3);
+        }
     </style>
 </head>
 
@@ -31,14 +130,15 @@
                     class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">
                     Polymarket Speed Bot
                 </h1>
-                <p class="text-slate-400 text-sm">v2.0.0 • Speed Arbitrage Engine</p>
+                <p class="text-slate-400 text-sm">v3.0.0 • File-Based Weather Ingestion</p>
             </div>
-            <div class="flex items-center space-x-4">
+            <div class="flex items-center space-x-6">
+                <!-- Overall Status -->
                 <div class="text-right">
-                    <p class="text-xs text-slate-500">STATUS</p>
+                    <p class="text-xs text-slate-500 uppercase tracking-wider">Status</p>
                     <p id="status-text" class="text-emerald-400 font-mono font-bold">ONLINE</p>
                 </div>
-                <div class="h-3 w-3 rounded-full bg-emerald-500 animate-pulse"></div>
+                <div id="ws-connection-indicator" class="h-3 w-3 rounded-full bg-emerald-500 animate-pulse" title="WebSocket Connected"></div>
             </div>
         </header>
 
@@ -47,145 +147,421 @@
             <!-- PnL Card -->
             <div class="glass p-6 rounded-xl">
                 <p class="text-slate-500 text-xs uppercase tracking-wider">Total Equity</p>
-                <h2 id="total-equity" class="text-2xl font-bold mt-1">$0.00</h2>
-                <p id="total-pnl" class="text-sm mt-2 text-emerald-400">+$0.00 (0.00%)</p>
+                <h2 id="total-equity" class="text-2xl font-bold mt-1">Loading...</h2>
+                <p id="total-pnl" class="text-sm mt-2 text-emerald-400">--</p>
             </div>
 
             <!-- Cash Card -->
             <div class="glass p-6 rounded-xl">
                 <p class="text-slate-500 text-xs uppercase tracking-wider">Available Cash</p>
-                <h2 id="cash-balance" class="text-2xl font-bold mt-1">$0.00</h2>
+                <h2 id="cash-balance" class="text-2xl font-bold mt-1">Loading...</h2>
             </div>
 
-            <!-- Cycles Card -->
+            <!-- Webhook Stats Card -->
             <div class="glass p-6 rounded-xl">
-                <p class="text-slate-500 text-xs uppercase tracking-wider">Uptime / Cycles</p>
-                <h2 id="uptime" class="text-2xl font-bold mt-1">0s</h2>
-                <p id="cycle-count" class="text-sm mt-2 text-blue-400">Cycle #0</p>
+                <p class="text-slate-500 text-xs uppercase tracking-wider">Webhooks / Cycles</p>
+                <h2 id="webhook-count" class="text-2xl font-bold mt-1">--</h2>
+                <p id="fetch-cycles" class="text-sm mt-2 text-blue-400">-- fetch cycles</p>
             </div>
 
             <!-- Open Pos Card -->
             <div class="glass p-6 rounded-xl">
                 <p class="text-slate-500 text-xs uppercase tracking-wider">Open Positions</p>
-                <h2 id="open-positions-count" class="text-2xl font-bold mt-1">0</h2>
+                <h2 id="open-positions-count" class="text-2xl font-bold mt-1">--</h2>
             </div>
         </div>
 
-        <!-- Settings Card -->
-        <div class="glass p-6 rounded-xl">
-            <h3 class="text-xl font-bold mb-4">Strategy Settings</h3>
-            <div class="flex flex-wrap gap-6 items-end">
-                <div>
-                    <label class="block text-slate-400 text-xs uppercase tracking-wider mb-2">Take Profit (%)</label>
-                    <input type="number" id="tp-input" value="5" step="0.5"
-                        class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-emerald-400 w-32 focus:outline-none focus:border-emerald-500 transition-colors">
+        <!-- Positions Panel -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Open Positions -->
+            <div class="glass p-6 rounded-xl">
+                <h3 class="text-xl font-bold mb-4 flex items-center">
+                    <svg class="w-5 h-5 mr-2 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                    </svg>
+                    Open Positions
+                </h3>
+                <div id="positions-list" class="space-y-2 max-h-80 overflow-y-auto">
+                    <div class="text-slate-500 text-sm italic">Loading positions...</div>
                 </div>
-                <div>
-                    <label class="block text-slate-400 text-xs uppercase tracking-wider mb-2">Stop Loss (%)</label>
-                    <input type="number" id="sl-input" value="-10" step="0.5"
-                        class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-rose-400 w-32 focus:outline-none focus:border-rose-500 transition-colors">
+            </div>
+
+            <!-- Closed Positions -->
+            <div class="glass p-6 rounded-xl">
+                <h3 class="text-xl font-bold mb-4 flex items-center">
+                    <svg class="w-5 h-5 mr-2 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                    </svg>
+                    Recent Closed Positions
+                </h3>
+                <div id="closed-positions-list" class="space-y-2 max-h-80 overflow-y-auto">
+                    <div class="text-slate-500 text-sm italic">Loading closed positions...</div>
                 </div>
+            </div>
+        </div>
+
+        <!-- File Ingestion Status Panel -->
+        <div class="glass p-6 rounded-xl" id="file-ingestion-panel">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-xl font-bold flex items-center">
+                    <svg class="w-5 h-5 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                    </svg>
+                    File Ingestion Status
+                </h3>
                 <div class="flex items-center space-x-3">
-                    <input type="checkbox" id="skip-price-check" class="w-5 h-5 rounded border-white/10 bg-slate-800/50 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 cursor-pointer">
-                    <label for="skip-price-check" class="text-slate-400 text-sm cursor-pointer select-none">
-                        <span class="block text-xs uppercase tracking-wider text-slate-500">Fast Execution</span>
-                        Skip price checks on forecast changes
-                    </label>
+                    <button id="refresh-dashboard-btn" class="refresh-btn">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Refresh
+                    </button>
                 </div>
-                <button onclick="saveSettings()"
-                    class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded font-medium transition-colors flex items-center space-x-2">
-                    <span>Save Configuration</span>
-                </button>
-                <div id="save-msg" class="text-sm opacity-0 transition-opacity"></div>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">System Status</p>
+                    <p id="fi-system-status" class="text-2xl font-bold text-slate-400">--</p>
+                </div>
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Operational Mode</p>
+                    <p id="fi-operational-mode" class="text-lg font-mono text-slate-400">--</p>
+                </div>
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Active Windows</p>
+                    <p id="fi-active-windows" class="text-2xl font-bold text-slate-200">0</p>
+                </div>
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Last Confirmation</p>
+                    <p id="fi-last-confirmation" class="text-sm font-mono text-slate-400">--</p>
+                </div>
             </div>
         </div>
 
-        <!-- Speed Settings Card -->
+        <!-- Model Status Grid -->
         <div class="glass p-6 rounded-xl">
-            <h3 class="text-xl font-bold mb-4">Speed Settings</h3>
-            <div class="flex flex-wrap gap-6 items-end">
-                <div>
-                    <label class="block text-slate-400 text-xs uppercase tracking-wider mb-2">Forecast Poll Interval (ms)</label>
-                    <input type="number" id="poll-interval-input" value="5000" step="500" min="1000" max="60000"
-                        class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-blue-400 w-40 focus:outline-none focus:border-blue-500 transition-colors">
-                    <p class="text-xs text-slate-500 mt-1">How often to check weather APIs</p>
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path>
+                </svg>
+                Model Status
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <!-- HRRR -->
+                <div id="model-card-HRRR" class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-lg font-bold text-slate-200">HRRR</span>
+                        <span id="model-status-HRRR" class="text-lg font-bold text-slate-400">WAITING</span>
+                    </div>
+                    <div class="w-full bg-slate-700 rounded-full h-2 mb-3">
+                        <div id="model-progress-HRRR" class="h-full rounded-full bg-slate-600" style="width: 0%"></div>
+                    </div>
+                    <div class="text-xs text-slate-500 space-y-1">
+                        <div class="flex justify-between">
+                            <span>Last Run:</span>
+                            <span id="model-last-HRRR" class="font-mono text-slate-400">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Next Expected:</span>
+                            <span id="model-next-HRRR" class="font-mono text-slate-400">--</span>
+                        </div>
+                    </div>
                 </div>
-                <div>
-                    <label class="block text-slate-400 text-xs uppercase tracking-wider mb-2">Cache TTL (ms)</label>
-                    <input type="number" id="cache-ttl-input" value="2000" step="500" min="0" max="30000"
-                        class="bg-slate-800/50 border border-white/10 rounded px-4 py-2 text-purple-400 w-40 focus:outline-none focus:border-purple-500 transition-colors">
-                    <p class="text-xs text-slate-500 mt-1">How long to cache weather data</p>
+                <!-- RAP -->
+                <div id="model-card-RAP" class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-lg font-bold text-slate-200">RAP</span>
+                        <span id="model-status-RAP" class="text-lg font-bold text-slate-400">WAITING</span>
+                    </div>
+                    <div class="w-full bg-slate-700 rounded-full h-2 mb-3">
+                        <div id="model-progress-RAP" class="h-full rounded-full bg-slate-600" style="width: 0%"></div>
+                    </div>
+                    <div class="text-xs text-slate-500 space-y-1">
+                        <div class="flex justify-between">
+                            <span>Last Run:</span>
+                            <span id="model-last-RAP" class="font-mono text-slate-400">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Next Expected:</span>
+                            <span id="model-next-RAP" class="font-mono text-slate-400">--</span>
+                        </div>
+                    </div>
                 </div>
-                <button onclick="saveSpeedSettings()"
-                    class="bg-purple-600 hover:bg-purple-500 text-white px-6 py-2 rounded font-medium transition-colors flex items-center space-x-2">
-                    <span>Save Speed Settings</span>
-                </button>
-                <div id="speed-save-msg" class="text-sm opacity-0 transition-opacity"></div>
+                <!-- GFS -->
+                <div id="model-card-GFS" class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-lg font-bold text-slate-200">GFS</span>
+                        <span id="model-status-GFS" class="text-lg font-bold text-slate-400">WAITING</span>
+                    </div>
+                    <div class="w-full bg-slate-700 rounded-full h-2 mb-3">
+                        <div id="model-progress-GFS" class="h-full rounded-full bg-slate-600" style="width: 0%"></div>
+                    </div>
+                    <div class="text-xs text-slate-500 space-y-1">
+                        <div class="flex justify-between">
+                            <span>Last Run:</span>
+                            <span id="model-last-GFS" class="font-mono text-slate-400">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Next Expected:</span>
+                            <span id="model-next-GFS" class="font-mono text-slate-400">--</span>
+                        </div>
+                    </div>
+                </div>
+                <!-- ECMWF -->
+                <div id="model-card-ECMWF" class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-lg font-bold text-slate-200">ECMWF</span>
+                        <span id="model-status-ECMWF" class="text-lg font-bold text-slate-400">WAITING</span>
+                    </div>
+                    <div class="w-full bg-slate-700 rounded-full h-2 mb-3">
+                        <div id="model-progress-ECMWF" class="h-full rounded-full bg-slate-600" style="width: 0%"></div>
+                    </div>
+                    <div class="text-xs text-slate-500 space-y-1">
+                        <div class="flex justify-between">
+                            <span>Last Run:</span>
+                            <span id="model-last-ECMWF" class="font-mono text-slate-400">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Next Expected:</span>
+                            <span id="model-next-ECMWF" class="font-mono text-slate-400">--</span>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
-        <!-- Active Positions Table -->
-        <div class="glass rounded-xl overflow-hidden">
-            <div class="p-6 border-b border-white/10 flex justify-between items-center">
-                <h3 class="text-xl font-bold">Active Trades</h3>
-            </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-slate-400">
-                    <thead class="bg-slate-800/50 text-xs uppercase">
-                        <tr>
-                            <th class="p-4">Market</th>
-                            <th class="p-4">Pos</th>
-                            <th class="p-4">Entry</th>
-                            <th class="p-4">Current</th>
-                            <th class="p-4">Size</th>
-                            <th class="p-4">PnL</th>
-                        </tr>
-                    </thead>
-                    <tbody id="positions-table" class="divide-y divide-white/5">
-                        <!-- Rows injected by JS -->
-                        <tr>
-                            <td colspan="6" class="p-8 text-center text-slate-600 italic">No active positions... yet.
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
+        <!-- Latency Metrics Panel -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                </svg>
+                Latency Metrics
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <!-- Detection Latency -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider mb-2">Detection</p>
+                    <div class="space-y-2 text-sm">
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Last:</span>
+                            <span id="latency-detection-last" class="font-mono text-slate-200">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Avg:</span>
+                            <span id="latency-detection-avg" class="font-mono text-slate-200">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">P95:</span>
+                            <span id="latency-detection-p95" class="font-mono text-slate-200">--</span>
+                        </div>
+                    </div>
+                    <canvas id="chart-detection" class="latency-chart mt-3"></canvas>
+                </div>
+                <!-- Download Latency -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider mb-2">Download</p>
+                    <div class="space-y-2 text-sm">
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Last:</span>
+                            <span id="latency-download-last" class="font-mono text-slate-200">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Avg:</span>
+                            <span id="latency-download-avg" class="font-mono text-slate-200">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">P95:</span>
+                            <span id="latency-download-p95" class="font-mono text-slate-200">--</span>
+                        </div>
+                    </div>
+                    <canvas id="chart-download" class="latency-chart mt-3"></canvas>
+                </div>
+                <!-- Parse Latency -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider mb-2">Parse</p>
+                    <div class="space-y-2 text-sm">
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Last:</span>
+                            <span id="latency-parse-last" class="font-mono text-slate-200">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Avg:</span>
+                            <span id="latency-parse-avg" class="font-mono text-slate-200">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">P95:</span>
+                            <span id="latency-parse-p95" class="font-mono text-slate-200">--</span>
+                        </div>
+                    </div>
+                    <canvas id="chart-parse" class="latency-chart mt-3"></canvas>
+                </div>
+                <!-- End-to-End Latency -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider mb-2">End-to-End</p>
+                    <div class="flex items-center justify-between mb-2">
+                        <span id="latency-e2e-value" class="text-2xl font-mono font-bold text-slate-200">--</span>
+                        <span id="latency-e2e-indicator" class="text-slate-600 text-xl">○</span>
+                    </div>
+                    <div class="space-y-2 text-sm">
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Avg:</span>
+                            <span id="latency-e2e-avg" class="font-mono text-slate-200">--</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">P95:</span>
+                            <span id="latency-e2e-p95" class="font-mono text-slate-200">--</span>
+                        </div>
+                    </div>
+                    <canvas id="chart-e2e" class="latency-chart mt-3"></canvas>
+                </div>
             </div>
         </div>
 
-        <!-- Closed Trades Table -->
-        <div class="glass rounded-xl overflow-hidden">
-            <div class="p-6 border-b border-white/10 flex justify-between items-center">
-                <h3 class="text-xl font-bold">Closed Trades</h3>
-                <div class="flex space-x-4 text-sm">
-                    <span id="win-rate" class="text-emerald-400">Win Rate: 0%</span>
-                    <span id="total-realized-pnl" class="text-slate-400">Realized: $0.00</span>
+        <!-- City Coverage Table -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                </svg>
+                City Coverage
+            </h3>
+            <div id="city-coverage-container" class="city-coverage-grid">
+                <div class="text-slate-500 text-sm italic">Loading city data...</div>
+            </div>
+        </div>
+
+        <!-- API Fallback Panel -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path>
+                </svg>
+                API Fallback Status
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Status</p>
+                    <p id="api-status" class="text-lg font-bold text-slate-400">INACTIVE</p>
+                </div>
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Polls in Window</p>
+                    <p id="api-polls" class="text-2xl font-bold text-slate-200">0</p>
+                </div>
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Last API Update</p>
+                    <p id="api-last-update" class="text-sm font-mono text-slate-400">--</p>
+                </div>
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">File/API Ratio</p>
+                    <p id="api-ratio" class="text-sm font-mono text-slate-400">N/A</p>
                 </div>
             </div>
-            <div class="overflow-x-auto max-h-96">
-                <table class="w-full text-left text-slate-400">
-                    <thead class="bg-slate-800/50 text-xs uppercase sticky top-0">
-                        <tr>
-                            <th class="p-4">Market</th>
-                            <th class="p-4">Side</th>
-                            <th class="p-4">Entry</th>
-                            <th class="p-4">Exit</th>
-                            <th class="p-4">Shares</th>
-                            <th class="p-4">PnL ($)</th>
-                            <th class="p-4">PnL (%)</th>
-                            <th class="p-4">Duration</th>
-                        </tr>
-                    </thead>
-                    <tbody id="closed-positions-table" class="divide-y divide-white/5">
-                        <tr>
-                            <td colspan="8" class="p-8 text-center text-slate-600 italic">No closed trades yet.</td>
-                        </tr>
-                    </tbody>
-                </table>
+        </div>
+
+        <!-- Confidence Compression Strategy Panel -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                </svg>
+                Confidence Compression Strategy
+            </h3>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">First Run Blocks</p>
+                    <p id="cc-first-run-blocks" class="text-2xl font-bold text-rose-400">0</p>
+                    <p class="text-xs text-slate-500">Never trade on first run</p>
+                </div>
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Stability Blocks</p>
+                    <p id="cc-stability-blocks" class="text-2xl font-bold text-amber-400">0</p>
+                    <p class="text-xs text-slate-500">Failed Δ≤0.3°C check</p>
+                </div>
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Confidence Blocks</p>
+                    <p id="cc-confidence-blocks" class="text-2xl font-bold text-blue-400">0</p>
+                    <p class="text-xs text-slate-500">Below threshold</p>
+                </div>
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Signals Generated</p>
+                    <p id="cc-signals" class="text-2xl font-bold text-emerald-400">0</p>
+                    <p class="text-xs text-slate-500">Passed all checks</p>
+                </div>
+            </div>
+            <div class="mt-4 grid grid-cols-2 gap-4">
+                <div class="bg-slate-800/30 rounded-lg p-3 border border-slate-700/50">
+                    <p class="text-xs text-slate-500 uppercase mb-2">Model Hierarchy (US)</p>
+                    <div class="flex items-center space-x-2">
+                        <span class="px-2 py-1 bg-emerald-500/20 text-emerald-400 rounded text-xs font-mono">HRRR</span>
+                        <span class="text-slate-600">→</span>
+                        <span class="px-2 py-1 bg-blue-500/20 text-blue-400 rounded text-xs font-mono">RAP</span>
+                        <span class="text-slate-600">→</span>
+                        <span class="px-2 py-1 bg-violet-500/20 text-violet-400 rounded text-xs font-mono">GFS</span>
+                    </div>
+                </div>
+                <div class="bg-slate-800/30 rounded-lg p-3 border border-slate-700/50">
+                    <p class="text-xs text-slate-500 uppercase mb-2">Confidence Thresholds</p>
+                    <div class="flex items-center space-x-4">
+                        <div>
+                            <span class="text-xs text-slate-400">Temp:</span>
+                            <span id="cc-temp-threshold" class="text-emerald-400 font-mono ml-1">60%</span>
+                        </div>
+                        <div>
+                            <span class="text-xs text-slate-400">Precip:</span>
+                            <span id="cc-precip-threshold" class="text-amber-400 font-mono ml-1">75%</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Event Log -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-rose-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                </svg>
+                Event Log
+            </h3>
+            <div id="event-log-container" class="event-log-container">
+                <div class="text-slate-500 text-sm italic">Waiting for events...</div>
+            </div>
+        </div>
+
+        <!-- Detection Windows & Upcoming Runs -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="glass p-6 rounded-xl">
+                <h3 class="text-xl font-bold mb-4 flex items-center">
+                    <svg class="w-5 h-5 mr-2 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    Active Detection Windows
+                </h3>
+                <div id="detection-windows-container" class="space-y-2">
+                    <div class="text-slate-500 text-sm italic">No active windows</div>
+                </div>
+            </div>
+            <div class="glass p-6 rounded-xl">
+                <h3 class="text-xl font-bold mb-4 flex items-center">
+                    <svg class="w-5 h-5 mr-2 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                    </svg>
+                    Upcoming Model Runs
+                </h3>
+                <div id="upcoming-runs-container" class="space-y-2">
+                    <div class="text-slate-500 text-sm italic">Loading schedule...</div>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- Logic -->
+    <!-- Dashboard JavaScript -->
+    <script src="dashboard.js"></script>
+
+    <!-- Portfolio & Stats Logic -->
     <script>
         const API_BASE = '/api';
 
@@ -195,9 +571,6 @@
                 const statusRes = await fetch(`${API_BASE}/status`);
                 const statusData = await statusRes.json();
 
-                document.getElementById('cycle-count').innerText = `Cycle #${statusData.cycles}`;
-                document.getElementById('uptime').innerText = formatTime(statusData.uptime);
-
                 // 2. Portfolio
                 const portRes = await fetch(`${API_BASE}/portfolio`);
                 const portData = await portRes.json();
@@ -205,218 +578,55 @@
                 document.getElementById('total-equity').innerText = formatCurrency(portData.totalValue);
                 document.getElementById('cash-balance').innerText = formatCurrency(portData.currentCash);
 
-                const pnl = portData.unrealizedPnL + portData.realizedPnL; // Simplified
+                const pnl = portData.unrealizedPnL + portData.realizedPnL;
                 const pnlEl = document.getElementById('total-pnl');
-                pnlEl.innerText = `${pnl >= 0 ? '+' : ''}${formatCurrency(pnl)}`;
+                pnlEl.innerText = `${pnl >= 0 ? '+' : ''}${formatCurrency(pnl)} (${portData.totalPnLPercent.toFixed(2)}%)`;
                 pnlEl.className = `text-sm mt-2 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
-
-                // 3. Positions
-                const posRes = await fetch(`${API_BASE}/positions/active`);
-                const positions = await posRes.json();
-
-                document.getElementById('open-positions-count').innerText = positions.length;
-                renderPositions(positions);
-
-                // 4. Closed Positions
-                const closedRes = await fetch(`${API_BASE}/positions/closed`);
-                const closedPositions = await closedRes.json();
-                renderClosedPositions(closedPositions);
-
-                // Update win rate and realized PnL stats
-                if (closedPositions.length > 0) {
-                    const wins = closedPositions.filter(p => p.realizedPnL > 0).length;
-                    const winRate = ((wins / closedPositions.length) * 100).toFixed(1);
-                    const totalRealizedPnL = closedPositions.reduce((sum, p) => sum + p.realizedPnL, 0);
-
-                    document.getElementById('win-rate').innerText = `Win Rate: ${winRate}%`;
-                    const realizedEl = document.getElementById('total-realized-pnl');
-                    realizedEl.innerText = `Realized: ${totalRealizedPnL >= 0 ? '+' : ''}${formatCurrency(totalRealizedPnL)}`;
-                    realizedEl.className = `text-sm ${totalRealizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
-                }
 
             } catch (err) {
                 console.error('Fetch error:', err);
                 document.getElementById('status-text').innerText = 'OFFLINE';
                 document.getElementById('status-text').className = 'text-rose-500 font-bold font-mono';
-                // Show error details in cycle count for debugging
-                document.getElementById('cycle-count').innerText = `Err: ${err.message}`;
             }
         }
 
-        function renderPositions(positions) {
-            const tbody = document.getElementById('positions-table');
-            if (positions.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-slate-600 italic">No active positions... yet.</td></tr>`;
-                return;
-            }
+        async function fetchWebhookStats() {
+            try {
+                // Webhook Status
+                const webhookRes = await fetch(`${API_BASE}/webhook/status`);
+                const webhookData = await webhookRes.json();
 
-            tbody.innerHTML = positions.map(p => `
-                <tr class="hover:bg-white/5 transition-colors">
-                    <td class="p-4 font-medium text-white truncate max-w-xs" title="${p.marketTitle}">${p.marketTitle}</td>
-                    <td class="p-4"><span class="px-2 py-1 rounded text-xs font-bold ${p.side === 'yes' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}">${p.side.toUpperCase()}</span></td>
-                    <td class="p-4">${formatPrice(p.entryPrice)}</td>
-                    <td class="p-4 text-white">${formatPrice(p.currentPrice)}</td>
-                    <td class="p-4">${p.shares}</td>
-                    <td class="p-4 font-mono font-bold ${p.pnlPercent >= 0 ? 'text-emerald-400' : 'text-rose-400'}">
-                        ${p.pnlPercent >= 0 ? '+' : ''}${p.pnlPercent.toFixed(2)}%
-                    </td>
-                </tr>
-            `).join('');
+                document.getElementById('webhook-count').innerText = webhookData.webhooksReceived || 0;
+
+            } catch (err) {
+                console.error('Webhook stats error:', err);
+            }
         }
 
-        function renderClosedPositions(positions) {
-            const tbody = document.getElementById('closed-positions-table');
-            if (positions.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="8" class="p-8 text-center text-slate-600 italic">No closed trades yet.</td></tr>`;
-                return;
-            }
+        async function fetchForecastTriggers() {
+            try {
+                const res = await fetch(`${API_BASE}/forecast/triggers`);
+                const data = await res.json();
 
-            tbody.innerHTML = positions.map(p => `
-                <tr class="hover:bg-white/5 transition-colors ${p.realizedPnL >= 0 ? 'border-l-2 border-emerald-500/50' : 'border-l-2 border-rose-500/50'}">
-                    <td class="p-4 font-medium text-white truncate max-w-xs" title="${p.marketQuestion}">${p.marketQuestion.substring(0, 40)}...</td>
-                    <td class="p-4"><span class="px-2 py-1 rounded text-xs font-bold ${p.side === 'yes' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}">${p.side.toUpperCase()}</span></td>
-                    <td class="p-4">${formatPrice(p.entryPrice)}</td>
-                    <td class="p-4">${formatPrice(p.exitPrice)}</td>
-                    <td class="p-4">${p.shares}</td>
-                    <td class="p-4 font-mono font-bold ${p.realizedPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}">
-                        ${p.realizedPnL >= 0 ? '+' : ''}${formatCurrency(p.realizedPnL)}
-                    </td>
-                    <td class="p-4 font-mono font-bold ${p.pnlPercent >= 0 ? 'text-emerald-400' : 'text-rose-400'}">
-                        ${p.pnlPercent >= 0 ? '+' : ''}${p.pnlPercent.toFixed(2)}%
-                    </td>
-                    <td class="p-4 text-slate-500">${formatDuration(p.holdDurationSeconds)}</td>
-                </tr>
-            `).join('');
+                document.getElementById('fetch-cycles').innerText = `${data.fetchCyclesCompleted || 0} fetch cycles`;
+
+            } catch (err) {
+                console.error('Forecast triggers error:', err);
+            }
         }
 
         function formatCurrency(num) {
             return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
         }
 
-        function formatPrice(num) {
-            return '$' + num.toFixed(3); // Polymarket cents
-        }
-
-        function formatDuration(seconds) {
-            const secs = Math.floor(seconds);
-            if (secs < 60) return `${secs}s`;
-            if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
-            const hrs = Math.floor(secs / 3600);
-            const mins = Math.floor((secs % 3600) / 60);
-            return `${hrs}h ${mins}m`;
-        }
-
-        function formatTime(seconds) {
-            const secs = Math.floor(seconds);
-            if (secs < 60) return secs + 's';
-            const mins = Math.floor(secs / 60);
-            const hrs = Math.floor(mins / 60);
-            if (hrs > 0) return `${hrs}h ${mins % 60}m`;
-            return `${mins}m ${secs % 60}s`;
-        }
-
         // Poll every 3 seconds
         fetchStats();
-        fetchSettings();
+        fetchWebhookStats();
+        fetchForecastTriggers();
+
         setInterval(fetchStats, 3000);
-
-        async function fetchSettings() {
-            try {
-                const res = await fetch(`${API_BASE}/settings`);
-                const data = await res.json();
-
-                if (res.ok) {
-                    document.getElementById('tp-input').value = data.takeProfit;
-                    document.getElementById('sl-input').value = data.stopLoss;
-                    document.getElementById('skip-price-check').checked = data.skipPriceCheck || false;
-                    document.getElementById('poll-interval-input').value = data.pollIntervalMs || 5000;
-                    document.getElementById('cache-ttl-input').value = data.cacheTtlMs || 2000;
-                }
-            } catch (err) {
-                console.error('Failed to fetch settings:', err);
-            }
-        }
-
-        async function saveSettings() {
-            const tpInput = document.getElementById('tp-input');
-            const slInput = document.getElementById('sl-input');
-            const skipPriceCheckInput = document.getElementById('skip-price-check');
-            const msgEl = document.getElementById('save-msg');
-
-            const takeProfit = parseFloat(tpInput.value);
-            const stopLoss = parseFloat(slInput.value);
-            const skipPriceCheck = skipPriceCheckInput.checked;
-
-            try {
-                const res = await fetch(`${API_BASE}/settings`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ takeProfit, stopLoss, skipPriceCheck })
-                });
-
-                if (res.ok) {
-                    msgEl.innerText = '✅ Settings Saved!';
-                    msgEl.className = 'text-sm text-emerald-400 opacity-100 transition-opacity';
-                } else {
-                    const data = await res.json();
-                    msgEl.innerText = '❌ Error: ' + (data.error || 'Failed');
-                    msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
-                }
-
-                setTimeout(() => {
-                    msgEl.className = 'text-sm opacity-0 transition-opacity';
-                }, 3000);
-
-            } catch (err) {
-                console.error('Save error:', err);
-                msgEl.innerText = '❌ Network Error';
-                msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
-            }
-        }
-
-        async function saveSpeedSettings() {
-            const pollIntervalInput = document.getElementById('poll-interval-input');
-            const cacheTtlInput = document.getElementById('cache-ttl-input');
-            const msgEl = document.getElementById('speed-save-msg');
-
-            const intervalMs = parseInt(pollIntervalInput.value);
-            const ttlMs = parseInt(cacheTtlInput.value);
-
-            try {
-                // Update poll interval
-                const pollRes = await fetch(`${API_BASE}/settings/poll-interval`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ intervalMs })
-                });
-
-                // Update cache TTL
-                const cacheRes = await fetch(`${API_BASE}/settings/cache-ttl`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ttlMs })
-                });
-
-                if (pollRes.ok && cacheRes.ok) {
-                    msgEl.innerText = '✅ Speed Settings Saved!';
-                    msgEl.className = 'text-sm text-emerald-400 opacity-100 transition-opacity';
-                } else {
-                    const pollData = await pollRes.json().catch(() => ({}));
-                    const cacheData = await cacheRes.json().catch(() => ({}));
-                    msgEl.innerText = '❌ Error: ' + (pollData.message || cacheData.message || 'Failed');
-                    msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
-                }
-
-                setTimeout(() => {
-                    msgEl.className = 'text-sm opacity-0 transition-opacity';
-                }, 3000);
-
-            } catch (err) {
-                console.error('Save speed settings error:', err);
-                msgEl.innerText = '❌ Network Error';
-                msgEl.className = 'text-sm text-rose-400 opacity-100 transition-opacity';
-            }
-        }
+        setInterval(fetchWebhookStats, 3000);
+        setInterval(fetchForecastTriggers, 3000);
     </script>
 </body>
 

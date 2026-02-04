@@ -13,6 +13,8 @@ export class PriceTracker {
     private ws: PolymarketWebSocket;
     private scanner: WeatherScanner | null = null;
     private intervalId: NodeJS.Timeout | null = null;
+    // Track already-subscribed tokens to avoid duplicate subscriptions
+    private subscribedTokens: Set<string> = new Set();
 
     constructor(store: DataStore) {
         this.store = store;
@@ -57,9 +59,8 @@ export class PriceTracker {
     private async scanAndSubscribe() {
         if (!this.scanner) return;
         try {
-            // logger.debug('Scanning for markets to subscribe...');
             const markets = await this.scanner.scanForWeatherMarkets();
-            const tokenIds: string[] = [];
+            const newTokenIds: string[] = [];
             const now = new Date();
 
             for (const market of markets) {
@@ -70,14 +71,23 @@ export class PriceTracker {
                 this.store.updatePrice(market.yesTokenId, market.yesPrice, now);
                 this.store.updatePrice(market.noTokenId, market.noPrice, now);
                 
-                // Collect tokens for WS subscription
-                tokenIds.push(market.yesTokenId);
-                tokenIds.push(market.noTokenId);
+                // Only collect NEW tokens that haven't been subscribed yet
+                if (!this.subscribedTokens.has(market.yesTokenId)) {
+                    newTokenIds.push(market.yesTokenId);
+                }
+                if (!this.subscribedTokens.has(market.noTokenId)) {
+                    newTokenIds.push(market.noTokenId);
+                }
             }
 
-            // Subscribe to all tokens
-            if (tokenIds.length > 0) {
-                this.ws.subscribeToPrices(tokenIds);
+            // Subscribe only to NEW tokens (delta-based subscription)
+            if (newTokenIds.length > 0) {
+                this.ws.subscribeToPrices(newTokenIds);
+                // Track newly subscribed tokens
+                for (const tokenId of newTokenIds) {
+                    this.subscribedTokens.add(tokenId);
+                }
+                logger.debug(`Subscribed to ${newTokenIds.length} new tokens (total: ${this.subscribedTokens.size})`);
             }
 
         } catch (error) {

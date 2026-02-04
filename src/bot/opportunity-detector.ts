@@ -7,9 +7,10 @@ import { WeatherService } from '../weather/index.js';
 import { ParsedWeatherMarket, TradingOpportunity } from '../polymarket/types.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { DataStore } from '../realtime/data-store.js';
 
 // Threshold for considering market "caught up" to the forecast
-const MARKET_CAUGHT_UP_THRESHOLD = 0.05; // If price within 5% of probability, market caught up
+const MARKET_CAUGHT_UP_THRESHOLD = 0.02; // If price within 2% of probability, market caught up - trade even when market has moved partially
 
 // Default significant change (fallback)
 const DEFAULT_SIGNIFICANT_CHANGE = 1.0;
@@ -20,14 +21,92 @@ interface CapturedOpportunity {
     side: 'buy_yes' | 'buy_no';
 }
 
+// Track rejection reasons for debugging
+interface RejectionStats {
+    marketCaughtUp: number;
+    alreadyCaptured: number;
+    forecastChangeBelowThreshold: number;
+    totalChecked: number;
+}
+
 export class OpportunityDetector {
     private weatherService: WeatherService;
+    private store: DataStore | null;
 
     // Track opportunities we've already acted on - prevents re-buying at higher prices
     private capturedOpportunities: Map<string, CapturedOpportunity> = new Map();
+    
+    // Track rejection reasons for debugging
+    private rejectionStats: RejectionStats = {
+        marketCaughtUp: 0,
+        alreadyCaptured: 0,
+        forecastChangeBelowThreshold: 0,
+        totalChecked: 0,
+    };
+    private lastRejectionLogTime: number = 0;
 
-    constructor() {
+    constructor(store?: DataStore) {
         this.weatherService = new WeatherService();
+        this.store = store ?? null;
+    }
+
+    private getStoredForecast(market: ParsedWeatherMarket): {
+        probability: number;
+        forecastValue: number;
+        confidence: number;
+    } | null {
+        if (!this.store) return null;
+
+        const state = this.store.getMarketState(market.market.id);
+        const snapshot = state?.lastForecast;
+        if (!snapshot) return null;
+
+        if (snapshot.probability === undefined || snapshot.forecastValue === undefined) return null;
+
+        const source = snapshot.weatherData?.source;
+        const confidence = source === 'S3_FILE' ? 1.0 : 0.7;
+
+        return {
+            probability: snapshot.probability,
+            forecastValue: snapshot.forecastValue,
+            confidence,
+        };
+    }
+    
+    /**
+     * Get rejection statistics for debugging
+     */
+    getRejectionStats(): RejectionStats {
+        return { ...this.rejectionStats };
+    }
+    
+    /**
+     * Reset rejection statistics
+     */
+    resetRejectionStats(): void {
+        this.rejectionStats = {
+            marketCaughtUp: 0,
+            alreadyCaptured: 0,
+            forecastChangeBelowThreshold: 0,
+            totalChecked: 0,
+        };
+    }
+    
+    /**
+     * Log rejection reasons periodically (every 5 minutes)
+     */
+    private logRejectionStats(): void {
+        const now = Date.now();
+        if (now - this.lastRejectionLogTime > 5 * 60 * 1000) {
+            logger.info('📊 Opportunity Rejection Stats (last 5 min)', {
+                totalChecked: this.rejectionStats.totalChecked,
+                marketCaughtUp: this.rejectionStats.marketCaughtUp,
+                alreadyCaptured: this.rejectionStats.alreadyCaptured,
+                forecastChangeBelowThreshold: this.rejectionStats.forecastChangeBelowThreshold,
+            });
+            this.resetRejectionStats();
+            this.lastRejectionLogTime = now;
+        }
     }
 
     /**
@@ -69,9 +148,13 @@ export class OpportunityDetector {
         marketProbability: number,
         forecastProbability: number
     ): { skip: boolean; reason: string } {
+        this.rejectionStats.totalChecked++;
+        
         // Check 1: Has market caught up to the probability?
         const priceDiff = Math.abs(marketProbability - forecastProbability);
         if (priceDiff < MARKET_CAUGHT_UP_THRESHOLD) {
+            this.rejectionStats.marketCaughtUp++;
+            this.logRejectionStats();
             return {
                 skip: true,
                 reason: `Market caught up: price ${(marketProbability * 100).toFixed(1)}% ≈ forecast ${(forecastProbability * 100).toFixed(1)}% (diff ${(priceDiff * 100).toFixed(1)}% < ${(MARKET_CAUGHT_UP_THRESHOLD * 100).toFixed(0)}%)`
@@ -113,6 +196,9 @@ export class OpportunityDetector {
             return { skip: false, reason: '' };
         }
 
+        this.rejectionStats.alreadyCaptured++;
+        this.rejectionStats.forecastChangeBelowThreshold++;
+        this.logRejectionStats();
         return {
             skip: true,
             reason: `Already captured - forecast change below threshold`
@@ -141,54 +227,64 @@ export class OpportunityDetector {
             let weatherDataSource: 'noaa' | 'openweather' = 'noaa';
             let confidence = 0.7; // Default confidence
 
-            switch (market.metricType) {
-                case 'temperature_high':
-                case 'temperature_threshold':
-                    const result = await this.analyzeTemperatureMarket(market);
-                    if (result) {
-                        forecastProbability = result.probability;
-                        forecastValue = result.forecastValue;
-                        forecastValueUnit = '°F';
-                        weatherDataSource = result.source;
-                        confidence = result.confidence;
-                    }
-                    break;
+            const stored = this.getStoredForecast(market);
+            if (stored) {
+                forecastProbability = stored.probability;
+                forecastValue = stored.forecastValue;
+                confidence = stored.confidence;
+                forecastValueUnit = market.metricType === 'precipitation' ? '%' : '°F';
+            }
 
-                case 'temperature_low':
-                    const lowResult = await this.analyzeTemperatureLowMarket(market);
-                    if (lowResult) {
-                        forecastProbability = lowResult.probability;
-                        forecastValue = lowResult.forecastValue;
-                        forecastValueUnit = '°F';
-                        weatherDataSource = lowResult.source;
-                        confidence = lowResult.confidence;
+            if (forecastProbability === null) {
+                switch (market.metricType) {
+                    case 'temperature_high':
+                    case 'temperature_threshold': {
+                        const result = await this.analyzeTemperatureMarket(market);
+                        if (result) {
+                            forecastProbability = result.probability;
+                            forecastValue = result.forecastValue;
+                            forecastValueUnit = '°F';
+                            weatherDataSource = result.source;
+                            confidence = result.confidence;
+                        }
+                        break;
                     }
-                    break;
-
-                case 'temperature_range':
-                    const rangeResult = await this.analyzeTemperatureRangeMarket(market);
-                    if (rangeResult) {
-                        forecastProbability = rangeResult.probability;
-                        forecastValue = rangeResult.forecastValue;
-                        forecastValueUnit = '°F';
-                        weatherDataSource = rangeResult.source;
-                        confidence = rangeResult.confidence;
+                    case 'temperature_low': {
+                        const lowResult = await this.analyzeTemperatureLowMarket(market);
+                        if (lowResult) {
+                            forecastProbability = lowResult.probability;
+                            forecastValue = lowResult.forecastValue;
+                            forecastValueUnit = '°F';
+                            weatherDataSource = lowResult.source;
+                            confidence = lowResult.confidence;
+                        }
+                        break;
                     }
-                    break;
-
-                case 'precipitation':
-                    const precipResult = await this.analyzePrecipitationMarket(market);
-                    if (precipResult) {
-                        forecastProbability = precipResult.probability;
-                        forecastValue = precipResult.forecastValue;
-                        forecastValueUnit = '%';
-                        weatherDataSource = precipResult.source;
-                        confidence = precipResult.confidence;
+                    case 'temperature_range': {
+                        const rangeResult = await this.analyzeTemperatureRangeMarket(market);
+                        if (rangeResult) {
+                            forecastProbability = rangeResult.probability;
+                            forecastValue = rangeResult.forecastValue;
+                            forecastValueUnit = '°F';
+                            weatherDataSource = rangeResult.source;
+                            confidence = rangeResult.confidence;
+                        }
+                        break;
                     }
-                    break;
-
-                default:
-                    return null;
+                    case 'precipitation': {
+                        const precipResult = await this.analyzePrecipitationMarket(market);
+                        if (precipResult) {
+                            forecastProbability = precipResult.probability;
+                            forecastValue = precipResult.forecastValue;
+                            forecastValueUnit = '%';
+                            weatherDataSource = precipResult.source;
+                            confidence = precipResult.confidence;
+                        }
+                        break;
+                    }
+                    default:
+                        return null;
+                }
             }
 
             if (forecastProbability === null) {
@@ -249,6 +345,11 @@ export class OpportunityDetector {
                 marketProbability,
                 finalProbability
             );
+            // Snapshot prices at detection time to prevent race conditions during execution
+            const snapshotYesPrice = market.yesPrice;
+            const snapshotNoPrice = market.noPrice;
+            const snapshotTimestamp = new Date();
+
             if (skipCheck.skip) {
                 // Return a non-trade opportunity with the skip reason for debugging
                 return {
@@ -264,6 +365,9 @@ export class OpportunityDetector {
                     forecastValueUnit,
                     isGuaranteed,
                     certaintySigma,
+                    snapshotYesPrice,
+                    snapshotNoPrice,
+                    snapshotTimestamp,
                 };
             }
 
@@ -314,6 +418,9 @@ export class OpportunityDetector {
                 forecastValueUnit,
                 isGuaranteed,
                 certaintySigma,
+                snapshotYesPrice,
+                snapshotNoPrice,
+                snapshotTimestamp,
             };
         } catch (error) {
             logger.error(`Failed to analyze market: ${market.market.question}`, {
