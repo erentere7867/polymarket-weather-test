@@ -440,6 +440,7 @@ export class HybridWeatherController extends EventEmitter {
             'Philadelphia', 'San Antonio', 'San Diego', 'Dallas', 'San Jose',
             'London', 'Paris', 'Berlin', 'Tokyo', 'Sydney', 'Buenos Aires',
             'Toronto', 'Mumbai', 'Dubai', 'Singapore', 'Hong Kong',
+            'Seoul', 'Ankara', 'Washington DC', 'Miami', 'Seattle', 'Atlanta',
         ];
         
         for (const city of commonCities) {
@@ -535,13 +536,21 @@ export class HybridWeatherController extends EventEmitter {
         parseTimeMs: number;
         fileSize: number;
     }): void {
+        // Log all cities in payload for debugging
+        const cityNames = payload.cityData.map(c => c.cityName);
         logger.info(
             `📁 FILE_CONFIRMED: ${payload.model} ${String(payload.cycleHour).padStart(2, '0')}Z ` +
             `(${payload.cityData.length} cities, ${payload.detectionLatencyMs}ms latency)`
         );
+        logger.info(`📁 FILE_CONFIRMED cities: ${cityNames.join(', ')}`);
         
         // Update historical learning data
         this.updateHistoricalData(payload.model, payload.cycleHour, payload.detectionLatencyMs);
+        
+        // Get all markets for matching debug
+        const allMarkets = this.dataStore.getAllMarkets();
+        const marketCities = allMarkets.map(m => m.city).filter(Boolean);
+        logger.debug(`[HybridWeatherController] Available market cities: ${marketCities.join(', ')}`);
         
         // Mark cities as file-confirmed and trigger opportunity re-scan
         for (const cityData of payload.cityData) {
@@ -568,12 +577,16 @@ export class HybridWeatherController extends EventEmitter {
             this.storeDataWithConfidence(cityId, 'S3_FILE', cityData.temperatureF, 1.0);
             
             // Store in data store
-            const marketId = this.dataStore.getAllMarkets().find(m => 
+            const matchingMarket = this.dataStore.getAllMarkets().find(m => 
                 m.city?.toLowerCase().replace(/\s+/g, '_') === cityId
-            )?.market.id;
+            );
+            const marketId = matchingMarket?.market.id;
             
             if (marketId) {
                 this.dataStore.reconcileForecast(marketId, cityData, payload.model, payload.cycleHour, payload.forecastHour);
+                logger.info(`✅ City ${cityId} matched to market ${marketId.substring(0, 8)}...`);
+            } else {
+                logger.warn(`⚠️ No market found for city: ${cityId} (from ${cityData.cityName})`);
             }
             
             // Emit forecast change event to trigger trading opportunity re-scan

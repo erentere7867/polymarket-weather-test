@@ -497,11 +497,34 @@ dashboardApp.post('/api/hybrid-weather/toggle', async (req, res) => {
     });
 });
 
-// ============================================
-// FILE-BASED INGESTION DASHBOARD ENDPOINTS
-// ============================================
+// 20. Confidence Compression Stats (from SimulationRunner)
+dashboardApp.get('/api/confidence', (req, res) => {
+    const perf = runner.getComponentPerformance();
+    const markets = runner.getStore().getAllMarkets();
+    
+    res.json({
+        totalMarketsAnalyzed: markets.length,
+        firstRunBlocks: 0, // TODO: Track from strategy
+        stabilityBlocks: 0, // TODO: Track from strategy
+        confidenceBlocks: 0, // TODO: Track from strategy
+        signalsGenerated: perf.confidenceCompression.signalsGenerated,
+        tradesExecuted: perf.confidenceCompression.tradesExecuted,
+        avgConfidenceScore: 0, // TODO: Calculate from strategy
+        avgExecutionTimeMs: perf.confidenceCompression.avgExecutionTimeMs,
+        totalPnl: perf.confidenceCompression.totalPnl,
+        crossMarketOpportunities: perf.crossMarketArbitrage.opportunitiesDetected,
+        modelHierarchy: {
+            us: { primary: 'HRRR', secondary: 'RAP', regime: 'GFS' },
+            eu: { primary: 'ECMWF', secondary: 'GFS' },
+        },
+        thresholds: {
+            temperature: 0.60,
+            precipitation: 0.75,
+        },
+    });
+});
 
-// 20. Mount Dashboard Router
+// 21. Mount Dashboard Router
 dashboardApp.use('/api/dashboard', createDashboardRouter(dashboardController));
 
 // ========================

@@ -202,9 +202,9 @@ async function fetchNonWsData() {
         const eventsData = await eventsRes.json();
         updateEventLog(eventsData);
 
-        // Fetch confidence compression data
+        // Fetch confidence compression data (from /api/confidence, not /api/dashboard/confidence)
         try {
-            const confidenceRes = await fetch(`${API_BASE}/confidence`);
+            const confidenceRes = await fetch('/api/confidence');
             const confidenceData = await confidenceRes.json();
             updateConfidencePanel(confidenceData);
         } catch (ccErr) {
