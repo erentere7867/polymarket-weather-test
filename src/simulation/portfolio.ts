@@ -69,11 +69,18 @@ export class PortfolioSimulator {
     private peakValue: number;
     private maxDrawdown: number = 0;
 
+    // Exposure caps for confidence compression strategy
+    private maxExposurePerCity: number = 500;   // $500 max per city
+    private maxExposurePerMarketDay: number = 100;    // $100 max per market day
+    private cityExposure: Map<string, number> = new Map();
+    private marketDayExposure: Map<string, number> = new Map(); // key: city:date
+
     constructor(startingCash: number = 10000) {
         this.startingCash = startingCash;
         this.cash = startingCash;
         this.peakValue = startingCash;
     }
+
 
     /**
      * Open a new position based on opportunity
@@ -531,5 +538,111 @@ export class PortfolioSimulator {
             this.updatePriceByToken(market.yesTokenId, market.yesPrice);
             this.updatePriceByToken(market.noTokenId, market.noPrice);
         }
+    }
+
+    // ============================================================================
+    // EXPOSURE CAP METHODS (Confidence Compression Strategy)
+    // ============================================================================
+
+    /**
+     * Check if a position would exceed city exposure cap
+     */
+    wouldExceedCityExposure(city: string, amount: number): boolean {
+        const normalized = city?.toLowerCase().trim() || 'unknown';
+        const current = this.cityExposure.get(normalized) || 0;
+        return (current + amount) > this.maxExposurePerCity;
+    }
+
+    /**
+     * Check if a position would exceed market-day exposure cap
+     */
+    wouldExceedMarketDayExposure(city: string, targetDate: Date, amount: number): boolean {
+        const dateStr = targetDate?.toISOString().split('T')[0] || 'unknown';
+        const key = `${city?.toLowerCase().trim() || 'unknown'}:${dateStr}`;
+        const current = this.marketDayExposure.get(key) || 0;
+        return (current + amount) > this.maxExposurePerMarketDay;
+    }
+
+    /**
+     * Get available exposure for a city (how much more can be invested)
+     */
+    getAvailableCityExposure(city: string): number {
+        const normalized = city?.toLowerCase().trim() || 'unknown';
+        const current = this.cityExposure.get(normalized) || 0;
+        return Math.max(0, this.maxExposurePerCity - current);
+    }
+
+    /**
+     * Get available exposure for a market-day
+     */
+    getAvailableMarketDayExposure(city: string, targetDate: Date): number {
+        const dateStr = targetDate?.toISOString().split('T')[0] || 'unknown';
+        const key = `${city?.toLowerCase().trim() || 'unknown'}:${dateStr}`;
+        const current = this.marketDayExposure.get(key) || 0;
+        return Math.max(0, this.maxExposurePerMarketDay - current);
+    }
+
+    /**
+     * Update exposure tracking when opening a position
+     */
+    trackExposure(city: string, targetDate: Date | undefined, amount: number): void {
+        const normalized = city?.toLowerCase().trim() || 'unknown';
+
+        // Track city exposure
+        const currentCity = this.cityExposure.get(normalized) || 0;
+        this.cityExposure.set(normalized, currentCity + amount);
+
+        // Track market-day exposure
+        if (targetDate) {
+            const dateStr = targetDate.toISOString().split('T')[0];
+            const key = `${normalized}:${dateStr}`;
+            const currentDay = this.marketDayExposure.get(key) || 0;
+            this.marketDayExposure.set(key, currentDay + amount);
+        }
+    }
+
+    /**
+     * Release exposure when closing a position
+     */
+    releaseExposure(city: string, targetDate: Date | undefined, amount: number): void {
+        const normalized = city?.toLowerCase().trim() || 'unknown';
+
+        // Release city exposure
+        const currentCity = this.cityExposure.get(normalized) || 0;
+        this.cityExposure.set(normalized, Math.max(0, currentCity - amount));
+
+        // Release market-day exposure
+        if (targetDate) {
+            const dateStr = targetDate.toISOString().split('T')[0];
+            const key = `${normalized}:${dateStr}`;
+            const currentDay = this.marketDayExposure.get(key) || 0;
+            this.marketDayExposure.set(key, Math.max(0, currentDay - amount));
+        }
+    }
+
+    /**
+     * Set exposure caps
+     */
+    setExposureCaps(perCity: number, perMarketDay: number): void {
+        this.maxExposurePerCity = perCity;
+        this.maxExposurePerMarketDay = perMarketDay;
+    }
+
+    /**
+     * Get exposure summary
+     */
+    getExposureSummary(): {
+        byCity: Record<string, number>;
+        byMarketDay: Record<string, number>;
+        caps: { perCity: number; perMarketDay: number };
+    } {
+        return {
+            byCity: Object.fromEntries(this.cityExposure),
+            byMarketDay: Object.fromEntries(this.marketDayExposure),
+            caps: {
+                perCity: this.maxExposurePerCity,
+                perMarketDay: this.maxExposurePerMarketDay,
+            },
+        };
     }
 }
