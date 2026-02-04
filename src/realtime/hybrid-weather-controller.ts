@@ -195,7 +195,7 @@ export interface HybridControllerState {
     modeEntryTime: Date;
     activeCities: Set<string>;
     isRunning: boolean;
-    lastTransition: ModeTransition | null;
+    lastTransition: null | ModeTransition;
     modeHistory: ModeStats[];
     burstStartTime: Date | null;
     burstRequestsCompleted: number;
@@ -575,19 +575,6 @@ export class HybridWeatherController extends EventEmitter {
             
             this.storeDataWithConfidence(cityId, 'S3_FILE', cityData.temperatureF, 1.0);
             
-<<<<<<< C:/antigravity projects/polymarket-weather/src/realtime/hybrid-weather-controller.ts
-            // Store in data store
-            const matchingMarket = this.dataStore.getAllMarkets().find(m => 
-                m.city?.toLowerCase().replace(/\s+/g, '_') === cityId
-            );
-            const marketId = matchingMarket?.market.id;
-            
-            if (marketId) {
-                this.dataStore.reconcileForecast(marketId, cityData, payload.model, payload.cycleHour, payload.forecastHour);
-                logger.info(`✅ City ${cityId} matched to market ${marketId.substring(0, 8)}...`);
-            } else {
-                logger.warn(`⚠️ No market found for city: ${cityId} (from ${cityData.cityName})`);
-=======
             const matchingMarkets = this.dataStore
                 .getAllMarkets()
                 .filter(m => m.city?.toLowerCase().replace(/\s+/g, '_') === cityId);
@@ -666,7 +653,6 @@ export class HybridWeatherController extends EventEmitter {
                         // ignore
                     }
                 }
->>>>>>> C:/Users/ozgur/.windsurf/worktrees/polymarket-weather/polymarket-weather-0f7679b4/src/realtime/hybrid-weather-controller.ts
             }
 
             this.eventBus.emit({

@@ -62,10 +62,10 @@ describe('ScheduleManager', () => {
             expect(fileInfo.model).toBe('HRRR');
             expect(fileInfo.cycleHour).toBe(12);
             expect(fileInfo.forecastHour).toBe(0);
-            expect(fileInfo.bucket).toBe('noaa-hrrr-pds');
+            expect(fileInfo.bucket).toBe('noaa-hrrr-bdp-pds');
             expect(fileInfo.key).toBe('hrrr.20260201/conus/hrrr.t12z.wrfsfcf00.grib2');
             expect(fileInfo.fullUrl).toBe(
-                'https://noaa-hrrr-pds.s3.amazonaws.com/hrrr.20260201/conus/hrrr.t12z.wrfsfcf00.grib2'
+                'https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.20260201/conus/hrrr.t12z.wrfsfcf00.grib2'
             );
         });
 
@@ -77,7 +77,7 @@ describe('ScheduleManager', () => {
             expect(fileInfo.cycleHour).toBe(18);
             expect(fileInfo.forecastHour).toBe(0);
             expect(fileInfo.bucket).toBe('noaa-rap-pds');
-            expect(fileInfo.key).toBe('rap.20260201/rap.t18z.awp130f00.grib2');
+            expect(fileInfo.key).toBe('rap.20260201/rap.t18z.awp130pgrbf00.grib2');
         });
 
         it('should generate correct GFS filename with f003', () => {
@@ -87,7 +87,7 @@ describe('ScheduleManager', () => {
             expect(fileInfo.model).toBe('GFS');
             expect(fileInfo.cycleHour).toBe(6);
             expect(fileInfo.forecastHour).toBe(3);
-            expect(fileInfo.bucket).toBe('noaa-gfs-pds');
+            expect(fileInfo.bucket).toBe('noaa-gfs-bdp-pds');
             // The GFS template has {HH} in two places - both should be replaced
             // Note: String.replace() only replaces the first occurrence
             expect(fileInfo.key).toContain('/06/');  // Directory hour
@@ -153,9 +153,9 @@ describe('ScheduleManager', () => {
             const hrrrSchedule = scheduleManager.calculateDetectionWindow('HRRR', 12, runDate);
             const gfsSchedule = scheduleManager.calculateDetectionWindow('GFS', 12, runDate);
 
-            // GFS has much shorter delay (3-5 min) vs HRRR (30-60 min)
-            expect(gfsSchedule.expectedPublishTime.getTime()).toBeLessThan(
-                hrrrSchedule.expectedPublishTime.getTime()
+            // HRRR has shorter delay (25-45 min) vs GFS (210-240 min)
+            expect(hrrrSchedule.expectedPublishTime.getTime()).toBeLessThan(
+                gfsSchedule.expectedPublishTime.getTime()
             );
         });
     });
@@ -186,22 +186,28 @@ describe('ScheduleManager', () => {
             }
         });
 
-        it('should map international cities to GFS primary', () => {
-            const internationalCities = ['Toronto', 'London', 'Seoul', 'Ankara', 'Buenos Aires'];
+        it('should map international cities to GFS or ECMWF primary', () => {
+            const gfsCities = ['Toronto'];
+            const ecmwfCities = ['London', 'Seoul', 'Ankara', 'Buenos Aires'];
 
-            for (const cityName of internationalCities) {
+            for (const cityName of gfsCities) {
                 const config = CITY_MODEL_CONFIGS.find((c) => c.cityName === cityName);
-                expect(config).toBeDefined();
                 expect(config?.primaryModel).toBe('GFS');
+            }
+            for (const cityName of ecmwfCities) {
+                const config = CITY_MODEL_CONFIGS.find((c) => c.cityName === cityName);
+                expect(config?.primaryModel).toBe('ECMWF');
             }
         });
 
         it('should return cities for each model', () => {
             const hrrrCities = scheduleManager.getCitiesForModel('HRRR');
             const gfsCities = scheduleManager.getCitiesForModel('GFS');
+            const ecmwfCities = scheduleManager.getCitiesForModel('ECMWF');
 
             expect(hrrrCities).toHaveLength(8); // CONUS cities
-            expect(gfsCities).toHaveLength(5); // International cities
+            expect(gfsCities).toHaveLength(1); // Toronto
+            expect(ecmwfCities).toHaveLength(4); // International cities
         });
     });
 
