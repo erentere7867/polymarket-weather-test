@@ -8,10 +8,12 @@
  */
 
 import { ForecastStateMachine } from './forecast-state-machine.js';
+import { eventBus } from './event-bus.js';
 import { WeatherProviderManager } from '../weather/provider-manager.js';
 import { WeatherService } from '../weather/index.js';
 import { IWeatherProvider, findCity, CityLocation, WeatherData } from '../weather/types.js';
 import { DataStore } from './data-store.js';
+import { ForecastSnapshot } from './types.js';
 import { logger } from '../logger.js';
 import { config } from '../config.js';
 
@@ -36,6 +38,12 @@ export class IdlePollingService {
 
     // Track last poll time per city
     private lastPollTime: Map<string, Date> = new Map();
+
+    // Track last forecast data per city for change detection
+    private lastForecastData: Map<string, WeatherData> = new Map();
+
+    // Track initialized markets (first value should not trigger change)
+    private initializedMarkets: Set<string> = new Set();
 
     // Minimum time between polls for the same city
     private readonly minPollIntervalMs: number = 60000; // 1 minute minimum
@@ -232,11 +240,163 @@ export class IdlePollingService {
         // Get markets for this city
         const markets = this.getMarketsForCity(cityId);
 
-        for (const market of markets) {
-            // Update the forecast in the data store
-            // This will be processed by the ForecastMonitor
-            // We just need to ensure the data is available
+        if (markets.length === 0) {
+            logger.debug(`No markets found for city ${cityId}`);
+            return;
         }
+
+        // Get previous data for change detection
+        const previousData = this.lastForecastData.get(cityId);
+        this.lastForecastData.set(cityId, data);
+
+        // Detect if forecast changed
+        const hasChanged = this.hasForecastChanged(previousData, data);
+        let changeAmount = 0;
+        let previousValue: number | undefined;
+        const newValue = data.hourly[0]?.temperatureF;
+
+        if (previousData && previousData.hourly.length > 0 && data.hourly.length > 0) {
+            previousValue = previousData.hourly[0].temperatureF;
+            changeAmount = Math.abs(newValue - previousValue);
+        }
+
+        for (const market of markets) {
+            if (!market.targetDate) continue;
+
+            // Calculate forecast value and probability
+            let forecastValue = 0;
+            let probability = 0;
+            let hasValidForecast = false;
+
+            if (market.metricType === 'temperature_high' || market.metricType === 'temperature_threshold') {
+                const high = WeatherService.calculateHigh(data, market.targetDate);
+                if (high !== null && market.threshold !== undefined) {
+                    forecastValue = high;
+                    let thresholdF = market.threshold;
+                    if (market.thresholdUnit === 'C') {
+                        thresholdF = (market.threshold * 9 / 5) + 32;
+                    }
+                    probability = this.weatherService.calculateTempExceedsProbability(high, thresholdF);
+                    if (market.comparisonType === 'below') probability = 1 - probability;
+                    hasValidForecast = true;
+                }
+            } else if (market.metricType === 'temperature_low') {
+                const low = WeatherService.calculateLow(data, market.targetDate);
+                if (low !== null && market.threshold !== undefined) {
+                    forecastValue = low;
+                    let thresholdF = market.threshold;
+                    if (market.thresholdUnit === 'C') {
+                        thresholdF = (market.threshold * 9 / 5) + 32;
+                    }
+                    probability = this.weatherService.calculateTempExceedsProbability(low, thresholdF);
+                    if (market.comparisonType === 'below') probability = 1 - probability;
+                    hasValidForecast = true;
+                }
+            } else if (market.metricType === 'precipitation') {
+                const targetDateObj = new Date(market.targetDate);
+                targetDateObj.setUTCHours(0, 0, 0, 0);
+                const dayForecasts = data.hourly.filter((h: { timestamp: Date }) => {
+                    const hourDate = new Date(h.timestamp);
+                    hourDate.setUTCHours(0, 0, 0, 0);
+                    return hourDate.getTime() === targetDateObj.getTime();
+                });
+                if (dayForecasts.length > 0) {
+                    const maxPrecipProb = Math.max(...dayForecasts.map((h: { probabilityOfPrecipitation: number }) => h.probabilityOfPrecipitation));
+                    forecastValue = maxPrecipProb;
+                    probability = maxPrecipProb / 100;
+                    if (market.comparisonType === 'below') probability = 1 - probability;
+                    hasValidForecast = true;
+                }
+            }
+
+            if (!hasValidForecast) continue;
+
+            // Check if this is the first time we're seeing this market
+            const isNew = !this.initializedMarkets.has(market.market.id);
+            if (isNew) {
+                this.initializedMarkets.add(market.market.id);
+            }
+
+            // Only emit change if not initial value
+            const realChange = hasChanged && !isNew;
+
+            const now = new Date();
+            const snapshot: ForecastSnapshot = {
+                marketId: market.market.id,
+                weatherData: data,
+                forecastValue,
+                probability,
+                timestamp: now,
+                previousValue,
+                valueChanged: realChange,
+                changeAmount,
+                changeTimestamp: now,
+            };
+
+            // Update the data store
+            this.dataStore.updateForecast(market.market.id, snapshot);
+
+            if (realChange) {
+                logger.info(`⚡ IDLE POLL: Forecast changed for ${cityId} (${market.metricType})`);
+            }
+        }
+
+        // Emit FORECAST_CHANGED event if there was a real change (not first poll)
+        if (hasChanged && previousData) {
+            eventBus.emit({
+                type: 'FORECAST_CHANGED',
+                payload: {
+                    cityId,
+                    provider: data.source,
+                    previousValue,
+                    newValue,
+                    changeAmount,
+                    timestamp: new Date(),
+                    source: 'IDLE_POLL',
+                    confidence: 0.8,
+                },
+            });
+
+            logger.info(`📊 IDLE POLL: Emitted FORECAST_CHANGED for ${cityId}`, {
+                changeAmount: changeAmount.toFixed(1),
+            });
+        }
+    }
+
+    /**
+     * Compare two forecast data objects for significant changes
+     */
+    private hasForecastChanged(oldData: WeatherData | undefined, newData: WeatherData): boolean {
+        if (!oldData) {
+            return false; // First fetch, not a "change"
+        }
+
+        // Compare fetchedAt timestamps
+        if (oldData.fetchedAt.getTime() !== newData.fetchedAt.getTime()) {
+            return true;
+        }
+
+        // Compare hourly forecast counts
+        if (oldData.hourly.length !== newData.hourly.length) {
+            return true;
+        }
+
+        // Compare first few hours for significant changes (temperature threshold: 0.5°F)
+        const hoursToCompare = Math.min(24, oldData.hourly.length, newData.hourly.length);
+        for (let i = 0; i < hoursToCompare; i++) {
+            const oldHour = oldData.hourly[i];
+            const newHour = newData.hourly[i];
+
+            if (Math.abs(oldHour.temperatureF - newHour.temperatureF) >= 0.5) {
+                return true;
+            }
+
+            if (oldHour.probabilityOfPrecipitation !== newHour.probabilityOfPrecipitation) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
