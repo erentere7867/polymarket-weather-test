@@ -111,6 +111,11 @@ export class BotManager {
     // Cycle tracking
     private lastCycleStart: Date = new Date();
     private cycleDurations: number[] = [];
+    
+    // Forecast-triggered cycle guards
+    private isCycleRunning: boolean = false;
+    private lastForecastTriggeredCycle: Date | null = null;
+    private readonly FORECAST_CYCLE_DEBOUNCE_MS = 5000; // 5 second debounce
 
     constructor() {
         this.weatherScanner = new WeatherScanner();
@@ -273,26 +278,63 @@ export class BotManager {
     }
 
     /**
-     * Setup cross-market arbitrage listeners
+     * Setup cross-market arbitrage listeners and forecast change triggers
      */
     private setupCrossMarketListeners(): void {
-        if (!config.ENABLE_CROSS_MARKET_ARBITRAGE) return;
-
-        // Listen for forecast updates to detect cross-market opportunities
-        eventBus.on('FORECAST_CHANGED', (event) => {
+        // Listen for forecast updates - ALWAYS trigger cycles, not just for cross-market
+        eventBus.on('FORECAST_CHANGED', async (event) => {
             const payload = event.payload as {
                 cityId: string;
                 newValue: number;
+                changeAmount?: number;
                 source?: string;
                 confidence?: number;
             };
             
-            if (payload.cityId && payload.newValue !== undefined) {
+            // Update cross-market arbitrage data if enabled
+            if (config.ENABLE_CROSS_MARKET_ARBITRAGE && payload.cityId && payload.newValue !== undefined) {
                 this.crossMarketArbitrage.updateForecast(
                     payload.cityId,
                     payload.newValue,
                     payload.confidence || 0.5
                 );
+            }
+            
+            // CRITICAL: Trigger immediate trading cycle on forecast change
+            // This ensures forecast changes are immediately analyzed for opportunities
+            if (!this.isRunning) return;
+            
+            // Debounce: don't trigger if we just triggered recently
+            const now = Date.now();
+            if (this.lastForecastTriggeredCycle && 
+                (now - this.lastForecastTriggeredCycle.getTime()) < this.FORECAST_CYCLE_DEBOUNCE_MS) {
+                logger.debug(`Debouncing forecast-triggered cycle (${payload.cityId})`);
+                return;
+            }
+            
+            // Guard: don't trigger if cycle already running
+            if (this.isCycleRunning) {
+                logger.debug(`Skipping forecast-triggered cycle: cycle already running (${payload.cityId})`);
+                return;
+            }
+            
+            logger.info(`🚀 FORECAST_CHANGED triggering immediate trading cycle for ${payload.cityId}`);
+            this.lastForecastTriggeredCycle = new Date();
+            
+            // Interrupt current delay to run cycle immediately
+            if (this.currentDelayTimeout) {
+                clearTimeout(this.currentDelayTimeout);
+                this.currentDelayTimeout = null;
+                if (this.delayResolve) {
+                    this.delayResolve();
+                    this.delayResolve = null;
+                }
+            }
+            
+            try {
+                await this.runCycle();
+            } catch (error) {
+                logger.error('Error in forecast-triggered cycle', { error: (error as Error).message });
             }
         });
     }
@@ -301,6 +343,13 @@ export class BotManager {
      * Run a single scan cycle with integrated components
      */
     async runCycle(): Promise<void> {
+        // Guard: prevent concurrent cycles
+        if (this.isCycleRunning) {
+            logger.debug('Cycle already running, skipping');
+            return;
+        }
+        this.isCycleRunning = true;
+        
         const cycleStart = new Date();
         this.lastCycleStart = cycleStart;
         logger.info('Starting scan cycle...');
@@ -400,6 +449,8 @@ export class BotManager {
         } catch (error) {
             this.stats.errors++;
             logger.error('Error in scan cycle', { error: (error as Error).message });
+        } finally {
+            this.isCycleRunning = false;
         }
 
         this.stats.cyclesCompleted++;
