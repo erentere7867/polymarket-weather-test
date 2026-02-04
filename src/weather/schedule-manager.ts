@@ -99,10 +99,10 @@ export class ScheduleManager extends EventEmitter {
      */
     public start(): void {
         logger.info('[ScheduleManager] Starting schedule monitoring');
-        
+
         // Initial check
         this.checkAndCreateWindows();
-        
+
         // Set up interval for checking upcoming windows
         this.checkInterval = setInterval(() => {
             this.checkAndCreateWindows();
@@ -114,12 +114,12 @@ export class ScheduleManager extends EventEmitter {
      */
     public stop(): void {
         logger.info('[ScheduleManager] Stopping schedule monitoring');
-        
+
         if (this.checkInterval) {
             clearInterval(this.checkInterval);
             this.checkInterval = null;
         }
-        
+
         this.activeWindows.clear();
     }
 
@@ -136,7 +136,7 @@ export class ScheduleManager extends EventEmitter {
     public getExpectedFile(model: ModelType, cycleHour: number, runDate: Date): ExpectedFileInfo {
         const config = MODEL_CONFIGS[model];
         const forecastHour = config.detectionFile;
-        
+
         // Format date components
         const year = runDate.getUTCFullYear();
         const month = String(runDate.getUTCMonth() + 1).padStart(2, '0');
@@ -146,7 +146,7 @@ export class ScheduleManager extends EventEmitter {
         const ff = String(forecastHour).padStart(2, '0');
         const fff = String(forecastHour).padStart(3, '0');
         const f = String(forecastHour); // No padding
-        
+
         // Build the key using the template
         // Use regex with global flag to replace all occurrences
         let key = config.pathTemplate
@@ -155,9 +155,9 @@ export class ScheduleManager extends EventEmitter {
             .replace(/{FF}/g, ff)
             .replace(/{FFF}/g, fff)
             .replace(/{F}/g, f);
-        
+
         const fullUrl = `https://${config.bucket}.s3.amazonaws.com/${key}`;
-        
+
         return {
             bucket: config.bucket,
             key,
@@ -178,7 +178,7 @@ export class ScheduleManager extends EventEmitter {
         runDate: Date
     ): ModelRunSchedule {
         const config = MODEL_CONFIGS[model];
-        
+
         // Expected publish time (using max delay as conservative estimate)
         // Ensure we're working with the correct date by using UTC methods
         const expectedPublishTime = new Date(Date.UTC(
@@ -190,32 +190,32 @@ export class ScheduleManager extends EventEmitter {
             0,
             0
         ));
-        
+
         // Detection window starts before expected publication
         const detectionWindowStart = new Date(expectedPublishTime);
         detectionWindowStart.setMinutes(
             detectionWindowStart.getMinutes() - this.config.detectionWindowLeadMinutes
         );
-        
+
         // Detection window ends after max expected delay
         const detectionWindowEnd = new Date(expectedPublishTime);
         const duration = config.detectionWindowDurationMinutes || this.config.detectionWindowDurationMinutes;
         detectionWindowEnd.setMinutes(
             detectionWindowEnd.getMinutes() + duration
         );
-        
+
         // Fallback window starts after expected publication
         const fallbackWindowStart = new Date(expectedPublishTime);
         fallbackWindowStart.setMinutes(
             fallbackWindowStart.getMinutes() + this.config.fallbackWindowLeadMinutes
         );
-        
+
         // Fallback window ends after max duration
         const fallbackWindowEnd = new Date(fallbackWindowStart);
         fallbackWindowEnd.setMinutes(
             fallbackWindowEnd.getMinutes() + this.config.fallbackWindowDurationMinutes
         );
-        
+
         return {
             model,
             cycleHour,
@@ -234,10 +234,10 @@ export class ScheduleManager extends EventEmitter {
     public getUpcomingRuns(count: number): ModelRunSchedule[] {
         const now = new Date();
         const schedules: ModelRunSchedule[] = [];
-        
+
         // Look ahead 24 hours
         const lookAheadHours = 24;
-        
+
         // Start looking back 6 hours to catch GFS runs that are late but haven't arrived
         for (let hourOffset = -6; hourOffset < lookAheadHours; hourOffset++) {
             // Create check date using UTC to avoid timezone issues
@@ -250,13 +250,13 @@ export class ScheduleManager extends EventEmitter {
                 0,
                 0
             ));
-            
+
             const cycleHour = checkDate.getUTCHours();
-            
+
             // HRRR and RAP run every hour
             schedules.push(this.calculateDetectionWindow('HRRR', cycleHour, checkDate));
             schedules.push(this.calculateDetectionWindow('RAP', cycleHour, checkDate));
-            
+
             // GFS runs at 00Z, 06Z, 12Z, 18Z
             if (cycleHour % 6 === 0) {
                 schedules.push(this.calculateDetectionWindow('GFS', cycleHour, checkDate));
@@ -267,7 +267,7 @@ export class ScheduleManager extends EventEmitter {
                 schedules.push(this.calculateDetectionWindow('ECMWF', cycleHour, checkDate));
             }
         }
-        
+
         // Filter to future OR active windows and sort by start time
         // We want windows that haven't ended yet
         return schedules
@@ -316,36 +316,36 @@ export class ScheduleManager extends EventEmitter {
     private checkAndCreateWindows(): void {
         const now = new Date();
         const upcomingRuns = this.getUpcomingRuns(20); // Get next 20 runs
-        
+
         logger.info(`[ScheduleManager] Checking for detection windows at ${now.toISOString()}`);
-        
+
         for (const run of upcomingRuns) {
             const windowKey = this.getWindowKey(run.model, run.cycleHour, run.runDate);
-            
+
             // Skip if already active
             if (this.activeWindows.has(windowKey)) {
                 continue;
             }
-            
+
             // Check if window should start within the next minute OR is already active
             const timeToStart = run.detectionWindowStart.getTime() - now.getTime();
             const timeToStartSec = Math.round(timeToStart / 1000);
             const isAlreadyActive = now >= run.detectionWindowStart && now < run.detectionWindowEnd;
-            
+
             // Log details for debugging missing windows
-            if (run.model === 'RAP' || run.model === 'GFS') {
+            if (run.model === 'RAP' || run.model === 'GFS' || run.model === 'ECMWF') {
                 const expectedFile = this.getExpectedFile(run.model, run.cycleHour, run.runDate);
                 logger.info(`[ScheduleManager] Checking ${run.model} ${String(run.cycleHour).padStart(2, '0')}Z: Path=${expectedFile.key}, Bucket=${expectedFile.bucket}`);
             }
 
             logger.info(`[ScheduleManager] ${run.model} ${String(run.cycleHour).padStart(2, '0')}Z: timeToStart=${timeToStartSec}s, active=${isAlreadyActive}, windowStart=${run.detectionWindowStart.toISOString()}`);
-            
+
             // Start if it's about to start (within 1 min) OR if it's already active and we missed the start
             // We use > -60000 (1 min late) previously, but now we allow any time as long as it's active
             if ((timeToStart <= 60000 && timeToStart > -60000) || isAlreadyActive) {
                 // Create the detection window
                 const expectedFile = this.getExpectedFile(run.model, run.cycleHour, run.runDate);
-                
+
                 const window: DetectionWindow = {
                     model: run.model,
                     cycleHour: run.cycleHour,
@@ -356,13 +356,13 @@ export class ScheduleManager extends EventEmitter {
                     status: 'ACTIVE',
                     createdAt: now,
                 };
-                
+
                 this.activeWindows.set(windowKey, window);
-                
+
                 logger.info(
                     `[ScheduleManager] Detection window started: ${run.model} ${String(run.cycleHour).padStart(2, '0')}Z`
                 );
-                
+
                 // Emit event for S3FileDetector
                 this.eventBus.emit({
                     type: 'DETECTION_WINDOW_START',
@@ -378,11 +378,11 @@ export class ScheduleManager extends EventEmitter {
                         },
                     },
                 });
-                
+
                 this.emit('detectionWindowStart', window);
             }
         }
-        
+
         // Clean up expired windows
         this.cleanupExpiredWindows();
     }
@@ -392,7 +392,7 @@ export class ScheduleManager extends EventEmitter {
      */
     private cleanupExpiredWindows(): void {
         const now = new Date();
-        
+
         for (const [key, window] of this.activeWindows.entries()) {
             if (now > window.windowEnd) {
                 logger.info(

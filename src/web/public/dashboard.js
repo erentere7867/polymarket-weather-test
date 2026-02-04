@@ -31,19 +31,19 @@ const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws/dashboard`;
  */
 function initDashboard() {
     console.log('[Dashboard] Initializing...');
-    
+
     // Connect WebSocket
     connectWebSocket();
-    
+
     // Initial data fetch
     fetchAllDashboardData();
-    
+
     // Setup auto-refresh for non-WS data
     setInterval(fetchNonWsData, 5000);
-    
+
     // Setup event listeners
     setupEventListeners();
-    
+
     // Initialize charts
     initCharts();
 }
@@ -55,17 +55,17 @@ function connectWebSocket() {
     if (dashboardState.ws?.readyState === WebSocket.OPEN) {
         return;
     }
-    
+
     try {
         dashboardState.ws = new WebSocket(WS_URL);
-        
+
         dashboardState.ws.onopen = () => {
             console.log('[Dashboard] WebSocket connected');
             dashboardState.isConnected = true;
             dashboardState.reconnectAttempts = 0;
             updateConnectionStatus(true);
         };
-        
+
         dashboardState.ws.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data);
@@ -74,14 +74,14 @@ function connectWebSocket() {
                 console.error('[Dashboard] Error parsing WebSocket message:', err);
             }
         };
-        
+
         dashboardState.ws.onclose = () => {
             console.log('[Dashboard] WebSocket disconnected');
             dashboardState.isConnected = false;
             updateConnectionStatus(false);
             attemptReconnect();
         };
-        
+
         dashboardState.ws.onerror = (error) => {
             console.error('[Dashboard] WebSocket error:', error);
             dashboardState.isConnected = false;
@@ -101,10 +101,10 @@ function attemptReconnect() {
         console.log('[Dashboard] Max reconnect attempts reached');
         return;
     }
-    
+
     dashboardState.reconnectAttempts++;
     console.log(`[Dashboard] Reconnecting... (${dashboardState.reconnectAttempts}/${dashboardState.maxReconnectAttempts})`);
-    
+
     setTimeout(connectWebSocket, dashboardState.reconnectDelay);
 }
 
@@ -114,7 +114,7 @@ function attemptReconnect() {
 function updateConnectionStatus(connected) {
     const indicator = document.getElementById('ws-connection-indicator');
     if (indicator) {
-        indicator.className = connected 
+        indicator.className = connected
             ? 'h-3 w-3 rounded-full bg-emerald-500 animate-pulse'
             : 'h-3 w-3 rounded-full bg-red-500';
         indicator.title = connected ? 'Connected' : 'Disconnected';
@@ -196,13 +196,48 @@ async function fetchNonWsData() {
         const latencyRes = await fetch(`${API_BASE}/latency`);
         const latencyData = await latencyRes.json();
         updateLatencyMetrics(latencyData);
-        
+
         // Fetch events
         const eventsRes = await fetch(`${API_BASE}/events?limit=20`);
         const eventsData = await eventsRes.json();
         updateEventLog(eventsData);
+
+        // Fetch confidence compression data
+        try {
+            const confidenceRes = await fetch(`${API_BASE}/confidence`);
+            const confidenceData = await confidenceRes.json();
+            updateConfidencePanel(confidenceData);
+        } catch (ccErr) {
+            console.warn('[Dashboard] Confidence data not available:', ccErr);
+        }
     } catch (err) {
         console.error('[Dashboard] Error fetching non-WS data:', err);
+    }
+}
+
+/**
+ * Update confidence compression strategy panel
+ */
+function updateConfidencePanel(data) {
+    if (!data) return;
+
+    const firstRunBlocksEl = document.getElementById('cc-first-run-blocks');
+    const stabilityBlocksEl = document.getElementById('cc-stability-blocks');
+    const confidenceBlocksEl = document.getElementById('cc-confidence-blocks');
+    const signalsEl = document.getElementById('cc-signals');
+    const tempThresholdEl = document.getElementById('cc-temp-threshold');
+    const precipThresholdEl = document.getElementById('cc-precip-threshold');
+
+    if (firstRunBlocksEl) firstRunBlocksEl.textContent = data.firstRunBlocks || 0;
+    if (stabilityBlocksEl) stabilityBlocksEl.textContent = data.stabilityBlocks || 0;
+    if (confidenceBlocksEl) confidenceBlocksEl.textContent = data.confidenceBlocks || 0;
+    if (signalsEl) signalsEl.textContent = data.signalsGenerated || 0;
+
+    if (tempThresholdEl && data.thresholds) {
+        tempThresholdEl.textContent = `${Math.round((data.thresholds.temperature || 0.6) * 100)}%`;
+    }
+    if (precipThresholdEl && data.thresholds) {
+        precipThresholdEl.textContent = `${Math.round((data.thresholds.precipitation || 0.75) * 100)}%`;
     }
 }
 
@@ -229,12 +264,12 @@ function updateSystemStatus(status) {
     const modeEl = document.getElementById('fi-operational-mode');
     const windowsEl = document.getElementById('fi-active-windows');
     const lastConfirmEl = document.getElementById('fi-last-confirmation');
-    
+
     if (statusEl) {
         statusEl.textContent = status.status;
         statusEl.className = `text-2xl font-bold ${status.status === 'ACTIVE' ? 'text-emerald-400' : 'text-rose-400'}`;
     }
-    
+
     if (modeEl) {
         modeEl.textContent = status.mode;
         const modeColors = {
@@ -245,11 +280,11 @@ function updateSystemStatus(status) {
         };
         modeEl.className = `text-lg font-mono ${modeColors[status.mode] || 'text-slate-400'}`;
     }
-    
+
     if (windowsEl) {
         windowsEl.textContent = status.activeDetectionWindows;
     }
-    
+
     if (lastConfirmEl) {
         if (status.lastFileConfirmation) {
             lastConfirmEl.textContent = formatTimeAgo(new Date(status.lastFileConfirmation));
@@ -268,14 +303,14 @@ function updateModelStatus(models) {
         console.error('[Dashboard] Invalid models data:', models);
         return;
     }
-    
+
     models.forEach(model => {
         const card = document.getElementById(`model-card-${model.model}`);
         const statusEl = document.getElementById(`model-status-${model.model}`);
         const progressEl = document.getElementById(`model-progress-${model.model}`);
         const lastRunEl = document.getElementById(`model-last-${model.model}`);
         const nextExpectedEl = document.getElementById(`model-next-${model.model}`);
-        
+
         if (statusEl) {
             statusEl.textContent = model.status;
             const statusColors = {
@@ -287,7 +322,7 @@ function updateModelStatus(models) {
             };
             statusEl.className = `text-lg font-bold ${statusColors[model.status] || 'text-slate-400'}`;
         }
-        
+
         if (progressEl) {
             progressEl.style.width = `${model.progress}%`;
             const progressColors = {
@@ -299,7 +334,7 @@ function updateModelStatus(models) {
             };
             progressEl.className = `h-full rounded-full transition-all duration-500 ${progressColors[model.status] || 'bg-slate-600'}`;
         }
-        
+
         if (lastRunEl) {
             if (model.lastRun) {
                 try {
@@ -323,7 +358,7 @@ function updateModelStatus(models) {
                 nextExpectedEl.textContent = '--';
             }
         }
-        
+
         // Update card border color based on status
         if (card) {
             const borderColors = {
@@ -345,12 +380,12 @@ function updateCityCoverage(cities) {
     console.log('[Dashboard] Updating city coverage:', cities);
     const container = document.getElementById('city-coverage-container');
     if (!container) return;
-    
+
     if (!Array.isArray(cities) || cities.length === 0) {
         container.innerHTML = '<div class="text-slate-500 text-sm italic">No city data available</div>';
         return;
     }
-    
+
     container.innerHTML = cities.map(city => {
         // Handle both camelCase and snake_case property names
         const cityName = city.cityName || city.city_name || city.name || 'Unknown';
@@ -365,8 +400,8 @@ function updateCityCoverage(cities) {
         const statusIcon = confirmationStatus === 'FILE_CONFIRMED'
             ? '<span class="text-emerald-400">✓</span>'
             : confirmationStatus === 'API_UNCONFIRMED'
-            ? '<span class="text-amber-400">~</span>'
-            : '<span class="text-slate-600">○</span>';
+                ? '<span class="text-amber-400">~</span>'
+                : '<span class="text-slate-600">○</span>';
 
         const tempChange = temperatureChange !== null && temperatureChange !== undefined
             ? `<span class="${temperatureChange > 0 ? 'text-rose-400' : 'text-blue-400'} text-xs">
@@ -424,7 +459,7 @@ function updateLatencyMetrics(metrics) {
         console.error('[Dashboard] Invalid metrics data');
         return;
     }
-    
+
     // Update text values
     const updateMetric = (type, data) => {
         if (!data) return;
@@ -446,13 +481,13 @@ function updateLatencyMetrics(metrics) {
     if (detection) updateMetric('detection', detection);
     if (download) updateMetric('download', download);
     if (parse) updateMetric('parse', parse);
-    
+
     // Update end-to-end gauge
     const e2eEl = document.getElementById('latency-e2e-value');
     const e2eIndicator = document.getElementById('latency-e2e-indicator');
     const e2eAvgEl = document.getElementById('latency-e2e-avg');
     const e2eP95El = document.getElementById('latency-e2e-p95');
-    
+
     if (e2eEl && endToEnd) {
         e2eEl.textContent = `${endToEnd.last || 0}ms`;
     }
@@ -488,12 +523,12 @@ function updateLatencyMetrics(metrics) {
 function updateApiFallbackStatus(status) {
     console.log('[Dashboard] Updating API fallback status:', status);
     if (!status) return;
-    
+
     const statusEl = document.getElementById('api-status');
     const pollsEl = document.getElementById('api-polls');
     const lastUpdateEl = document.getElementById('api-last-update');
     const ratioEl = document.getElementById('api-ratio');
-    
+
     if (statusEl) {
         statusEl.textContent = status.status;
         const statusColors = {
@@ -503,7 +538,7 @@ function updateApiFallbackStatus(status) {
         };
         statusEl.className = `text-lg font-bold ${statusColors[status.status] || 'text-slate-400'}`;
     }
-    
+
     if (pollsEl) pollsEl.textContent = status.totalPollsInWindow || 0;
     if (lastUpdateEl) {
         if (status.lastApiUpdate) {
@@ -522,12 +557,12 @@ function updateEventLog(events) {
     console.log('[Dashboard] Updating event log:', events);
     const container = document.getElementById('event-log-container');
     if (!container) return;
-    
+
     if (!Array.isArray(events) || events.length === 0) {
         container.innerHTML = '<div class="text-slate-500 text-sm italic">No events yet</div>';
         return;
     }
-    
+
     container.innerHTML = events.map(event => {
         const severityColors = {
             'info': 'border-blue-500/30 bg-blue-500/10 text-blue-400',
@@ -535,7 +570,7 @@ function updateEventLog(events) {
             'warning': 'border-amber-500/30 bg-amber-500/10 text-amber-400',
             'error': 'border-rose-500/30 bg-rose-500/10 text-rose-400',
         };
-        
+
         const typeColors = {
             'FILE_DETECTED': 'text-blue-400',
             'FILE_CONFIRMED': 'text-emerald-400',
@@ -543,7 +578,7 @@ function updateEventLog(events) {
             'FORECAST_CHANGE': 'text-violet-400',
             'DETECTION_WINDOW_START': 'text-cyan-400',
         };
-        
+
         return `
             <div class="p-2 rounded border-l-2 ${severityColors[event.severity] || severityColors.info} mb-1 text-sm">
                 <div class="flex items-center justify-between">
@@ -555,7 +590,7 @@ function updateEventLog(events) {
             </div>
         `;
     }).join('');
-    
+
     // Auto-scroll to top (newest events)
     container.scrollTop = 0;
 }
@@ -567,12 +602,12 @@ function updateDetectionWindows(windows) {
     console.log('[Dashboard] Updating detection windows:', windows);
     const container = document.getElementById('detection-windows-container');
     if (!container) return;
-    
+
     if (!Array.isArray(windows) || windows.length === 0) {
         container.innerHTML = '<div class="text-slate-500 text-sm italic">No active detection windows</div>';
         return;
     }
-    
+
     container.innerHTML = windows.map(window => {
         const statusColors = {
             'PENDING': 'text-slate-400',
@@ -581,7 +616,7 @@ function updateDetectionWindows(windows) {
             'CONFIRMED': 'text-emerald-400',
             'TIMEOUT': 'text-rose-400',
         };
-        
+
         return `
             <div class="bg-slate-800/30 rounded p-2 border border-slate-700/50 text-sm">
                 <div class="flex items-center justify-between">
@@ -603,12 +638,12 @@ function updateUpcomingRuns(runs) {
     console.log('[Dashboard] Updating upcoming runs:', runs);
     const container = document.getElementById('upcoming-runs-container');
     if (!container) return;
-    
+
     if (!Array.isArray(runs) || runs.length === 0) {
         container.innerHTML = '<div class="text-slate-500 text-sm italic">No upcoming runs scheduled</div>';
         return;
     }
-    
+
     container.innerHTML = runs.slice(0, 5).map(run => `
         <div class="flex items-center justify-between text-sm py-1 border-b border-slate-800 last:border-0">
             <span class="text-slate-300">${run.model} ${String(run.cycleHour).padStart(2, '0')}Z</span>
@@ -673,7 +708,7 @@ function initCharts() {
     const initChart = (canvasId, label, color) => {
         const canvas = document.getElementById(canvasId);
         if (!canvas) return;
-        
+
         dashboardState.charts[canvasId] = {
             canvas,
             label,
@@ -681,7 +716,7 @@ function initCharts() {
             data: [],
         };
     };
-    
+
     initChart('chart-detection', 'Detection', '#10b981');
     initChart('chart-download', 'Download', '#3b82f6');
     initChart('chart-parse', 'Parse', '#8b5cf6');
@@ -695,13 +730,13 @@ function updateLatencyChart(type, value) {
     const chartId = `chart-${type}`;
     const chart = dashboardState.charts[chartId];
     if (!chart || !value) return;
-    
+
     // Add data point
     chart.data.push(value);
     if (chart.data.length > dashboardState.maxHistoryPoints) {
         chart.data.shift();
     }
-    
+
     // Draw chart
     drawChart(chart);
 }
@@ -714,35 +749,35 @@ function drawChart(chart) {
     const ctx = canvas.getContext('2d');
     const width = canvas.width = canvas.offsetWidth;
     const height = canvas.height = canvas.offsetHeight;
-    
+
     // Clear canvas
     ctx.clearRect(0, 0, width, height);
-    
+
     if (data.length < 2) return;
-    
+
     // Find min/max for scaling
     const max = Math.max(...data) * 1.1;
     const min = Math.min(...data) * 0.9;
     const range = max - min || 1;
-    
+
     // Draw line
     ctx.beginPath();
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
-    
+
     data.forEach((value, index) => {
         const x = (index / (data.length - 1)) * width;
         const y = height - ((value - min) / range) * height;
-        
+
         if (index === 0) {
             ctx.moveTo(x, y);
         } else {
             ctx.lineTo(x, y);
         }
     });
-    
+
     ctx.stroke();
-    
+
     // Draw fill
     ctx.lineTo(width, height);
     ctx.lineTo(0, height);
@@ -760,7 +795,7 @@ function setupEventListeners() {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', fetchAllDashboardData);
     }
-    
+
     // Window resize for charts
     window.addEventListener('resize', () => {
         Object.values(dashboardState.charts).forEach(chart => {
@@ -774,9 +809,9 @@ function setupEventListeners() {
  */
 function formatTime(date) {
     if (!date || isNaN(date.getTime())) return '--';
-    return date.toLocaleTimeString('en-US', { 
-        hour12: false, 
-        hour: '2-digit', 
+    return date.toLocaleTimeString('en-US', {
+        hour12: false,
+        hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
     });
@@ -946,7 +981,7 @@ function updatePortfolioDisplay(data) {
     const totalPnlEl = document.getElementById('total-pnl');
     const cashBalanceEl = document.getElementById('cash-balance');
     const openPositionsEl = document.getElementById('open-positions-count');
-    
+
     if (totalEquityEl) {
         const totalValue = data.totalValue || data.totalEquity || 0;
         totalEquityEl.textContent = `$${totalValue.toLocaleString()}`;
@@ -999,7 +1034,7 @@ function updateStatusDisplay(data) {
     const webhookCountEl = document.getElementById('webhook-count');
     const fetchCyclesEl = document.getElementById('fetch-cycles');
     const statusTextEl = document.getElementById('status-text');
-    
+
     if (webhookCountEl) {
         // Try different possible property names for cycles
         const cycles = data.cycles || data.fetchCyclesCompleted || data.webhooksReceived || 0;
