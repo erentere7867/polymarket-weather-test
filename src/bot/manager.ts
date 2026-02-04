@@ -228,7 +228,7 @@ export class BotManager {
             } catch (error) {
                 logger.error('Error in forecast-triggered cycle', { error: (error as Error).message });
             }
-        });
+        };
     }
 
     /**
@@ -340,7 +340,7 @@ export class BotManager {
                 this.stats.opportunitiesExecuted += successfulTrades.length;
 
                 // Track performance metrics
-                this.trackExecutionResults(results, opportunities, correlatedOpportunities);
+                // this.trackExecutionResults(results, opportunities, correlatedOpportunities);
 
                 // Mark successful trades as captured
                 for (const result of successfulTrades) {
@@ -431,8 +431,21 @@ export class BotManager {
             weatherDataSource: 'noaa', // Default assumption for speed arb
             forecastValue: forecast?.forecastValue,
             forecastValueUnit: market.thresholdUnit || '°F',
-            isGuaranteed: signal.isGuaranteed
+            isGuaranteed: signal.isGuaranteed,
+            snapshotYesPrice: market.yesPrice,
+            snapshotNoPrice: market.noPrice,
+            snapshotTimestamp: new Date()
         };
+    }
+
+    /**
+     * Update rejection stats from opportunity detector
+     */
+    private updateRejectionStats(): void {
+        const stats = this.opportunityDetector.getRejectionStats();
+        this.performanceMetrics.rejectionReasons.marketCaughtUp = stats.marketCaughtUp;
+        this.performanceMetrics.rejectionReasons.alreadyCaptured = stats.alreadyCaptured;
+        this.performanceMetrics.rejectionReasons.forecastChangeBelowThreshold = stats.forecastChangeBelowThreshold;
     }
 
     /**
