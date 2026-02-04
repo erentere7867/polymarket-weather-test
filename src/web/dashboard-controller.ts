@@ -518,9 +518,29 @@ export class DashboardController {
     }
 
     /**
-     * Add event to cache
+     * Add event to cache with deduplication
      */
     private addEvent(event: DashboardEvent): void {
+        // Simple deduplication: Check if an identical event (same type, message, and subject) 
+        // was added in the last 2 seconds.
+        const DUPLICATION_WINDOW_MS = 2000;
+        const now = new Date(event.timestamp).getTime();
+
+        const isDuplicate = this.cachedEvents.some(cachedEvent => {
+            const cachedTime = new Date(cachedEvent.timestamp).getTime();
+            if (now - cachedTime > DUPLICATION_WINDOW_MS) return false;
+
+            return cachedEvent.type === event.type &&
+                cachedEvent.message === event.message &&
+                cachedEvent.city === event.city &&
+                cachedEvent.model === event.model;
+        });
+
+        if (isDuplicate) {
+            logger.debug(`[DashboardController] Skipped duplicate event: ${event.type} - ${event.message}`);
+            return;
+        }
+
         this.cachedEvents.unshift(event);
         if (this.cachedEvents.length > this.MAX_CACHED_EVENTS) {
             this.cachedEvents.pop();

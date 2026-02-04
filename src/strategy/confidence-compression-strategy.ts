@@ -34,8 +34,10 @@ type BlockReason =
     | 'STABILITY_CHECK_FAILED'
     | 'CONFIDENCE_BELOW_THRESHOLD'
     | 'EDGE_TOO_SMALL'
+    | 'EDGE_TOO_SMALL'
     | 'EXPOSURE_CAP_REACHED'
-    | 'OPPORTUNITY_ALREADY_CAPTURED';
+    | 'OPPORTUNITY_ALREADY_CAPTURED'
+    | 'UNCONFIRMED_EXTREME_CHANGE';
 
 /**
  * Detailed opportunity analysis
@@ -79,6 +81,18 @@ export class ConfidenceCompressionStrategy {
     private uncertaintyBuffer = {
         temperature: 0.02,    // 2% buffer
         precipitation: 0.05,  // 5% buffer (higher uncertainty)
+    };
+
+    // Extreme Change Thresholds - Require Secondary Model Confirmation
+    private readonly EXTREME_THRESHOLDS = {
+        temperature: 8.0,     // 8°F change
+        precipitation: 0.5,   // 0.5 in change
+    };
+
+    // Confirmation Tolerances - Secondary must be within this range of Primary
+    private readonly CONFIRMATION_TOLERANCE = {
+        temperature: 4.0,     // 4°F tolerance
+        precipitation: 0.25,  // 0.25 in tolerance
     };
 
     // Transaction cost estimate
@@ -215,6 +229,90 @@ export class ConfidenceCompressionStrategy {
     }
 
     /**
+     * Check if a forecast change is "Extreme" and requires cross-model confirmation
+     */
+    private checkExtremeChange(
+        cityId: string,
+        primaryModel: ModelType,
+        marketType: 'temperature' | 'precipitation',
+        currentValue: number
+    ): { isExtreme: boolean; change: number; isConfirmed: boolean; secondaryModel?: ModelType; confirmationDiff?: number } {
+        // 1. Get previous run to calculate change
+        const history = this.runHistoryStore.getLastKRuns(cityId, primaryModel);
+        // We need at least 2 runs: current (which might be in history already if processed) and previous
+        // Assuming processModelRun is called BEFORE this analysis, the current run is index 0.
+        // So we compare index 0 vs index 1.
+
+        if (history.length < 2) {
+            return { isExtreme: false, change: 0, isConfirmed: true }; // First run checks handled elsewhere
+        }
+
+        const currentRun = history[0];
+        const previousRun = history[1]; // The one before current
+
+        // Validate we are looking at the right data (sanity check)
+        // If currentRun value doesn't match passed currentValue, we might have a sync issue or using old data
+        // For now, assume history[0] is the source of truth if timestamps align, or just use history[1] as baseline.
+
+        let previousValue = 0;
+        if (marketType === 'temperature') {
+            // Convert C to F for comparison
+            previousValue = (previousRun.maxTempC * 9 / 5) + 32;
+        } else {
+            previousValue = previousRun.precipAmountMm / 25.4; // mm to inches
+        }
+
+        const change = Math.abs(currentValue - previousValue);
+        let threshold = this.EXTREME_THRESHOLDS[marketType];
+
+        // 1.5x Multiplier for HRRR (American cities) - Take more risk
+        // HRRR is high-res and often leads major shifts.
+        if (primaryModel === 'HRRR') {
+            threshold *= 1.5;
+        }
+
+        if (change <= threshold) {
+            return { isExtreme: false, change, isConfirmed: true };
+        }
+
+        // 2. Change is EXTREME - Require Secondary Confirmation
+        const secondary = this.modelHierarchy.getSecondaryModel(cityId);
+        if (!secondary) {
+            // No secondary model to confirm with? High risk.
+            // For safety, BLOCK if no secondary.
+            return { isExtreme: true, change, isConfirmed: false };
+        }
+
+        const secondaryHistory = this.runHistoryStore.getLastKRuns(cityId, secondary);
+        if (secondaryHistory.length === 0) {
+            return { isExtreme: true, change, isConfirmed: false, secondaryModel: secondary };
+        }
+
+        const latestSecondary = secondaryHistory[0];
+
+        // Check staleness of secondary? (Should be recent)
+        // Ignoring staleness for now, assuming detection windows align roughly.
+
+        let secondaryValue = 0;
+        if (marketType === 'temperature') {
+            secondaryValue = (latestSecondary.maxTempC * 9 / 5) + 32;
+        } else {
+            secondaryValue = latestSecondary.precipAmountMm / 25.4;
+        }
+
+        const diff = Math.abs(currentValue - secondaryValue);
+        const tolerance = this.CONFIRMATION_TOLERANCE[marketType];
+
+        return {
+            isExtreme: true,
+            change,
+            isConfirmed: diff <= tolerance,
+            secondaryModel: secondary,
+            confirmationDiff: diff
+        };
+    }
+
+    /**
      * Analyze a single market for trading opportunity
      */
     private analyzeMarket(market: ParsedWeatherMarket): OpportunityAnalysis {
@@ -270,6 +368,17 @@ export class ConfidenceCompressionStrategy {
         }
 
         const forecastValue = state.lastForecast.forecastValue;
+
+        // --- SMART VERIFICATION: Check for Extreme Changes ---
+        const changeCheck = this.checkExtremeChange(cityId, model, marketType, forecastValue);
+        if (changeCheck.isExtreme && !changeCheck.isConfirmed) {
+            analysis.blockReason = 'UNCONFIRMED_EXTREME_CHANGE';
+            logger.warn(`[ConfidenceCompressionStrategy] 🚨 BLOCKED EXTREME CHANGE for ${cityId} (${marketType}): ` +
+                `Change ${changeCheck.change.toFixed(1)} exceeds limit. ` +
+                `Secondary model ${changeCheck.secondaryModel ?? 'NONE'} confirmation failed ` +
+                `(Diff: ${changeCheck.confirmationDiff?.toFixed(1) ?? 'N/A'}).`);
+            return analysis;
+        }
 
         // Check if already captured
         if (this.isOpportunityCaptured(market.market.id, forecastValue)) {
@@ -362,6 +471,7 @@ export class ConfidenceCompressionStrategy {
                     case 'CONFIDENCE_BELOW_THRESHOLD': blocked.lowConfidence++; break;
                     case 'EDGE_TOO_SMALL': blocked.lowEdge++; break;
                     case 'OPPORTUNITY_ALREADY_CAPTURED': blocked.captured++; break;
+                    case 'UNCONFIRMED_EXTREME_CHANGE': blocked.unstable++; break; // Group with unstable for stats
                 }
             } else if (analysis.signal) {
                 signals.push(analysis.signal);
