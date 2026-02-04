@@ -188,9 +188,9 @@ export class S3FileDetector extends EventEmitter {
         const { expectedFile, windowStart } = context;
         const { bucket, key: s3Key } = expectedFile;
         
-        // Log every poll attempt (throttled to avoid spam)
         const elapsedMs = Date.now() - windowStart.getTime();
-        if (elapsedMs % 5000 < 200) { // Log roughly every 5 seconds
+        // Throttle polling logs to every 30 seconds to reduce overhead
+        if (elapsedMs % 30000 < 200) {
             logger.info(`[S3FileDetector] Polling ${expectedFile.model} ${String(expectedFile.cycleHour).padStart(2, '0')}Z: ${s3Key} (${Math.round(elapsedMs/1000)}s elapsed)`);
         }
         
@@ -199,8 +199,7 @@ export class S3FileDetector extends EventEmitter {
             const headResult = await this.pollHeadObject(bucket, s3Key, expectedFile.region);
             
             if (headResult) {
-                logger.info(`[S3FileDetector] HEAD success for ${s3Key} (Size: ${headResult.ContentLength} bytes)`);
-                // File detected!
+                // File detected! (HEAD success logged below with full detection info)
                 const detectedAt = new Date();
                 const detectionLatencyMs = detectedAt.getTime() - windowStart.getTime();
                 
@@ -267,8 +266,8 @@ export class S3FileDetector extends EventEmitter {
      * Poll S3 with HeadObject (fast existence check)
      */
     private async pollHeadObject(bucket: string, key: string, region?: string): Promise<HeadObjectOutput | null> {
-        // Log the exact key being requested for debugging
-        logger.info(`[S3FileDetector] HEAD Request - Bucket: ${bucket}, Key: ${key}`);
+        // Note: Per-request logging moved to debug level to reduce overhead (~400 requests/min)
+        logger.debug(`[S3FileDetector] HEAD Request - Bucket: ${bucket}, Key: ${key}`);
 
         try {
             const command = new HeadObjectCommand({

@@ -121,6 +121,8 @@ export class CrossMarketArbitrage {
         timestamp: Date;
         confidence: number;
     }> = new Map();
+    // Track previous forecast values for change detection (fixes lag arbitrage)
+    private previousForecasts: Map<string, { value: number; timestamp: Date }> = new Map();
     private lagDetectionWindow: Map<string, Date> = new Map();
     
     // Configuration
@@ -165,6 +167,15 @@ export class CrossMarketArbitrage {
      */
     updateForecast(cityId: string, forecastValue: number, confidence: number): void {
         const timestamp = new Date();
+        
+        // Capture previous forecast BEFORE updating (fixes lag arbitrage detection)
+        const currentForecast = this.activeForecasts.get(cityId);
+        if (currentForecast) {
+            this.previousForecasts.set(cityId, {
+                value: currentForecast.forecastValue,
+                timestamp: currentForecast.timestamp
+            });
+        }
         
         this.activeForecasts.set(cityId, {
             forecastValue,
@@ -235,12 +246,17 @@ export class CrossMarketArbitrage {
     }
 
     /**
-     * Get previous forecast value (simplified - would use historical data)
+     * Get previous forecast value for lag arbitrage detection
      */
     private getPreviousForecast(cityId: string): number | null {
-        // In a real implementation, this would query historical forecast data
-        // For now, return null to indicate we don't have previous data
-        return null;
+        const prev = this.previousForecasts.get(cityId);
+        if (!prev) return null;
+        
+        // Only use previous value if it's recent (within 30 minutes)
+        const ageMs = Date.now() - prev.timestamp.getTime();
+        if (ageMs > 30 * 60 * 1000) return null;
+        
+        return prev.value;
     }
 
     /**

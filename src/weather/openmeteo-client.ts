@@ -122,7 +122,7 @@ const WEATHER_CODE_MAP: { [key: number]: string } = {
 };
 
 export class OpenMeteoClient implements IWeatherProvider {
-    name = 'open-meteo';
+    name = 'openmeteo';
     private client: AxiosInstance;
 
     // In-memory cache for weather data
@@ -144,6 +144,10 @@ export class OpenMeteoClient implements IWeatherProvider {
     // Per-city rate limiting to prevent duplicate/overlapping API calls
     private static cityLastCallTime: Map<string, number> = new Map();
     private static readonly MIN_CALL_INTERVAL_MS = 2000; // Minimum 2 seconds between calls for same city
+    private static readonly CITY_CALL_TTL_MS = 60 * 60 * 1000; // 1 hour TTL for city call tracking
+
+    // Cache pruning interval ID for cleanup
+    private cachePruningIntervalId: NodeJS.Timeout | null = null;
 
     /**
      * Check if rate limit is currently active
@@ -350,18 +354,19 @@ export class OpenMeteoClient implements IWeatherProvider {
      * Start periodic cache pruning (every 5 minutes)
      */
     private startCachePruning(): void {
-        setInterval(() => {
+        this.cachePruningIntervalId = setInterval(() => {
             this.pruneCache();
         }, 5 * 60 * 1000);
     }
     
     /**
-     * Remove expired entries from cache
+     * Remove expired entries from cache and clean up stale city call times
      */
     private pruneCache(): void {
         const now = Date.now();
         let prunedCount = 0;
         
+        // Prune expired cache entries
         for (const [key, entry] of this.cache.entries()) {
             if (entry.expiresAt.getTime() <= now) {
                 this.cache.delete(key);
@@ -369,11 +374,32 @@ export class OpenMeteoClient implements IWeatherProvider {
             }
         }
         
+        // Clean up stale city call times (older than TTL)
+        let cityCallsPruned = 0;
+        for (const [cityKey, lastCallTime] of OpenMeteoClient.cityLastCallTime.entries()) {
+            if (now - lastCallTime > OpenMeteoClient.CITY_CALL_TTL_MS) {
+                OpenMeteoClient.cityLastCallTime.delete(cityKey);
+                cityCallsPruned++;
+            }
+        }
+        
         this.cacheStats.lastPruned = new Date();
         
-        if (prunedCount > 0) {
-            logger.debug(`OpenMeteo cache pruned ${prunedCount} expired entries, ${this.cache.size} remaining`);
+        if (prunedCount > 0 || cityCallsPruned > 0) {
+            logger.debug(`OpenMeteo pruned ${prunedCount} cache entries, ${cityCallsPruned} stale city calls`);
         }
+    }
+
+    /**
+     * Dispose of the client and clean up resources
+     */
+    dispose(): void {
+        if (this.cachePruningIntervalId) {
+            clearInterval(this.cachePruningIntervalId);
+            this.cachePruningIntervalId = null;
+        }
+        this.cache.clear();
+        logger.debug('OpenMeteoClient disposed');
     }
     
     /**

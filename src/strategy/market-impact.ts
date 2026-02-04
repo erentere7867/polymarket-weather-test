@@ -161,8 +161,8 @@ export class MarketImpactModel {
         const sizeFactor = orderSize / 1000;
         slippage += sizeFactor * this.SLIPPAGE_PER_1000;
         
-        // Adjust for liquidity
-        const liquidityAdjustment = 1 / (liquidityScore(liquidity) + 0.1);
+        // Adjust for liquidity (use class method for consistency)
+        const liquidityAdjustment = 1 / (this.calculateLiquidityScore(liquidity) + 0.1);
         slippage *= liquidityAdjustment;
         
         // Adjust for volatility

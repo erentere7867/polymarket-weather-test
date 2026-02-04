@@ -211,28 +211,9 @@ export class BotManager {
             this.dataStore
         );
         
-        // Setup forecast monitor
-        this.forecastMonitor.onForecastChanged = async (marketId, change) => {
-            logger.info(`🚨 INTERRUPT: Significant forecast change detected! Triggering immediate scan.`);
-            // Interrupt current delay to run cycle immediately
-            if (this.currentDelayTimeout) {
-                clearTimeout(this.currentDelayTimeout);
-                this.currentDelayTimeout = null;
-                if (this.delayResolve) {
-                    this.delayResolve();
-                    this.delayResolve = null;
-                }
-            }
-            // Also trigger an immediate cycle run if not already running
-            if (!this.isRunning) {
-                return;
-            }
-            try {
-                await this.runCycle();
-            } catch (error) {
-                logger.error('Error in forecast-triggered cycle', { error: (error as Error).message });
-            }
-        };
+        // NOTE: Forecast change triggers are consolidated in setupCrossMarketListeners()
+        // via eventBus.on('FORECAST_CHANGED') which has proper debouncing and guards.
+        // The ForecastMonitor.onForecastChanged callback is NOT used to avoid duplicate triggers.
 
         // Setup file-based ingestion event handlers via global event bus
         eventBus.on('FILE_CONFIRMED', (event) => {

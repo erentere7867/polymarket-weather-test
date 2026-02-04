@@ -288,7 +288,7 @@ dashboardApp.get('/api/providers/health', (req, res) => {
 
     // Get all available providers
     const allProviders = [
-        { name: 'open-meteo', key: '' }, // Always available
+        { name: 'openmeteo', key: '' }, // Always available
         { name: 'openweather', key: config.openWeatherApiKey },
         { name: 'tomorrow', key: config.tomorrowApiKey },
         { name: 'weatherapi', key: config.weatherApiKey },
@@ -298,7 +298,7 @@ dashboardApp.get('/api/providers/health', (req, res) => {
     ];
 
     for (const provider of allProviders) {
-        const isConfigured = provider.name === 'open-meteo' || !!provider.key;
+        const isConfigured = provider.name === 'openmeteo' || !!provider.key;
         providers.push({
             name: provider.name,
             isConfigured,

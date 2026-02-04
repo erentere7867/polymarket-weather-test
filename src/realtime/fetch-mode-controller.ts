@@ -138,8 +138,8 @@ export class FetchModeController {
             // Record success
             this.stateMachine.recordProviderFetch(cityId, 'tomorrow', true);
 
-            // Check for changes
-            const hasChanges = this.detectChanges(cityId, 'tomorrow', data);
+            // Check for changes (returns previous data for proper event emission)
+            const { hasChanged, previousData } = this.detectChanges(cityId, 'tomorrow', data);
 
             // Emit provider fetch event
             eventBus.emit({
@@ -148,19 +148,19 @@ export class FetchModeController {
                     cityId,
                     provider: 'tomorrow',
                     success: true,
-                    hasChanges,
+                    hasChanges: hasChanged,
                 },
             });
 
             // If changes detected, reset no-change timeout
-            if (hasChanges) {
+            if (hasChanged) {
                 this.stateMachine.resetNoChangeTimeout(cityId);
-                this.emitForecastChanged(cityId, 'tomorrow', data);
+                this.emitForecastChanged(cityId, 'tomorrow', data, previousData);
             }
 
             logger.debug(`Tomorrow.io fetch completed for ${cityId}`, {
                 durationMs: duration,
-                hasChanges,
+                hasChanges: hasChanged,
             });
         } catch (error) {
             const errorMsg = (error as Error).message;
@@ -281,8 +281,8 @@ export class FetchModeController {
             this.stateMachine.recordProviderFetch(cityId, provider.name, true);
             this.providerManager.recordSuccess(provider.name);
 
-            // Check for changes
-            const hasChanges = this.detectChanges(cityId, provider.name, data);
+            // Check for changes (returns previous data for proper event emission)
+            const { hasChanged, previousData } = this.detectChanges(cityId, provider.name, data);
 
             // Emit provider fetch event
             eventBus.emit({
@@ -291,25 +291,25 @@ export class FetchModeController {
                     cityId,
                     provider: provider.name,
                     success: true,
-                    hasChanges,
+                    hasChanges: hasChanged,
                 },
             });
 
             // If changes detected, reset no-change timeout and emit forecast changed
-            if (hasChanges) {
+            if (hasChanged) {
                 this.stateMachine.resetNoChangeTimeout(cityId);
-                this.emitForecastChanged(cityId, provider.name, data);
+                this.emitForecastChanged(cityId, provider.name, data, previousData);
             }
 
             logger.debug(`Provider fetch success: ${provider.name} for ${cityId}`, {
                 durationMs: duration,
-                hasChanges,
+                hasChanges: hasChanged,
             });
 
             return {
                 provider: provider.name,
                 success: true,
-                hasChanges,
+                hasChanges: hasChanged,
                 data,
             };
         } catch (error) {
@@ -354,9 +354,10 @@ export class FetchModeController {
     }
 
     /**
-     * Detect if forecast data has changed
+     * Detect if forecast data has changed and return previous data for emission
+     * @returns Object with hasChanged flag and previousData for proper event emission
      */
-    private detectChanges(cityId: string, providerName: string, newData: WeatherData): boolean {
+    private detectChanges(cityId: string, providerName: string, newData: WeatherData): { hasChanged: boolean; previousData: WeatherData | undefined } {
         let providerData = this.lastForecastData.get(cityId);
         if (!providerData) {
             providerData = new Map();
@@ -367,17 +368,20 @@ export class FetchModeController {
         if (!lastData) {
             // First fetch from this provider
             providerData.set(providerName, newData);
-            return false; // No previous data to compare
+            return { hasChanged: false, previousData: undefined };
         }
 
         // Compare timestamps to detect changes
         // Providers typically update their 'fetchedAt' or have internal timestamps
         const hasChanged = this.hasForecastChanged(lastData, newData);
 
+        // Capture previous data BEFORE storing new data (fixes change detection bug)
+        const previousData = lastData;
+
         // Store new data
         providerData.set(providerName, newData);
 
-        return hasChanged;
+        return { hasChanged, previousData };
     }
 
     /**
@@ -414,17 +418,16 @@ export class FetchModeController {
 
     /**
      * Emit FORECAST_CHANGED event
+     * @param previousData - The previous forecast data (passed in before storing new data to avoid race condition)
      */
-    private emitForecastChanged(cityId: string, provider: string, data: WeatherData): void {
-        // Calculate average temperature change if we have previous data
-        const providerData = this.lastForecastData.get(cityId);
-        const lastData = providerData?.get(provider);
-
+    private emitForecastChanged(cityId: string, provider: string, newData: WeatherData, previousData: WeatherData | undefined): void {
         let changeAmount = 0;
-        if (lastData && lastData.hourly.length > 0 && data.hourly.length > 0) {
-            const oldTemp = lastData.hourly[0].temperatureF;
-            const newTemp = data.hourly[0].temperatureF;
-            changeAmount = Math.abs(newTemp - oldTemp);
+        let previousValue: number | undefined;
+        const newValue = newData.hourly[0]?.temperatureF;
+
+        if (previousData && previousData.hourly.length > 0 && newData.hourly.length > 0) {
+            previousValue = previousData.hourly[0].temperatureF;
+            changeAmount = Math.abs(newValue - previousValue);
         }
 
         eventBus.emit({
@@ -432,8 +435,8 @@ export class FetchModeController {
             payload: {
                 cityId,
                 provider,
-                previousValue: lastData?.hourly[0]?.temperatureF,
-                newValue: data.hourly[0]?.temperatureF,
+                previousValue,
+                newValue,
                 changeAmount,
                 timestamp: new Date(),
             },

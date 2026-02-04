@@ -489,7 +489,7 @@ export class HybridWeatherController extends EventEmitter {
         this.fileBasedIngestion = new FileBasedIngestion({
             enabled: true,
             s3PollIntervalMs: config.S3_POLL_INTERVAL_MS,
-            maxDetectionDurationMs: config.API_FALLBACK_MAX_DURATION_MINUTES * 60 * 1000,
+            maxDetectionDurationMs: 45 * 60 * 1000, // 45 minutes for S3 detection windows (not API fallback duration)
             awsRegion: 'us-east-1',
             publicBuckets: true,
         });
@@ -1187,6 +1187,11 @@ export class HybridWeatherController extends EventEmitter {
             webhooksReceived: 0,
         };
         this.state.modeHistory.push(stats);
+        
+        // Prevent unbounded memory growth - keep only last 1000 transitions
+        if (this.state.modeHistory.length > 1000) {
+            this.state.modeHistory.shift();
+        }
     }
 
     /**
@@ -1349,7 +1354,7 @@ export class HybridWeatherController extends EventEmitter {
             this.apiTracker.recordCall('openmeteo', true);
 
             // Process results
-            this.processBatchResults(batchResults, cityLocations, 'open-meteo');
+            this.processBatchResults(batchResults, cityLocations, 'openmeteo');
 
         } catch (error) {
             logger.error('Open-Meteo poll failed, falling back to MeteoSource', {
