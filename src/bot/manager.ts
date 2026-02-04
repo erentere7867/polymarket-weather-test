@@ -120,9 +120,9 @@ export class BotManager {
     constructor() {
         this.weatherScanner = new WeatherScanner();
         this.tradingClient = new TradingClient();
-        this.opportunityDetector = new OpportunityDetector();
         this.orderExecutor = new OrderExecutor(this.tradingClient);
         this.dataStore = new DataStore();
+        this.opportunityDetector = new OpportunityDetector(this.dataStore);
         this.priceTracker = new PriceTracker(this.dataStore);
         this.forecastMonitor = new ForecastMonitor(this.dataStore);
         

@@ -26,13 +26,13 @@
 
 import { EventEmitter } from 'events';
 import { EventBus, eventBus } from './event-bus.js';
-import { apiCallTracker, ApiCallTracker } from './api-call-tracker.js';
+import { ApiCallTracker, apiCallTracker } from './api-call-tracker.js';
 import { ForecastStateMachine } from './forecast-state-machine.js';
 import { DataStore } from './data-store.js';
 import { logger } from '../logger.js';
 import { WeatherProviderManager } from '../weather/provider-manager.js';
 import { WeatherService, FileBasedIngestion, ConfirmationManager } from '../weather/index.js';
-import { findCity, CityLocation, Coordinates, ModelType } from '../weather/types.js';
+import { findCity, CityLocation, Coordinates, ModelType, type WeatherData } from '../weather/types.js';
 import { config } from '../config.js';
 
 /**
@@ -573,9 +573,9 @@ export class HybridWeatherController extends EventEmitter {
 
             this.fileConfirmedCities.add(cityId);
             
-            // Store with high confidence from S3 file
             this.storeDataWithConfidence(cityId, 'S3_FILE', cityData.temperatureF, 1.0);
             
+<<<<<<< C:/antigravity projects/polymarket-weather/src/realtime/hybrid-weather-controller.ts
             // Store in data store
             const matchingMarket = this.dataStore.getAllMarkets().find(m => 
                 m.city?.toLowerCase().replace(/\s+/g, '_') === cityId
@@ -587,26 +587,102 @@ export class HybridWeatherController extends EventEmitter {
                 logger.info(`✅ City ${cityId} matched to market ${marketId.substring(0, 8)}...`);
             } else {
                 logger.warn(`⚠️ No market found for city: ${cityId} (from ${cityData.cityName})`);
+=======
+            const matchingMarkets = this.dataStore
+                .getAllMarkets()
+                .filter(m => m.city?.toLowerCase().replace(/\s+/g, '_') === cityId);
+
+            if (matchingMarkets.length > 0) {
+                const now = new Date();
+                const weatherData: WeatherData = {
+                    location: cityData.coordinates,
+                    locationName: cityData.cityName,
+                    fetchedAt: now,
+                    source: 'S3_FILE',
+                    hourly: [],
+                };
+
+                for (const market of matchingMarkets) {
+                    const marketId = market.market.id;
+
+                    let probability = 0;
+                    let forecastValue = 0;
+                    let hasValidForecast = false;
+
+                    if (market.metricType === 'temperature_high' || market.metricType === 'temperature_low' || market.metricType === 'temperature_threshold') {
+                        if (market.threshold !== undefined) {
+                            forecastValue = cityData.temperatureF;
+
+                            let thresholdF = market.threshold;
+                            if (market.thresholdUnit === 'C') {
+                                thresholdF = (market.threshold * 9 / 5) + 32;
+                            }
+
+                            probability = this.weatherService.calculateTempExceedsProbability(forecastValue, thresholdF);
+                            if (market.comparisonType === 'below') probability = 1 - probability;
+                            hasValidForecast = true;
+                        }
+                    } else if (market.metricType === 'temperature_range') {
+                        if (market.minThreshold !== undefined && market.maxThreshold !== undefined) {
+                            forecastValue = cityData.temperatureF;
+
+                            let minF = market.minThreshold;
+                            let maxF = market.maxThreshold;
+                            if (market.thresholdUnit === 'C') {
+                                minF = (market.minThreshold * 9 / 5) + 32;
+                                maxF = (market.maxThreshold * 9 / 5) + 32;
+                            }
+
+                            const probAboveMin = this.weatherService.calculateTempExceedsProbability(forecastValue, minF);
+                            const probAboveMax = this.weatherService.calculateTempExceedsProbability(forecastValue, maxF);
+                            probability = Math.max(0, Math.min(1, probAboveMin - probAboveMax));
+                            hasValidForecast = true;
+                        }
+                    }
+
+                    if (!hasValidForecast) {
+                        continue;
+                    }
+
+                    const currentState = this.dataStore.getMarketState(marketId);
+                    const previousValue = currentState?.lastForecast?.forecastValue;
+                    const changeAmount = previousValue !== undefined ? Math.abs(forecastValue - previousValue) : 0;
+
+                    this.dataStore.updateForecast(marketId, {
+                        marketId,
+                        weatherData,
+                        forecastValue,
+                        probability,
+                        timestamp: now,
+                        previousValue,
+                        valueChanged: previousValue !== undefined ? changeAmount >= 1 : false,
+                        changeAmount,
+                        changeTimestamp: now,
+                    });
+
+                    try {
+                        this.dataStore.reconcileForecast(marketId, cityData as any, payload.model, payload.cycleHour, payload.forecastHour);
+                    } catch {
+                        // ignore
+                    }
+                }
+>>>>>>> C:/Users/ozgur/.windsurf/worktrees/polymarket-weather/polymarket-weather-0f7679b4/src/realtime/hybrid-weather-controller.ts
             }
-            
-            // Emit forecast change event to trigger trading opportunity re-scan
-            // This ensures the bot immediately re-evaluates markets when new file data arrives
+
             this.eventBus.emit({
                 type: 'FORECAST_CHANGED',
                 payload: {
                     cityId,
                     provider: payload.model,
                     newValue: cityData.temperatureF,
-                    changeAmount: 1.0, // Significant change to trigger re-scan
+                    changeAmount: 1.0,
                     timestamp: new Date(),
-                    source: 'S3_FILE' as DataSourceType,
-                    confidence: 1.0,
                 },
             });
-            
+
             logger.debug(`[HybridWeatherController] Emitted FORECAST_CHANGED for ${cityId} from ${payload.model} file`);
         }
-        
+
         this.emit('fileConfirmed', payload);
     }
 
@@ -1488,7 +1564,6 @@ export class HybridWeatherController extends EventEmitter {
             const currentForecast = result.hourly[0];
             if (!currentForecast) continue;
 
-            // Calculate confidence score for API data
             const confidence = this.calculateDataConfidence('API', new Date());
 
             const forecastData = {
@@ -1503,18 +1578,15 @@ export class HybridWeatherController extends EventEmitter {
                 confidence,
             };
 
-            // Store in shared cache
             this.forecastCache.set(cityId, {
                 data: forecastData,
                 expiresAt: new Date(Date.now() + this.FORECAST_CACHE_TTL_MS),
             });
 
-            // Store with confidence scoring
             this.storeDataWithConfidence(cityId, 'API', forecastData.temperatureF, confidence);
 
             batchForecasts.push(forecastData);
 
-            // Emit events
             this.eventBus.emit({
                 type: 'PROVIDER_FETCH',
                 payload: {
@@ -1536,13 +1608,12 @@ export class HybridWeatherController extends EventEmitter {
                     windSpeedMph: forecastData.windSpeedMph,
                     precipitationMm: forecastData.precipitationMm,
                     timestamp: forecastData.timestamp,
-                    source: 'API' as DataSourceType,
+                    source: 'API',
                     confidence,
                 },
             });
         }
 
-        // Emit batch update event
         if (batchForecasts.length > 0) {
             this.lastBatchUpdateTime = new Date();
             this.eventBus.emit({

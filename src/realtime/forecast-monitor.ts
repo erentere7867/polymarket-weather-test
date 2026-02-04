@@ -416,8 +416,24 @@ export class ForecastMonitor {
                         }
                         hasValidForecast = true;
                     }
+                } else if (market.metricType === 'temperature_range') {
+                    const high = WeatherService.calculateHigh(weatherData, market.targetDate);
+                    if (high !== null && market.minThreshold !== undefined && market.maxThreshold !== undefined) {
+                        forecastValue = high;
+
+                        let minF = market.minThreshold;
+                        let maxF = market.maxThreshold;
+                        if (market.thresholdUnit === 'C') {
+                            minF = (market.minThreshold * 9 / 5) + 32;
+                            maxF = (market.maxThreshold * 9 / 5) + 32;
+                        }
+
+                        const probAboveMin = this.weatherService.calculateTempExceedsProbability(high, minF);
+                        const probAboveMax = this.weatherService.calculateTempExceedsProbability(high, maxF);
+                        probability = Math.max(0, Math.min(1, probAboveMin - probAboveMax));
+                        hasValidForecast = true;
+                    }
                 } else if (market.metricType === 'precipitation') {
-                    // Normalize target date for comparison
                     const targetDateObj = new Date(market.targetDate);
                     targetDateObj.setUTCHours(0, 0, 0, 0);
 
@@ -430,8 +446,8 @@ export class ForecastMonitor {
                     if (dayForecasts.length > 0) {
                         const maxPrecipProb = Math.max(...dayForecasts.map((h: { probabilityOfPrecipitation: number }) => h.probabilityOfPrecipitation));
                         forecastValue = maxPrecipProb;
-                        probability = maxPrecipProb / 100; // 0-1
-                        if (market.comparisonType === 'below') probability = 1 - probability; // "Will it NOT rain?"
+                        probability = maxPrecipProb / 100;
+                        if (market.comparisonType === 'below') probability = 1 - probability;
                         hasValidForecast = true;
                     }
                 }
@@ -444,24 +460,20 @@ export class ForecastMonitor {
                 const previousSource = currentState?.lastForecast?.weatherData?.source;
                 const previousChangeTimestamp = currentState?.lastForecast?.changeTimestamp;
 
-                // Calculate change amount
                 const changeAmount = previousValue !== undefined ? Math.abs(forecastValue - previousValue) : 0;
 
-                // Determine significant change threshold based on metric type
                 let significantChangeThreshold: number;
                 switch (market.metricType) {
                     case 'temperature_high':
                     case 'temperature_low':
                     case 'temperature_threshold':
                     case 'temperature_range':
-                        significantChangeThreshold = 1; // 1°F change is significant
+                        significantChangeThreshold = 1;
                         break;
                     default:
                         significantChangeThreshold = 1;
                 }
 
-                // Did the value change significantly?
-                // Only consider it a change if source is the same to avoid noise from provider rotation
                 const sourceChanged = previousSource !== undefined && previousSource !== weatherData.source;
                 const valueChanged = !sourceChanged && changeAmount >= significantChangeThreshold;
 
@@ -471,17 +483,14 @@ export class ForecastMonitor {
                 // If changed now, use current time. Otherwise, keep previous change time
                 const changeTimestamp = valueChanged ? now : (previousChangeTimestamp || now);
 
-                // Initialize market if new
                 const isNew = !this.initializedMarkets.has(market.market.id);
                 if (isNew) {
                     this.initializedMarkets.add(market.market.id);
                 }
 
-                // Prevent initial value from triggering change
                 const realChange = valueChanged && !isNew;
 
                 if (realChange) {
-                    // Log only minimal info - forecast values disabled per user request
                     logger.info(`⚡ FORECAST CHANGED for ${city} (${market.metricType})`);
                     
                     if (this.onForecastChanged) {
@@ -495,7 +504,6 @@ export class ForecastMonitor {
                     forecastValue,
                     probability,
                     timestamp: now,
-                    // Speed arbitrage fields
                     previousValue,
                     valueChanged: realChange,
                     changeAmount,
@@ -549,11 +557,24 @@ export class ForecastMonitor {
                     }
 
                     probability = this.weatherService.calculateTempExceedsProbability(low, thresholdF);
-                    if (market.comparisonType === 'below') {
-                        probability = 1 - probability;
-                    } else {
-                        // Market "Low > 30". Forecast 35. Exceeds(35, 30) -> High prob. Correct.
+                    if (market.comparisonType === 'below') probability = 1 - probability;
+                    hasValidForecast = true;
+                }
+            } else if (market.metricType === 'temperature_range') {
+                const high = WeatherService.calculateHigh(weatherData, market.targetDate);
+                if (high !== null && market.minThreshold !== undefined && market.maxThreshold !== undefined) {
+                    forecastValue = high;
+
+                    let minF = market.minThreshold;
+                    let maxF = market.maxThreshold;
+                    if (market.thresholdUnit === 'C') {
+                        minF = (market.minThreshold * 9 / 5) + 32;
+                        maxF = (market.maxThreshold * 9 / 5) + 32;
                     }
+
+                    const probAboveMin = this.weatherService.calculateTempExceedsProbability(high, minF);
+                    const probAboveMax = this.weatherService.calculateTempExceedsProbability(high, maxF);
+                    probability = Math.max(0, Math.min(1, probAboveMin - probAboveMax));
                     hasValidForecast = true;
                 }
             } else if (market.metricType === 'precipitation') {

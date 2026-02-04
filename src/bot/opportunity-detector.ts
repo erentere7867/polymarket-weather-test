@@ -7,6 +7,7 @@ import { WeatherService } from '../weather/index.js';
 import { ParsedWeatherMarket, TradingOpportunity } from '../polymarket/types.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { DataStore } from '../realtime/data-store.js';
 
 // Threshold for considering market "caught up" to the forecast
 const MARKET_CAUGHT_UP_THRESHOLD = 0.02; // If price within 2% of probability, market caught up - trade even when market has moved partially
@@ -30,6 +31,7 @@ interface RejectionStats {
 
 export class OpportunityDetector {
     private weatherService: WeatherService;
+    private store: DataStore | null;
 
     // Track opportunities we've already acted on - prevents re-buying at higher prices
     private capturedOpportunities: Map<string, CapturedOpportunity> = new Map();
@@ -43,8 +45,32 @@ export class OpportunityDetector {
     };
     private lastRejectionLogTime: number = 0;
 
-    constructor() {
+    constructor(store?: DataStore) {
         this.weatherService = new WeatherService();
+        this.store = store ?? null;
+    }
+
+    private getStoredForecast(market: ParsedWeatherMarket): {
+        probability: number;
+        forecastValue: number;
+        confidence: number;
+    } | null {
+        if (!this.store) return null;
+
+        const state = this.store.getMarketState(market.market.id);
+        const snapshot = state?.lastForecast;
+        if (!snapshot) return null;
+
+        if (snapshot.probability === undefined || snapshot.forecastValue === undefined) return null;
+
+        const source = snapshot.weatherData?.source;
+        const confidence = source === 'S3_FILE' ? 1.0 : 0.7;
+
+        return {
+            probability: snapshot.probability,
+            forecastValue: snapshot.forecastValue,
+            confidence,
+        };
     }
     
     /**
@@ -201,54 +227,64 @@ export class OpportunityDetector {
             let weatherDataSource: 'noaa' | 'openweather' = 'noaa';
             let confidence = 0.7; // Default confidence
 
-            switch (market.metricType) {
-                case 'temperature_high':
-                case 'temperature_threshold':
-                    const result = await this.analyzeTemperatureMarket(market);
-                    if (result) {
-                        forecastProbability = result.probability;
-                        forecastValue = result.forecastValue;
-                        forecastValueUnit = '°F';
-                        weatherDataSource = result.source;
-                        confidence = result.confidence;
-                    }
-                    break;
+            const stored = this.getStoredForecast(market);
+            if (stored) {
+                forecastProbability = stored.probability;
+                forecastValue = stored.forecastValue;
+                confidence = stored.confidence;
+                forecastValueUnit = market.metricType === 'precipitation' ? '%' : '°F';
+            }
 
-                case 'temperature_low':
-                    const lowResult = await this.analyzeTemperatureLowMarket(market);
-                    if (lowResult) {
-                        forecastProbability = lowResult.probability;
-                        forecastValue = lowResult.forecastValue;
-                        forecastValueUnit = '°F';
-                        weatherDataSource = lowResult.source;
-                        confidence = lowResult.confidence;
+            if (forecastProbability === null) {
+                switch (market.metricType) {
+                    case 'temperature_high':
+                    case 'temperature_threshold': {
+                        const result = await this.analyzeTemperatureMarket(market);
+                        if (result) {
+                            forecastProbability = result.probability;
+                            forecastValue = result.forecastValue;
+                            forecastValueUnit = '°F';
+                            weatherDataSource = result.source;
+                            confidence = result.confidence;
+                        }
+                        break;
                     }
-                    break;
-
-                case 'temperature_range':
-                    const rangeResult = await this.analyzeTemperatureRangeMarket(market);
-                    if (rangeResult) {
-                        forecastProbability = rangeResult.probability;
-                        forecastValue = rangeResult.forecastValue;
-                        forecastValueUnit = '°F';
-                        weatherDataSource = rangeResult.source;
-                        confidence = rangeResult.confidence;
+                    case 'temperature_low': {
+                        const lowResult = await this.analyzeTemperatureLowMarket(market);
+                        if (lowResult) {
+                            forecastProbability = lowResult.probability;
+                            forecastValue = lowResult.forecastValue;
+                            forecastValueUnit = '°F';
+                            weatherDataSource = lowResult.source;
+                            confidence = lowResult.confidence;
+                        }
+                        break;
                     }
-                    break;
-
-                case 'precipitation':
-                    const precipResult = await this.analyzePrecipitationMarket(market);
-                    if (precipResult) {
-                        forecastProbability = precipResult.probability;
-                        forecastValue = precipResult.forecastValue;
-                        forecastValueUnit = '%';
-                        weatherDataSource = precipResult.source;
-                        confidence = precipResult.confidence;
+                    case 'temperature_range': {
+                        const rangeResult = await this.analyzeTemperatureRangeMarket(market);
+                        if (rangeResult) {
+                            forecastProbability = rangeResult.probability;
+                            forecastValue = rangeResult.forecastValue;
+                            forecastValueUnit = '°F';
+                            weatherDataSource = rangeResult.source;
+                            confidence = rangeResult.confidence;
+                        }
+                        break;
                     }
-                    break;
-
-                default:
-                    return null;
+                    case 'precipitation': {
+                        const precipResult = await this.analyzePrecipitationMarket(market);
+                        if (precipResult) {
+                            forecastProbability = precipResult.probability;
+                            forecastValue = precipResult.forecastValue;
+                            forecastValueUnit = '%';
+                            weatherDataSource = precipResult.source;
+                            confidence = precipResult.confidence;
+                        }
+                        break;
+                    }
+                    default:
+                        return null;
+                }
             }
 
             if (forecastProbability === null) {
