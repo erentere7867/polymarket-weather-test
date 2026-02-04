@@ -238,8 +238,9 @@ export class ScheduleManager extends EventEmitter {
         // Look ahead 24 hours
         const lookAheadHours = 24;
 
-        // Start looking back 6 hours to catch GFS runs that are late but haven't arrived
-        for (let hourOffset = -6; hourOffset < lookAheadHours; hourOffset++) {
+        // Start looking back 12 hours to catch ECMWF runs that are late (they have 6-7hr delay)
+        // This ensures we don't miss any runs due to their long file delays
+        for (let hourOffset = -12; hourOffset < lookAheadHours; hourOffset++) {
             // Create check date using UTC to avoid timezone issues
             const checkDate = new Date(Date.UTC(
                 now.getUTCFullYear(),
@@ -270,10 +271,23 @@ export class ScheduleManager extends EventEmitter {
 
         // Filter to future OR active windows and sort by start time
         // We want windows that haven't ended yet
-        return schedules
+        const filtered = schedules
             .filter(s => s.detectionWindowEnd > now)
             .sort((a, b) => a.detectionWindowStart.getTime() - b.detectionWindowStart.getTime())
             .slice(0, count);
+
+        // Log what we're returning for debugging
+        const gfsRuns = filtered.filter(s => s.model === 'GFS');
+        const ecmwfRuns = filtered.filter(s => s.model === 'ECMWF');
+
+        if (gfsRuns.length > 0) {
+            logger.debug(`[ScheduleManager] GFS upcoming: ${gfsRuns.map(r => `${r.cycleHour}Z@${r.expectedPublishTime.toISOString()}`).join(', ')}`);
+        }
+        if (ecmwfRuns.length > 0) {
+            logger.debug(`[ScheduleManager] ECMWF upcoming: ${ecmwfRuns.map(r => `${r.cycleHour}Z@${r.expectedPublishTime.toISOString()}`).join(', ')}`);
+        }
+
+        return filtered;
     }
 
     /**
