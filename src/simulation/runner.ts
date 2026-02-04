@@ -24,6 +24,7 @@ import { config, getEnvVarNumber } from '../config.js';
 
 // v3 Engine Components
 import { DataStore } from '../realtime/data-store.js';
+import { EventBus, eventBus } from '../realtime/event-bus.js';
 import { PriceTracker } from '../realtime/price-tracker.js';
 import { ForecastMonitor } from '../realtime/forecast-monitor.js';
 import { ConfidenceCompressionStrategy } from '../strategy/confidence-compression-strategy.js';
@@ -294,6 +295,48 @@ export class SimulationRunner {
             logger.info(`⚡ Immediate execution triggered for ${marketId} (change: ${changeAmount.toFixed(2)})`);
             this.executeImmediateOpportunity(marketId);
         };
+
+        // 4. Listen for FORECAST_CHANGE events to populate run history store
+        // This is CRITICAL for confidence compression strategy to work
+        eventBus.on('FORECAST_CHANGE', (event) => {
+            if (event.type === 'FORECAST_CHANGE') {
+                const { cityId, cityName, variable, oldValue, newValue, model, cycleHour, timestamp, source } = event.payload;
+                const runDate = new Date(timestamp);
+
+                // Extract temperature and precipitation from the event
+                const isTemp = variable === 'TEMPERATURE';
+                const isPrecip = variable === 'PRECIPITATION';
+
+                if (isTemp) {
+                    // Value is in Celsius from file-based ingestion
+                    const tempC = newValue;
+                    this.strategy.processModelRun(
+                        cityId,
+                        model,
+                        cycleHour,
+                        runDate,
+                        tempC,
+                        false, // precipFlag
+                        0,     // precipAmountMm
+                        source
+                    );
+                    logger.info(`[Runner] Processed temperature run: ${cityId}/${model} = ${tempC.toFixed(1)}°C (source: ${source})`);
+                } else if (isPrecip) {
+                    const precipMm = newValue;
+                    this.strategy.processModelRun(
+                        cityId,
+                        model,
+                        cycleHour,
+                        runDate,
+                        0,     // maxTempC (not available)
+                        precipMm > 0.1, // precipFlag
+                        precipMm,
+                        source
+                    );
+                    logger.info(`[Runner] Processed precipitation run: ${cityId}/${model} = ${precipMm.toFixed(1)}mm (source: ${source})`);
+                }
+            }
+        });
 
         // Wait a bit for initial data to populate
         const startupDelayMs = getEnvVarNumber('STARTUP_DELAY_MS', 1000);
