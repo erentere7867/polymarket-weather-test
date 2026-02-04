@@ -56,7 +56,7 @@ const MODEL_CONFIGS: Record<ModelType, ModelConfig> = {
         firstFileDelayMinutes: { min: 25, max: 40 },
         detectionFile: 0,        // Check f00
         bucket: 'noaa-rap-pds',
-        pathTemplate: 'rap.{YYYYMMDD}/rap.t{HH}z.awp130pgrb.f{FF}.grib2',
+        pathTemplate: 'rap.{YYYYMMDD}/rap.t{HH}z.awp130pgrbf{FF}.grib2',
     },
     GFS: {
         cycleIntervalHours: 6,
@@ -73,7 +73,7 @@ const MODEL_CONFIGS: Record<ModelType, ModelConfig> = {
         bucket: 'ecmwf-forecasts',
         pathTemplate: '{YYYYMMDD}/{HH}z/ifs/0p25/oper/{YYYYMMDD}{HH}0000-{F}h-oper-fc.grib2',
         region: 'eu-central-1',
-        detectionWindowDurationMinutes: 120, // Give ECMWF 2 hours window
+        detectionWindowDurationMinutes: 360, // Give ECMWF 6 hours window (sometimes late)
     },
 };
 
@@ -238,9 +238,9 @@ export class ScheduleManager extends EventEmitter {
         // Look ahead 24 hours
         const lookAheadHours = 24;
 
-        // Start looking back 12 hours to catch ECMWF runs that are late (they have 6-7hr delay)
+        // Start looking back 24 hours to catch ECMWF runs that are late (they have 6-7hr delay)
         // This ensures we don't miss any runs due to their long file delays
-        for (let hourOffset = -12; hourOffset < lookAheadHours; hourOffset++) {
+        for (let hourOffset = -24; hourOffset < lookAheadHours; hourOffset++) {
             // Create check date using UTC to avoid timezone issues
             const checkDate = new Date(Date.UTC(
                 now.getUTCFullYear(),
