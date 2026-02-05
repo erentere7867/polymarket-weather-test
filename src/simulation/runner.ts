@@ -869,6 +869,10 @@ export class SimulationRunner {
         return this.store;
     }
 
+    getStrategy(): ConfidenceCompressionStrategy {
+        return this.strategy;
+    }
+
     getCycles(): number {
         return this.cycles;
     }

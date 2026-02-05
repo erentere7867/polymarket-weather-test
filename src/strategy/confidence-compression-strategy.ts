@@ -74,6 +74,11 @@ export class ConfidenceCompressionStrategy {
     private confidenceScorer: ConfidenceScorer;
     private modelHierarchy: ModelHierarchy;
 
+    // Track all considered and blocked trades for dashboard
+    private consideredTrades: number = 0;
+    private blockedTrades: number = 0;
+    private blockReasons: Map<BlockReason, number> = new Map();
+
     // Track captured opportunities to prevent re-entry
     private capturedOpportunities: Map<string, CapturedOpportunity> = new Map();
 
@@ -450,6 +455,7 @@ export class ConfidenceCompressionStrategy {
         const markets = this.store.getAllMarkets();
         const signals: EntrySignal[] = [];
 
+        // Reset per-scan counters
         let blocked = {
             firstRun: 0,
             notPrimary: 0,
@@ -459,10 +465,20 @@ export class ConfidenceCompressionStrategy {
             captured: 0,
         };
 
+        // Track considered trades for this scan
+        let scanConsidered = 0;
+        let scanBlocked = 0;
+
         for (const market of markets) {
+            scanConsidered++;
             const analysis = this.analyzeMarket(market);
 
             if (analysis.blocked) {
+                scanBlocked++;
+                // Track block reason
+                const currentCount = this.blockReasons.get(analysis.blockReason!) || 0;
+                this.blockReasons.set(analysis.blockReason!, currentCount + 1);
+
                 switch (analysis.blockReason) {
                     case 'FIRST_RUN': blocked.firstRun++; break;
                     case 'NOT_PRIMARY_MODEL': blocked.notPrimary++; break;
@@ -477,11 +493,17 @@ export class ConfidenceCompressionStrategy {
             }
         }
 
+        // Update cumulative counters
+        this.consideredTrades += scanConsidered;
+        this.blockedTrades += scanBlocked;
+
         // Only log scan results periodically (every 10 cycles) or when there are signals
         const shouldLog = signals.length > 0 || (this.capturedOpportunities.size % 10 === 0 && markets.length > 0);
         if (shouldLog) {
             logger.debug(`[ConfidenceCompressionStrategy] Scan: ${signals.length} signals | ` +
-                `Blocked: first=${blocked.firstRun}, notPrimary=${blocked.notPrimary}, unstable=${blocked.unstable}, ` +
+                `Considered: ${scanConsidered}, Blocked: ${scanBlocked} | ` +
+                `Cumulative: ${this.consideredTrades} considered, ${this.blockedTrades} blocked | ` +
+                `Details: first=${blocked.firstRun}, notPrimary=${blocked.notPrimary}, unstable=${blocked.unstable}, ` +
                 `lowConf=${blocked.lowConfidence}, lowEdge=${blocked.lowEdge}, captured=${blocked.captured}`);
         }
 
@@ -523,11 +545,32 @@ export class ConfidenceCompressionStrategy {
         runHistory: ReturnType<RunHistoryStore['getStats']>;
         capturedOpportunities: number;
         confidenceConfig: ReturnType<ConfidenceScorer['getConfig']>;
+        consideredTrades: number;
+        blockedTrades: number;
+        blockReasons: Record<BlockReason, number>;
     } {
+        // Convert blockReasons Map to plain object
+        const blockReasonsObj: Record<BlockReason, number> = {
+            FIRST_RUN: 0,
+            NOT_PRIMARY_MODEL: 0,
+            STABILITY_CHECK_FAILED: 0,
+            CONFIDENCE_BELOW_THRESHOLD: 0,
+            EDGE_TOO_SMALL: 0,
+            EXPOSURE_CAP_REACHED: 0,
+            OPPORTUNITY_ALREADY_CAPTURED: 0,
+            UNCONFIRMED_EXTREME_CHANGE: 0,
+        };
+        for (const [reason, count] of this.blockReasons.entries()) {
+            blockReasonsObj[reason] = count;
+        }
+
         return {
             runHistory: this.runHistoryStore.getStats(),
             capturedOpportunities: this.capturedOpportunities.size,
             confidenceConfig: this.confidenceScorer.getConfig(),
+            consideredTrades: this.consideredTrades,
+            blockedTrades: this.blockedTrades,
+            blockReasons: blockReasonsObj,
         };
     }
 

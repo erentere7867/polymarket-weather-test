@@ -42,6 +42,8 @@ interface BotStats {
     tradesExecuted: number;
     lastCycleTime?: Date;
     errors: number;
+    consideredTrades: number;  // Markets analyzed
+    rejectedTrades: number;    // Markets analyzed but not traded
 }
 
 /**
@@ -154,6 +156,8 @@ export class BotManager {
             opportunitiesExecuted: 0,
             tradesExecuted: 0,
             errors: 0,
+            consideredTrades: 0,
+            rejectedTrades: 0,
         };
         
         this.performanceMetrics = {
@@ -341,20 +345,28 @@ export class BotManager {
             // Merge opportunities, prioritizing Speed Arb
             const mergedOpportunities = this.mergeOpportunities(valueOpportunities, speedOpportunities);
 
-            this.stats.opportunitiesFound += mergedOpportunities.length;
+            // Track considered and rejected trades
+            this.stats.consideredTrades += mergedOpportunities.length;
+            const rejectedCount = mergedOpportunities.filter(opp => opp.action === 'none').length;
+            this.stats.rejectedTrades += rejectedCount;
+
+            // Filter to only actionable opportunities for execution
+            const actionableOpportunities = mergedOpportunities.filter(opp => opp.action !== 'none');
+
+            this.stats.opportunitiesFound += actionableOpportunities.length;
 
             if (mergedOpportunities.length === 0) {
                 logger.info('No trading opportunities found this cycle');
                 logger.debug('Opportunity rejection stats', this.opportunityDetector.getRejectionStats());
             } else {
-                logger.info(`Found ${mergedOpportunities.length} trading opportunities (${speedOpportunities.length} Speed Arb, ${valueOpportunities.length} Value Arb)`);
+                logger.info(`Found ${mergedOpportunities.length} trading opportunities (${speedOpportunities.length} Speed Arb, ${valueOpportunities.length} Value Arb), ${rejectedCount} rejected`);
                 this.logOpportunities(mergedOpportunities);
             }
 
-            // Step 3: Execute trades
-            if (mergedOpportunities.length > 0) {
+            // Step 3: Execute trades (only actionable ones)
+            if (actionableOpportunities.length > 0) {
                 logger.info('Executing trades...');
-                const results = await this.orderExecutor.executeOpportunities(mergedOpportunities);
+                const results = await this.orderExecutor.executeOpportunities(actionableOpportunities);
 
                 const successfulTrades = results.filter(r => r.executed);
                 this.stats.tradesExecuted += successfulTrades.length;
@@ -380,7 +392,7 @@ export class BotManager {
                     }
                 }
 
-                logger.info(`Executed ${successfulTrades.length}/${mergedOpportunities.length} trades`);
+                logger.info(`Executed ${successfulTrades.length}/${actionableOpportunities.length} trades`);
             }
 
             // Step 6: Update rejection stats from opportunity detector

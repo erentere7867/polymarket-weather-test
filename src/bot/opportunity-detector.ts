@@ -693,15 +693,10 @@ export class OpportunityDetector {
         // Process markets in parallel for faster analysis
         const analysisPromises = markets.map(async (market) => {
             const opportunity = await this.analyzeMarket(market);
-            // Include opportunities even with action='none' if they have significant edge
-            // This ensures forecast changes that don't meet threshold are still logged
+            // Return all opportunities including those with action='none'
+            // This allows tracking considered/rejected trades in the dashboard
             if (opportunity) {
-                if (opportunity.action !== 'none') {
-                    return opportunity;
-                } else {
-                    // Log why we're not trading - helps debug edge cases
-                    logger.debug(`No trade for ${market.market.question.substring(0, 40)}: ${opportunity.reason}`);
-                }
+                return opportunity;
             }
             return null;
         });

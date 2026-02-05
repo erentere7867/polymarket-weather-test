@@ -501,18 +501,22 @@ dashboardApp.post('/api/hybrid-weather/toggle', async (req, res) => {
 dashboardApp.get('/api/confidence', (req, res) => {
     const perf = runner.getComponentPerformance();
     const markets = runner.getStore().getAllMarkets();
+    const strategyStats = runner.getStrategy().getStats();
     
     res.json({
         totalMarketsAnalyzed: markets.length,
-        firstRunBlocks: 0, // TODO: Track from strategy
-        stabilityBlocks: 0, // TODO: Track from strategy
-        confidenceBlocks: 0, // TODO: Track from strategy
+        firstRunBlocks: strategyStats.blockReasons.FIRST_RUN,
+        stabilityBlocks: strategyStats.blockReasons.STABILITY_CHECK_FAILED,
+        confidenceBlocks: strategyStats.blockReasons.CONFIDENCE_BELOW_THRESHOLD,
         signalsGenerated: perf.confidenceCompression.signalsGenerated,
         tradesExecuted: perf.confidenceCompression.tradesExecuted,
         avgConfidenceScore: 0, // TODO: Calculate from strategy
         avgExecutionTimeMs: perf.confidenceCompression.avgExecutionTimeMs,
         totalPnl: perf.confidenceCompression.totalPnl,
         crossMarketOpportunities: perf.crossMarketArbitrage.opportunitiesDetected,
+        consideredTrades: strategyStats.consideredTrades,
+        rejectedTrades: strategyStats.blockedTrades,
+        blockReasons: strategyStats.blockReasons,
         modelHierarchy: {
             us: { primary: 'HRRR', secondary: 'RAP', regime: 'GFS' },
             eu: { primary: 'ECMWF', secondary: 'GFS' },
