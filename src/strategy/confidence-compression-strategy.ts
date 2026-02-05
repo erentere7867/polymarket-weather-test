@@ -78,6 +78,7 @@ export class ConfidenceCompressionStrategy {
     private consideredTrades: number = 0;
     private blockedTrades: number = 0;
     private blockReasons: Map<BlockReason, number> = new Map();
+    private confirmationBypasses: number = 0; // Track when secondary model confirms primary
 
     // Track captured opportunities to prevent re-entry
     private capturedOpportunities: Map<string, CapturedOpportunity> = new Map();
@@ -318,6 +319,59 @@ export class ConfidenceCompressionStrategy {
     }
 
     /**
+     * Check if secondary model confirms the primary model's forecast
+     * This allows bypassing first-run restrictions when we have confirmation
+     */
+    private checkSecondaryModelConfirmation(
+        cityId: string,
+        primaryModel: ModelType,
+        marketType: 'temperature' | 'precipitation',
+        market: ParsedWeatherMarket
+    ): { isConfirmed: boolean; secondaryModel?: ModelType; confirmationDiff?: number } {
+        // Get secondary model from hierarchy
+        const secondary = this.modelHierarchy.getSecondaryModel(cityId);
+        if (!secondary) {
+            return { isConfirmed: false };
+        }
+
+        // Check if secondary model has sufficient history
+        const secondaryHistory = this.runHistoryStore.getLastKRuns(cityId, secondary);
+        if (secondaryHistory.length < 1) {
+            return { isConfirmed: false, secondaryModel: secondary };
+        }
+
+        // Get current forecast value from market state
+        const state = this.store.getMarketState(market.market.id);
+        if (!state?.lastForecast) {
+            return { isConfirmed: false, secondaryModel: secondary };
+        }
+        const primaryValue = state.lastForecast.forecastValue;
+
+        // Get secondary's latest forecast
+        const latestSecondary = secondaryHistory[0];
+        let secondaryValue: number;
+        
+        if (marketType === 'temperature') {
+            // Convert C to F for comparison
+            secondaryValue = (latestSecondary.maxTempC * 9 / 5) + 32;
+        } else {
+            secondaryValue = latestSecondary.precipAmountMm / 25.4; // mm to inches
+        }
+
+        // Check if secondary confirms primary (within tolerance)
+        const diff = Math.abs(primaryValue - secondaryValue);
+        
+        // Use same tolerances as extreme change check
+        const tolerance = marketType === 'temperature' ? 4.0 : 0.25;
+        
+        return {
+            isConfirmed: diff <= tolerance,
+            secondaryModel: secondary,
+            confirmationDiff: diff
+        };
+    }
+
+    /**
      * Analyze a single market for trading opportunity
      */
     private analyzeMarket(market: ParsedWeatherMarket): OpportunityAnalysis {
@@ -333,11 +387,21 @@ export class ConfidenceCompressionStrategy {
             blocked: true,
         };
 
-        // HARD RULE 1: Never trade on first run
-        // RELAXED: Only block if we truly have no history at all
-        if (this.runHistoryStore.getRunCount(cityId, model) < 2) {
-            analysis.blockReason = 'FIRST_RUN';
-            return analysis;
+        // HARD RULE 1: Never trade on first run - BUT allow if secondary model confirms
+        const runCount = this.runHistoryStore.getRunCount(cityId, model);
+        if (runCount < 2) {
+            // Check if secondary model can confirm this forecast
+            const secondaryConfirmation = this.checkSecondaryModelConfirmation(cityId, model, marketType, market);
+            
+            if (!secondaryConfirmation.isConfirmed) {
+                analysis.blockReason = 'FIRST_RUN';
+                return analysis;
+            }
+            
+            // Secondary model confirmed - log it but continue with other checks
+            this.confirmationBypasses++;
+            logger.info(`[ConfidenceCompressionStrategy] Secondary model ${secondaryConfirmation.secondaryModel} ` +
+                `confirmed primary ${model} for ${cityId} - bypassing first run block (total bypasses: ${this.confirmationBypasses})`);
         }
 
         // Check confidence FIRST (needed for subsequent checks)
@@ -547,6 +611,7 @@ export class ConfidenceCompressionStrategy {
         confidenceConfig: ReturnType<ConfidenceScorer['getConfig']>;
         consideredTrades: number;
         blockedTrades: number;
+        confirmationBypasses: number;
         blockReasons: Record<BlockReason, number>;
     } {
         // Convert blockReasons Map to plain object
@@ -570,6 +635,7 @@ export class ConfidenceCompressionStrategy {
             confidenceConfig: this.confidenceScorer.getConfig(),
             consideredTrades: this.consideredTrades,
             blockedTrades: this.blockedTrades,
+            confirmationBypasses: this.confirmationBypasses,
             blockReasons: blockReasonsObj,
         };
     }

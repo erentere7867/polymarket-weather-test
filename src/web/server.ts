@@ -516,6 +516,7 @@ dashboardApp.get('/api/confidence', (req, res) => {
         crossMarketOpportunities: perf.crossMarketArbitrage.opportunitiesDetected,
         consideredTrades: strategyStats.consideredTrades,
         rejectedTrades: strategyStats.blockedTrades,
+        confirmationBypasses: strategyStats.confirmationBypasses,
         blockReasons: strategyStats.blockReasons,
         modelHierarchy: {
             us: { primary: 'HRRR', secondary: 'RAP', regime: 'GFS' },
