@@ -30,6 +30,7 @@ import { config, validateConfig } from '../config.js';
 import { logger } from '../logger.js';
 import { TradingOpportunity, ParsedWeatherMarket } from '../polymarket/types.js';
 import { eventBus } from '../realtime/event-bus.js';
+import { forecastStateMachine } from '../realtime/forecast-state-machine.js';
 
 interface BotStats {
     startTime: Date;
@@ -95,7 +96,7 @@ export class BotManager {
     private forecastMonitor: ForecastMonitor;
     
     // New integrated components
-    private hybridController: HybridWeatherController;
+    private hybridController: HybridWeatherController | null = null;
     private crossMarketArbitrage: CrossMarketArbitrage;
     private marketImpactModel: MarketImpactModel;
     private entryOptimizer: EntryOptimizer;
@@ -123,8 +124,8 @@ export class BotManager {
     constructor() {
         this.weatherScanner = new WeatherScanner();
         this.tradingClient = new TradingClient();
-        this.opportunityDetector = new OpportunityDetector();
         this.dataStore = new DataStore();
+        this.opportunityDetector = new OpportunityDetector(this.dataStore);
         this.speedStrategy = new SpeedArbitrageStrategy(this.dataStore);
         this.orderExecutor = new OrderExecutor(this.tradingClient);
         this.priceTracker = new PriceTracker(this.dataStore);
@@ -142,7 +143,7 @@ export class BotManager {
         this.exitOptimizer = new ExitOptimizer(this.marketModel);
         
         // Initialize hybrid controller (will be set up in initialize())
-        this.hybridController = null as any; // Will be initialized after state machine setup
+        this.hybridController = null;
 
         this.stats = {
             startTime: new Date(),
@@ -203,6 +204,21 @@ export class BotManager {
         });
 
         await this.tradingClient.initialize();
+
+        // Initialize hybrid controller for file-based ingestion and/or adaptive detection windows
+        if (config.ENABLE_FILE_BASED_INGESTION || config.ENABLE_ADAPTIVE_DETECTION_WINDOWS) {
+            try {
+                this.hybridController = new HybridWeatherController(
+                    forecastStateMachine,
+                    this.dataStore
+                );
+            } catch (error) {
+                this.hybridController = null;
+                logger.warn('Failed to initialize HybridWeatherController; continuing without it', {
+                    error: (error as Error).message,
+                });
+            }
+        }
 
         // Start PriceTracker (handles market scanning and WS updates)
         await this.priceTracker.start(this.weatherScanner, 60000);
@@ -277,12 +293,16 @@ export class BotManager {
         try {
             // Log current detection mode if adaptive windows are enabled
             if (config.ENABLE_ADAPTIVE_DETECTION_WINDOWS) {
-                const mode = this.hybridController.getCurrentMode();
-                const detectionWindow = this.hybridController.getCurrentDetectionWindow();
-                logger.debug(`Detection mode: ${mode}`, {
-                    window: detectionWindow ? `${detectionWindow.model} ${detectionWindow.cycleHour}Z` : 'none',
-                    earlyDetection: this.hybridController.getState().earlyDetectionActive,
-                });
+                if (!this.hybridController) {
+                    logger.warn('Adaptive detection windows enabled but HybridWeatherController is not initialized');
+                } else {
+                    const mode = this.hybridController.getCurrentMode();
+                    const detectionWindow = this.hybridController.getCurrentDetectionWindow();
+                    logger.debug(`Detection mode: ${mode}`, {
+                        window: detectionWindow ? `${detectionWindow.model} ${detectionWindow.cycleHour}Z` : 'none',
+                        earlyDetection: this.hybridController.getState().earlyDetectionActive,
+                    });
+                }
             }
 
             // Step 1: Get markets from DataStore (maintained by PriceTracker)
@@ -325,6 +345,7 @@ export class BotManager {
 
             if (mergedOpportunities.length === 0) {
                 logger.info('No trading opportunities found this cycle');
+                logger.debug('Opportunity rejection stats', this.opportunityDetector.getRejectionStats());
             } else {
                 logger.info(`Found ${mergedOpportunities.length} trading opportunities (${speedOpportunities.length} Speed Arb, ${valueOpportunities.length} Value Arb)`);
                 this.logOpportunities(mergedOpportunities);
@@ -455,10 +476,14 @@ export class BotManager {
         this.isRunning = true;
         this.forecastMonitor.start(); // Start forecast monitoring
         
-        // Start hybrid controller if adaptive windows enabled
-        if (config.ENABLE_ADAPTIVE_DETECTION_WINDOWS) {
+        // Start hybrid controller if initialized
+        if (this.hybridController) {
             this.hybridController.start();
-            logger.info('Hybrid Weather Controller started with adaptive detection windows');
+            if (config.ENABLE_ADAPTIVE_DETECTION_WINDOWS) {
+                logger.info('Hybrid Weather Controller started with adaptive detection windows');
+            } else {
+                logger.info('Hybrid Weather Controller started');
+            }
         }
         
         logger.info('Bot started - entering polling loop');
@@ -486,7 +511,7 @@ export class BotManager {
         this.forecastMonitor.stop();
         
         // Stop hybrid controller if running
-        if (config.ENABLE_ADAPTIVE_DETECTION_WINDOWS) {
+        if (this.hybridController) {
             this.hybridController.stop();
         }
 
@@ -519,6 +544,9 @@ export class BotManager {
      * Get hybrid controller status
      */
     getHybridControllerStatus() {
+        if (!this.hybridController) {
+            return { enabled: false };
+        }
         if (!config.ENABLE_ADAPTIVE_DETECTION_WINDOWS) {
             return { enabled: false };
         }
