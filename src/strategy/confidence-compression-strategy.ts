@@ -80,6 +80,9 @@ export class ConfidenceCompressionStrategy {
     private blockReasons: Map<BlockReason, number> = new Map();
     private confirmationBypasses: number = 0; // Track when secondary model confirms primary
 
+    // Track unique city-model pairs already counted for first run (prevents duplicate counting)
+    private firstRunCountedPairs: Set<string> = new Set();
+
     // Track captured opportunities to prevent re-entry
     private capturedOpportunities: Map<string, CapturedOpportunity> = new Map();
 
@@ -145,6 +148,13 @@ export class ConfidenceCompressionStrategy {
         };
 
         this.runHistoryStore.addRun(record);
+
+        // If this pair now has sufficient runs, remove from first run tracking
+        const runCount = this.runHistoryStore.getRunCount(cityId, model);
+        if (runCount >= 2) {
+            const pairKey = `${cityId}:${model}`;
+            this.firstRunCountedPairs.delete(pairKey);
+        }
 
         logger.debug(`[ConfidenceCompressionStrategy] Processed run: ${cityId}/${model} ` +
             `temp=${maxTempC.toFixed(1)}°C, precip=${precipFlag}`);
@@ -539,9 +549,20 @@ export class ConfidenceCompressionStrategy {
 
             if (analysis.blocked) {
                 scanBlocked++;
-                // Track block reason
-                const currentCount = this.blockReasons.get(analysis.blockReason!) || 0;
-                this.blockReasons.set(analysis.blockReason!, currentCount + 1);
+                
+                // For first run, only count unique city-model pairs once
+                if (analysis.blockReason === 'FIRST_RUN') {
+                    const pairKey = `${analysis.cityId}:${analysis.model}`;
+                    if (!this.firstRunCountedPairs.has(pairKey)) {
+                        this.firstRunCountedPairs.add(pairKey);
+                        const currentCount = this.blockReasons.get('FIRST_RUN') || 0;
+                        this.blockReasons.set('FIRST_RUN', currentCount + 1);
+                    }
+                } else {
+                    // Other block reasons still count every occurrence
+                    const currentCount = this.blockReasons.get(analysis.blockReason!) || 0;
+                    this.blockReasons.set(analysis.blockReason!, currentCount + 1);
+                }
 
                 switch (analysis.blockReason) {
                     case 'FIRST_RUN': blocked.firstRun++; break;
@@ -646,6 +667,7 @@ export class ConfidenceCompressionStrategy {
     reset(): void {
         this.runHistoryStore.clear();
         this.capturedOpportunities.clear();
+        this.firstRunCountedPairs.clear();
         logger.info(`[ConfidenceCompressionStrategy] Reset complete`);
     }
 }
