@@ -320,7 +320,7 @@ export class SimulationRunner {
                         0,     // precipAmountMm
                         source
                     );
-                    logger.info(`[Runner] Processed temperature run: ${cityId}/${model} = ${tempC.toFixed(1)}°C (source: ${source})`);
+                    logger.debug(`[Runner] Processed temperature run: ${cityId}/${model} = ${tempC.toFixed(1)}°C (source: ${source})`);
                 } else if (isPrecip) {
                     const precipMm = newValue;
                     this.strategy.processModelRun(
@@ -333,7 +333,7 @@ export class SimulationRunner {
                         precipMm,
                         source
                     );
-                    logger.info(`[Runner] Processed precipitation run: ${cityId}/${model} = ${precipMm.toFixed(1)}mm (source: ${source})`);
+                    logger.debug(`[Runner] Processed precipitation run: ${cityId}/${model} = ${precipMm.toFixed(1)}mm (source: ${source})`);
                 }
             }
         });

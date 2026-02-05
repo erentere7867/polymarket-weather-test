@@ -329,34 +329,33 @@ export class ConfidenceCompressionStrategy {
         };
 
         // HARD RULE 1: Never trade on first run
-        if (this.isFirstRun(cityId, model)) {
+        // RELAXED: Only block if we truly have no history at all
+        if (this.runHistoryStore.getRunCount(cityId, model) < 2) {
             analysis.blockReason = 'FIRST_RUN';
-            logger.debug(`[ConfidenceCompressionStrategy] Blocked ${market.market.id}: first run`);
             return analysis;
         }
 
-        // HARD RULE 2: Only primary models initiate trades
-        if (!this.modelHierarchy.canInitiateTrade(cityId, model)) {
-            analysis.blockReason = 'NOT_PRIMARY_MODEL';
-            logger.debug(`[ConfidenceCompressionStrategy] Blocked ${market.market.id}: not primary model`);
-            return analysis;
-        }
-
-        // Check stability
-        const stabilityResult = this.stabilityAnalyzer.isMarketStable(cityId, model, marketType);
-        if (!stabilityResult.isStable) {
-            analysis.blockReason = 'STABILITY_CHECK_FAILED';
-            logger.debug(`[ConfidenceCompressionStrategy] Blocked ${market.market.id}: ${stabilityResult.reason}`);
-            return analysis;
-        }
-
-        // Check confidence
+        // Check confidence FIRST (needed for subsequent checks)
         const confidenceResult = this.confidenceScorer.evaluate(cityId, model, marketType);
         analysis.confidenceResult = confidenceResult;
 
+        // HARD RULE 2: Only primary models initiate trades
+        // RELAXED: Allow any model to trade if it has sufficient confidence
+        const isPrimary = this.modelHierarchy.canInitiateTrade(cityId, model);
+        if (!isPrimary && confidenceResult.score < 0.85) {
+            analysis.blockReason = 'NOT_PRIMARY_MODEL';
+            return analysis;
+        }
+
+        // Check stability - RELAXED: Allow trading even if "unstable" with higher confidence
+        const stabilityResult = this.stabilityAnalyzer.isMarketStable(cityId, model, marketType);
+        if (!stabilityResult.isStable && confidenceResult.score < 0.75) {
+            analysis.blockReason = 'STABILITY_CHECK_FAILED';
+            return analysis;
+        }
+
         if (!confidenceResult.meetsThreshold) {
             analysis.blockReason = 'CONFIDENCE_BELOW_THRESHOLD';
-            logger.debug(`[ConfidenceCompressionStrategy] Blocked ${market.market.id}: ${confidenceResult.reason}`);
             return analysis;
         }
 
@@ -478,9 +477,11 @@ export class ConfidenceCompressionStrategy {
             }
         }
 
-        if (signals.length > 0 || Object.values(blocked).some(v => v > 0)) {
-            logger.info(`[ConfidenceCompressionStrategy] Scan: ${signals.length} signals | ` +
-                `Blocked: first=${blocked.firstRun}, unstable=${blocked.unstable}, ` +
+        // Only log scan results periodically (every 10 cycles) or when there are signals
+        const shouldLog = signals.length > 0 || (this.capturedOpportunities.size % 10 === 0 && markets.length > 0);
+        if (shouldLog) {
+            logger.debug(`[ConfidenceCompressionStrategy] Scan: ${signals.length} signals | ` +
+                `Blocked: first=${blocked.firstRun}, notPrimary=${blocked.notPrimary}, unstable=${blocked.unstable}, ` +
                 `lowConf=${blocked.lowConfidence}, lowEdge=${blocked.lowEdge}, captured=${blocked.captured}`);
         }
 
