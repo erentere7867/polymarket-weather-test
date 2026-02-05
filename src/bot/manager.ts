@@ -15,6 +15,7 @@ import { TradingClient } from '../polymarket/clob-client.js';
 import { OpportunityDetector } from './opportunity-detector.js';
 import { OrderExecutor } from './order-executor.js';
 import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
+import { ConfidenceCompressionStrategy } from '../strategy/confidence-compression-strategy.js';
 import { EntrySignal } from '../strategy/entry-optimizer.js';
 import { DataStore } from '../realtime/data-store.js';
 import { PriceTracker } from '../realtime/price-tracker.js';
@@ -92,6 +93,7 @@ export class BotManager {
     private tradingClient: TradingClient;
     private opportunityDetector: OpportunityDetector;
     private speedStrategy: SpeedArbitrageStrategy;
+    private confidenceStrategy: ConfidenceCompressionStrategy;
     private orderExecutor: OrderExecutor;
     private dataStore: DataStore;
     private priceTracker: PriceTracker;
@@ -129,7 +131,8 @@ export class BotManager {
         this.dataStore = new DataStore();
         this.opportunityDetector = new OpportunityDetector(this.dataStore);
         this.speedStrategy = new SpeedArbitrageStrategy(this.dataStore);
-        this.orderExecutor = new OrderExecutor(this.tradingClient);
+        this.confidenceStrategy = new ConfidenceCompressionStrategy(this.dataStore);
+        this.orderExecutor = new OrderExecutor(this.tradingClient, this.dataStore);
         this.priceTracker = new PriceTracker(this.dataStore);
         this.forecastMonitor = new ForecastMonitor(this.dataStore);
         
@@ -209,6 +212,11 @@ export class BotManager {
 
         await this.tradingClient.initialize();
 
+        // C7: Propagate skipPriceCheck setting from config
+        if (config.skipPriceCheck) {
+            this.speedStrategy.setSkipPriceCheck(true);
+        }
+
         // Initialize hybrid controller for file-based ingestion and/or adaptive detection windows
         if (config.ENABLE_FILE_BASED_INGESTION || config.ENABLE_ADAPTIVE_DETECTION_WINDOWS) {
             try {
@@ -216,6 +224,22 @@ export class BotManager {
                     forecastStateMachine,
                     this.dataStore
                 );
+
+                // Q6: Wire HybridWeatherController outputs
+                // Trigger immediate scan cycle when file-confirmed data arrives
+                this.hybridController.on('fileConfirmed', (payload: { model: string; cycleHour: number; cityData: unknown[] }) => {
+                    logger.info(`📁 File-confirmed data received (${payload.model} ${payload.cycleHour}Z, ${(payload.cityData as unknown[]).length} cities) — triggering immediate scan`);
+                    // Run a scan cycle immediately to capture opportunities from fresh file data
+                    if (this.isRunning && !this.isCycleRunning) {
+                        this.runCycle().catch(err => {
+                            logger.error('Error in file-confirmed triggered scan cycle', { error: (err as Error).message });
+                        });
+                    }
+                });
+
+                this.hybridController.on('modeTransition', (transition: { from: string; to: string; reason: string }) => {
+                    logger.info(`🔄 HybridController: ${transition.from} → ${transition.to} (${transition.reason})`);
+                });
             } catch (error) {
                 this.hybridController = null;
                 logger.warn('Failed to initialize HybridWeatherController; continuing without it', {
@@ -226,6 +250,29 @@ export class BotManager {
 
         // Start PriceTracker (handles market scanning and WS updates)
         await this.priceTracker.start(this.weatherScanner, 60000);
+
+        // C4: Wire FORECAST_CHANGE events to feed ConfidenceCompressionStrategy run history
+        // This is CRITICAL for the stability-based strategy to receive model run data
+        eventBus.on('FORECAST_CHANGE', (event) => {
+            if (event.type === 'FORECAST_CHANGE') {
+                const { cityId, variable, newValue, model, cycleHour, timestamp, source } = event.payload;
+                const runDate = new Date(timestamp);
+                const isTemp = variable === 'TEMPERATURE';
+                const isPrecip = variable === 'PRECIPITATION';
+
+                if (isTemp) {
+                    this.confidenceStrategy.processModelRun(
+                        cityId, model, cycleHour, runDate,
+                        newValue, false, 0, source
+                    );
+                } else if (isPrecip) {
+                    this.confidenceStrategy.processModelRun(
+                        cityId, model, cycleHour, runDate,
+                        0, newValue > 0.1, newValue, source
+                    );
+                }
+            }
+        });
 
         // Setup forecast monitor
         this.forecastMonitor.onForecastChanged = async (marketId, change) => {
@@ -329,12 +376,13 @@ export class BotManager {
             }
 
             // Step 2: Analyze markets for opportunities
-            // Run both strategies: Standard Value Arb (OpportunityDetector) AND Speed Arb (SpeedArbitrageStrategy)
+            // Run all three strategies: Value Arb, Speed Arb, and Confidence Compression
             logger.info('Analyzing markets for opportunities...');
             
-            const [valueOpportunities, speedSignals] = await Promise.all([
+            const [valueOpportunities, speedSignals, confidenceSignals] = await Promise.all([
                 this.opportunityDetector.analyzeMarkets(actionableMarkets),
-                Promise.resolve(this.speedStrategy.detectOpportunities()) // Synchronous but run in flow
+                Promise.resolve(this.speedStrategy.detectOpportunities()),
+                Promise.resolve(this.confidenceStrategy.detectOpportunities())
             ]);
 
             // Convert speed signals to TradingOpportunities
@@ -342,8 +390,20 @@ export class BotManager {
                 .map(signal => this.convertSignalToOpportunity(signal))
                 .filter((opp): opp is TradingOpportunity => opp !== null);
 
-            // Merge opportunities, prioritizing Speed Arb
-            const mergedOpportunities = this.mergeOpportunities(valueOpportunities, speedOpportunities);
+            // C4: Convert confidence compression signals to TradingOpportunities
+            const confidenceOpportunities = confidenceSignals
+                .map(signal => this.convertSignalToOpportunity(signal))
+                .filter((opp): opp is TradingOpportunity => opp !== null);
+
+            if (confidenceSignals.length > 0) {
+                logger.info(`🔒 Confidence Compression: ${confidenceSignals.length} signals detected`);
+            }
+
+            // Merge opportunities: Speed Arb > Confidence > Value Arb (priority order)
+            const mergedOpportunities = this.mergeOpportunities(
+                this.mergeOpportunities(valueOpportunities, confidenceOpportunities),
+                speedOpportunities
+            );
 
             // Track considered and rejected trades
             this.stats.consideredTrades += mergedOpportunities.length;
@@ -379,13 +439,17 @@ export class BotManager {
                 for (const result of successfulTrades) {
                     const opp = result.opportunity;
                     if (opp.forecastValue !== undefined && (opp.action === 'buy_yes' || opp.action === 'buy_no')) {
-                        // Notify both strategies
+                        // Notify all strategies
                         this.opportunityDetector.markOpportunityCaptured(
                             opp.market.market.id,
                             opp.forecastValue,
                             opp.action
                         );
                         this.speedStrategy.markOpportunityCaptured(
+                            opp.market.market.id,
+                            opp.forecastValue
+                        );
+                        this.confidenceStrategy.markOpportunityCaptured(
                             opp.market.market.id,
                             opp.forecastValue
                         );
@@ -403,20 +467,21 @@ export class BotManager {
             logger.error('Error in scan cycle', { error: (error as Error).message });
         } finally {
             this.isCycleRunning = false;
-        }
 
-        this.stats.cyclesCompleted++;
-        this.stats.lastCycleTime = cycleStart;
+            // S2: Always increment cycle counter and track duration, even on early return
+            this.stats.cyclesCompleted++;
+            this.stats.lastCycleTime = cycleStart;
 
-        const cycleDuration = Date.now() - cycleStart.getTime();
-        this.cycleDurations.push(cycleDuration);
-        
-        // Keep only last 100 cycle durations for averaging
-        if (this.cycleDurations.length > 100) {
-            this.cycleDurations.shift();
+            const cycleDuration = Date.now() - cycleStart.getTime();
+            this.cycleDurations.push(cycleDuration);
+            
+            // Keep only last 100 cycle durations for averaging
+            if (this.cycleDurations.length > 100) {
+                this.cycleDurations.shift();
+            }
+            
+            logger.info(`Cycle completed in ${(cycleDuration / 1000).toFixed(1)}s`);
         }
-        
-        logger.info(`Cycle completed in ${(cycleDuration / 1000).toFixed(1)}s`);
     }
 
     /**
@@ -451,17 +516,30 @@ export class BotManager {
         const market = marketState.market;
         const forecast = marketState.lastForecast;
 
+        // S7: Use the stored forecast probability if available, instead of
+        // approximating by adding edge (which already has costs subtracted) to price
+        const storedProb = forecast?.probability;
+        const marketYesProb = market.yesPrice;
+        let forecastProbability: number;
+        if (storedProb !== undefined) {
+            forecastProbability = storedProb;
+        } else {
+            // Fallback: reconstruct from edge (raw edge = prob - price)
+            forecastProbability = signal.side === 'yes'
+                ? marketYesProb + Math.abs(signal.estimatedEdge)
+                : marketYesProb - Math.abs(signal.estimatedEdge);
+        }
+        forecastProbability = Math.max(0.01, Math.min(0.99, forecastProbability));
+
         return {
             market: market,
-            forecastProbability: signal.side === 'yes' 
-                ? market.yesPrice + signal.estimatedEdge 
-                : 1 - (market.noPrice + signal.estimatedEdge), // Approx
-            marketProbability: signal.side === 'yes' ? market.yesPrice : market.noPrice,
-            edge: signal.estimatedEdge * (signal.side === 'yes' ? 1 : -1), // Positive edge = Buy YES
+            forecastProbability,
+            marketProbability: marketYesProb,
+            edge: forecastProbability - marketYesProb, // Positive = underpriced YES
             action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
             confidence: signal.confidence,
             reason: `⚡ SPEED ARB: ${signal.reason}`,
-            weatherDataSource: 'noaa', // Default assumption for speed arb
+            weatherDataSource: 'noaa',
             forecastValue: forecast?.forecastValue,
             forecastValueUnit: market.thresholdUnit || '°F',
             isGuaranteed: signal.isGuaranteed,

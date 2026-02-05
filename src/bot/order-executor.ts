@@ -11,6 +11,7 @@
 
 import { TradingClient } from '../polymarket/clob-client.js';
 import { TradingOpportunity, TradeOrder } from '../polymarket/types.js';
+import { DataStore } from '../realtime/data-store.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -38,11 +39,13 @@ const EDGE_DEGRADATION_TOLERANCE = 0.05; // 5% tolerance - allow more edge degra
 
 export class OrderExecutor {
     private tradingClient: TradingClient;
+    private dataStore: DataStore | null;
     private executedOrderIds: Set<string> = new Set();
     private recentlyTradedMarkets: Map<string, Date> = new Map();
 
-    constructor(tradingClient: TradingClient) {
+    constructor(tradingClient: TradingClient, dataStore?: DataStore) {
         this.tradingClient = tradingClient;
+        this.dataStore = dataStore ?? null;
     }
 
     /**
@@ -69,9 +72,18 @@ export class OrderExecutor {
             const snapshotNoPrice = opportunity.snapshotNoPrice;
             const snapshotPrice = isBuyYes ? snapshotYesPrice : snapshotNoPrice;
             
-            // LIVE prices at execution time
-            const liveYesPrice = opportunity.market.yesPrice;
-            const liveNoPrice = opportunity.market.noPrice;
+            // C1: Get LIVE prices from DataStore (WS-updated) instead of stale market object
+            let liveYesPrice = opportunity.market.yesPrice;
+            let liveNoPrice = opportunity.market.noPrice;
+            if (this.dataStore) {
+                const state = this.dataStore.getMarketState(opportunity.market.market.id);
+                if (state) {
+                    const lastYes = state.priceHistory.yes.history[state.priceHistory.yes.history.length - 1];
+                    const lastNo = state.priceHistory.no.history[state.priceHistory.no.history.length - 1];
+                    if (lastYes) liveYesPrice = lastYes.price;
+                    if (lastNo) liveNoPrice = lastNo.price;
+                }
+            }
             const livePrice = isBuyYes ? liveYesPrice : liveNoPrice;
             
             // Calculate price drift between detection and execution
@@ -160,8 +172,8 @@ export class OrderExecutor {
                 };
             }
 
-            // Calculate position size based on LIVE edge
-            const positionSize = this.calculatePositionSize(opportunity, liveEdgeForAction);
+            // Calculate position size based on LIVE edge and LIVE price
+            const positionSize = this.calculatePositionSize(opportunity, liveEdgeForAction, livePrice);
 
             if (positionSize <= 0) {
                 return { opportunity, executed: false, error: 'Position size too small' };
@@ -222,7 +234,7 @@ export class OrderExecutor {
      * Calculate position size based on Kelly criterion (simplified)
      * Uses the provided edge (which may be live edge at execution time)
      */
-    private calculatePositionSize(opportunity: TradingOpportunity, edgeOverride?: number): number {
+    private calculatePositionSize(opportunity: TradingOpportunity, edgeOverride?: number, livePrice?: number): number {
         const maxSize = config.maxPositionSize;
         // Use provided edge (live edge) or fall back to original edge from opportunity
         const edge = edgeOverride !== undefined ? Math.abs(edgeOverride) : Math.abs(opportunity.edge);
@@ -238,11 +250,10 @@ export class OrderExecutor {
         // Calculate USDC amount
         const usdcAmount = maxSize * Math.min(halfKelly * 10, 1); // Scale and cap at max
 
-        // Calculate number of shares (price determines how many shares per USDC)
-        // Use live price for position sizing
-        const price = opportunity.action === 'buy_yes'
+        // Q5: Use live price for position sizing instead of stale market object price
+        const price = livePrice ?? (opportunity.action === 'buy_yes'
             ? opportunity.market.yesPrice
-            : opportunity.market.noPrice;
+            : opportunity.market.noPrice);
 
         if (price <= 0) return 0;
 
@@ -262,13 +273,16 @@ export class OrderExecutor {
         // Also filter out opportunities with significant price drift (>5 cents)
         const eligibleOpportunities = opportunities.filter(opp => {
             const marketKey = opp.market.market.id;
-            if (this.recentlyTraded(marketKey)) {
+            const isBuyYes = opp.action === 'buy_yes';
+            // S4: Pass current and snapshot prices for price-aware cooldown bypass
+            const currentPriceForCooldown = isBuyYes ? opp.market.yesPrice : opp.market.noPrice;
+            const snapshotPriceForCooldown = isBuyYes ? opp.snapshotYesPrice : opp.snapshotNoPrice;
+            if (this.recentlyTraded(marketKey, currentPriceForCooldown, snapshotPriceForCooldown)) {
                 logger.debug(`Skipping recently traded market: ${opp.market.market.question.substring(0, 40)}`);
                 return false;
             }
             
             // Check for price drift - skip if price moved too much since detection
-            const isBuyYes = opp.action === 'buy_yes';
             const snapshotPrice = isBuyYes ? opp.snapshotYesPrice : opp.snapshotNoPrice;
             const currentPrice = isBuyYes ? opp.market.yesPrice : opp.market.noPrice;
             const priceDrift = Math.abs(currentPrice - snapshotPrice);

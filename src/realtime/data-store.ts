@@ -57,7 +57,11 @@ export class DataStore {
      * Register a market for tracking
      */
     addMarket(market: ParsedWeatherMarket): void {
+        // Q2: If market already exists, update its metadata (threshold, dates, prices)
+        // but preserve price history and forecast history
         if (this.markets.has(market.market.id)) {
+            const existing = this.markets.get(market.market.id)!;
+            existing.market = market;
             return;
         }
 

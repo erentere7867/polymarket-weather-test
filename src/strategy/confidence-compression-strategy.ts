@@ -22,6 +22,7 @@ import { ConfidenceScorer, ConfidenceResult } from './confidence-scorer.js';
 import { ModelHierarchy } from './model-hierarchy.js';
 import { ModelType } from '../weather/types.js';
 import { ParsedWeatherMarket } from '../polymarket/types.js';
+import { normalCDF } from '../probability/normal-cdf.js';
 import { logger } from '../logger.js';
 import { config } from '../config.js';
 
@@ -211,7 +212,7 @@ export class ConfidenceCompressionStrategy {
         const sigma = 3.0; // Weather forecast uncertainty ~3°F
 
         const zScore = distance / sigma;
-        const baseProbability = this.normalCDF(zScore);
+        const baseProbability = normalCDF(zScore);
 
         // Adjust probability based on comparison type
         const rawProb = comparisonType === 'above' ? baseProbability : (1 - baseProbability);
@@ -224,25 +225,7 @@ export class ConfidenceCompressionStrategy {
         return Math.max(0.01, Math.min(0.99, adjustedProb));
     }
 
-    /**
-     * Normal CDF approximation (Abramowitz and Stegun formula)
-     */
-    private normalCDF(x: number): number {
-        const a1 = 0.254829592;
-        const a2 = -0.284496736;
-        const a3 = 1.421413741;
-        const a4 = -1.453152027;
-        const a5 = 1.061405429;
-        const p = 0.3275911;
-
-        const sign = x < 0 ? -1 : 1;
-        x = Math.abs(x) / Math.sqrt(2);
-
-        const t = 1.0 / (1.0 + p * x);
-        const y = 1.0 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
-
-        return 0.5 * (1.0 + sign * y);
-    }
+    // normalCDF is now imported from '../probability/normal-cdf.js'
 
     /**
      * Check if a forecast change is "Extreme" and requires cross-model confirmation
@@ -464,15 +447,34 @@ export class ConfidenceCompressionStrategy {
             return analysis;
         }
 
-        // Calculate model probability
-        const threshold = market.threshold || 0;
-        const comparisonType = market.comparisonType || 'above';
-        const modelProbability = this.confidenceToProbability(
-            confidenceResult.score,
-            forecastValue,
-            threshold,
-            comparisonType as 'above' | 'below'
-        );
+        // C5: Calculate model probability - handle range markets properly
+        let modelProbability: number;
+        if (marketType === 'temperature' && market.metricType === 'temperature_range'
+            && market.minThreshold !== undefined && market.maxThreshold !== undefined) {
+            // Range market: P(min <= X <= max) = P(X >= min) - P(X >= max)
+            let minF = market.minThreshold;
+            let maxF = market.maxThreshold;
+            if (market.thresholdUnit === 'C') {
+                minF = (minF * 9 / 5) + 32;
+                maxF = (maxF * 9 / 5) + 32;
+            }
+            const sigma = 3.0;
+            const pAboveMin = normalCDF((forecastValue - minF) / sigma);
+            const pAboveMax = normalCDF((forecastValue - maxF) / sigma);
+            const rawProb = Math.max(0, pAboveMin - pAboveMax);
+            // Scale by confidence
+            modelProbability = Math.max(0.01, Math.min(0.99,
+                0.5 + (rawProb - 0.5) * confidenceResult.score));
+        } else {
+            const threshold = market.threshold || 0;
+            const comparisonType = market.comparisonType || 'above';
+            modelProbability = this.confidenceToProbability(
+                confidenceResult.score,
+                forecastValue,
+                threshold,
+                comparisonType as 'above' | 'below'
+            );
+        }
 
         // Get market probability
         const marketProbability = market.yesPrice;

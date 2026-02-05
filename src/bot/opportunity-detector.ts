@@ -383,10 +383,6 @@ export class OpportunityDetector {
             // For regular opportunities, use the configured threshold
             const effectiveThreshold = isGuaranteed ? 0.05 : config.minEdgeThreshold;
 
-            // Additional check: for fresh forecast changes, be more aggressive
-            // This helps capture opportunities right after a forecast update
-            const isFreshChange = market.yesPrice > 0 && market.noPrice > 0; // Basic check that market has data
-
             if (absEdge >= effectiveThreshold) {
                 if (edge > 0) {
                     // Forecast says higher probability than market -> buy YES

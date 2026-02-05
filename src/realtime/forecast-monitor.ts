@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Forecast Monitor
  * Polls weather APIs and updates DataStore with latest forecasts
  * 
@@ -27,7 +27,7 @@ export class ForecastMonitor {
     private isRunning: boolean = false;
     private regularPollTimeout: NodeJS.Timeout | null = null;
     private cityCache: Map<string, { data: WeatherData, timestamp: Date }> = new Map();
-    public cacheTtlMs: number = 0;
+    public cacheTtlMs: number = 120000; // 2 minutes default cache TTL
     private initializedMarkets: Set<string> = new Set();
 
     // Callback for significant changes
@@ -110,7 +110,7 @@ export class ForecastMonitor {
     private handleForecastTrigger(event: ForecastTriggerEvent): void {
         const { cityId, provider, triggerTimestamp } = event.payload;
         
-        logger.info(`🎯 Forecast trigger received from ${provider} for ${cityId}`, {
+        logger.info(`ðŸŽ¯ Forecast trigger received from ${provider} for ${cityId}`, {
             timestamp: triggerTimestamp.toISOString(),
         });
 
@@ -357,11 +357,9 @@ export class ForecastMonitor {
 
     private async updateCityForecasts(city: string, markets: ParsedWeatherMarket[]): Promise<void> {
         try {
-            // Check cache validity
             let weatherData: WeatherData;
             const cached = this.cityCache.get(city);
 
-            // 12s cache to balance speed and rate limits
             if (cached && (Date.now() - cached.timestamp.getTime() < this.cacheTtlMs)) {
                 weatherData = cached.data;
             } else {
@@ -369,234 +367,25 @@ export class ForecastMonitor {
                 this.cityCache.set(city, { data: weatherData, timestamp: new Date() });
             }
 
-            for (const market of markets) {
-                if (!market.targetDate) continue;
-
-                let probability = 0;
-                let forecastValue = 0;
-                let hasValidForecast = false;
-
-                // Extract forecast value based on metric
-                if (market.metricType === 'temperature_high' || market.metricType === 'temperature_threshold') {
-                    // Use static helper to avoid extra API call
-                    const high = WeatherService.calculateHigh(weatherData, market.targetDate);
-                    if (high !== null && market.threshold !== undefined) {
-                        forecastValue = high;
-
-                        // Normalize threshold to F for comparison (forecast is always F)
-                        let thresholdF = market.threshold;
-                        if (market.thresholdUnit === 'C') {
-                            thresholdF = (market.threshold * 9 / 5) + 32;
-                        }
-
-                        probability = this.weatherService.calculateTempExceedsProbability(high, thresholdF);
-                        if (market.comparisonType === 'below') probability = 1 - probability;
-                        hasValidForecast = true;
-                    }
-                } else if (market.metricType === 'temperature_low') {
-                    const low = WeatherService.calculateLow(weatherData, market.targetDate);
-                    if (low !== null && market.threshold !== undefined) {
-                        forecastValue = low;
-
-                        // Normalize threshold to F
-                        let thresholdF = market.threshold;
-                        if (market.thresholdUnit === 'C') {
-                            thresholdF = (market.threshold * 9 / 5) + 32;
-                        }
-
-                        probability = this.weatherService.calculateTempExceedsProbability(low, thresholdF);
-                        // For low temp, "below" usually means "colder than". 
-                        // Probability calculated is "exceeds" (warmer than).
-                        // If market is "Low < 30", and forecast is 25. Exceeds(25, 30) -> Low prob.
-                        // We want prob of being BELOW. So 1 - Exceeds.
-                        if (market.comparisonType === 'below') {
-                            probability = 1 - probability;
-                        } else {
-                            // Market "Low > 30". Forecast 35. Exceeds(35, 30) -> High prob. Correct.
-                        }
-                        hasValidForecast = true;
-                    }
-                } else if (market.metricType === 'temperature_range') {
-                    const high = WeatherService.calculateHigh(weatherData, market.targetDate);
-                    if (high !== null && market.minThreshold !== undefined && market.maxThreshold !== undefined) {
-                        forecastValue = high;
-
-                        let minF = market.minThreshold;
-                        let maxF = market.maxThreshold;
-                        if (market.thresholdUnit === 'C') {
-                            minF = (market.minThreshold * 9 / 5) + 32;
-                            maxF = (market.maxThreshold * 9 / 5) + 32;
-                        }
-
-                        const probAboveMin = this.weatherService.calculateTempExceedsProbability(high, minF);
-                        const probAboveMax = this.weatherService.calculateTempExceedsProbability(high, maxF);
-                        probability = Math.max(0, Math.min(1, probAboveMin - probAboveMax));
-                        hasValidForecast = true;
-                    }
-                } else if (market.metricType === 'precipitation') {
-                    const targetDateObj = new Date(market.targetDate);
-                    targetDateObj.setUTCHours(0, 0, 0, 0);
-
-                    const dayForecasts = weatherData.hourly.filter((h: { timestamp: Date }) => {
-                        const hourDate = new Date(h.timestamp);
-                        hourDate.setUTCHours(0, 0, 0, 0);
-                        return hourDate.getTime() === targetDateObj.getTime();
-                    });
-
-                    if (dayForecasts.length > 0) {
-                        const maxPrecipProb = Math.max(...dayForecasts.map((h: { probabilityOfPrecipitation: number }) => h.probabilityOfPrecipitation));
-                        forecastValue = maxPrecipProb;
-                        probability = maxPrecipProb / 100;
-                        if (market.comparisonType === 'below') probability = 1 - probability;
-                        hasValidForecast = true;
-                    }
-                }
-
-                if (!hasValidForecast) continue;
-
-                // SPEED ARBITRAGE: Detect if forecast value actually changed
-                const currentState = this.store.getMarketState(market.market.id);
-                const previousValue = currentState?.lastForecast?.forecastValue;
-                const previousSource = currentState?.lastForecast?.weatherData?.source;
-                const previousChangeTimestamp = currentState?.lastForecast?.changeTimestamp;
-
-                const changeAmount = previousValue !== undefined ? Math.abs(forecastValue - previousValue) : 0;
-
-                let significantChangeThreshold: number;
-                switch (market.metricType) {
-                    case 'temperature_high':
-                    case 'temperature_low':
-                    case 'temperature_threshold':
-                    case 'temperature_range':
-                        significantChangeThreshold = 1;
-                        break;
-                    default:
-                        significantChangeThreshold = 1;
-                }
-
-                const sourceChanged = previousSource !== undefined && previousSource !== weatherData.source;
-                const valueChanged = !sourceChanged && changeAmount >= significantChangeThreshold;
-
-                const now = new Date();
-
-                // Track when the change occurred
-                // If changed now, use current time. Otherwise, keep previous change time
-                const changeTimestamp = valueChanged ? now : (previousChangeTimestamp || now);
-
-                const isNew = !this.initializedMarkets.has(market.market.id);
-                if (isNew) {
-                    this.initializedMarkets.add(market.market.id);
-                }
-
-                const realChange = valueChanged && !isNew;
-
-                if (realChange) {
-                    logger.info(`⚡ FORECAST CHANGED for ${city} (${market.metricType})`);
-                    
-                    if (this.onForecastChanged) {
-                        this.onForecastChanged(market.market.id, changeAmount);
-                    }
-                }
-
-                const snapshot: ForecastSnapshot = {
-                    marketId: market.market.id,
-                    weatherData,
-                    forecastValue,
-                    probability,
-                    timestamp: now,
-                    previousValue,
-                    valueChanged: realChange,
-                    changeAmount,
-                    changeTimestamp,
-                };
-
-                this.store.updateForecast(market.market.id, snapshot);
-            }
-
+            // Q1: Delegate to shared processing method
+            await this.processCityMarkets(city, markets, weatherData);
         } catch (error) {
-            // Error already logged in poll() for parallel execution
             throw error;
         }
     }
 
     /**
-     * Process markets for a city using already-fetched weather data
-     * Used by batch fetching to avoid duplicate API calls
+     * Process markets for a city using already-fetched weather data.
+     * Shared logic for both individual and batch fetch paths (Q1: DRY).
      */
     private async processCityMarkets(city: string, markets: ParsedWeatherMarket[], weatherData: WeatherData): Promise<void> {
         for (const market of markets) {
             if (!market.targetDate) continue;
 
-            let probability = 0;
-            let forecastValue = 0;
-            let hasValidForecast = false;
+            const extracted = this.extractForecastValue(market, weatherData);
+            if (!extracted) continue;
 
-            // Extract forecast value based on metric
-            if (market.metricType === 'temperature_high' || market.metricType === 'temperature_threshold') {
-                const high = WeatherService.calculateHigh(weatherData, market.targetDate);
-                if (high !== null && market.threshold !== undefined) {
-                    forecastValue = high;
-
-                    let thresholdF = market.threshold;
-                    if (market.thresholdUnit === 'C') {
-                        thresholdF = (market.threshold * 9 / 5) + 32;
-                    }
-
-                    probability = this.weatherService.calculateTempExceedsProbability(high, thresholdF);
-                    if (market.comparisonType === 'below') probability = 1 - probability;
-                    hasValidForecast = true;
-                }
-            } else if (market.metricType === 'temperature_low') {
-                const low = WeatherService.calculateLow(weatherData, market.targetDate);
-                if (low !== null && market.threshold !== undefined) {
-                    forecastValue = low;
-
-                    let thresholdF = market.threshold;
-                    if (market.thresholdUnit === 'C') {
-                        thresholdF = (market.threshold * 9 / 5) + 32;
-                    }
-
-                    probability = this.weatherService.calculateTempExceedsProbability(low, thresholdF);
-                    if (market.comparisonType === 'below') probability = 1 - probability;
-                    hasValidForecast = true;
-                }
-            } else if (market.metricType === 'temperature_range') {
-                const high = WeatherService.calculateHigh(weatherData, market.targetDate);
-                if (high !== null && market.minThreshold !== undefined && market.maxThreshold !== undefined) {
-                    forecastValue = high;
-
-                    let minF = market.minThreshold;
-                    let maxF = market.maxThreshold;
-                    if (market.thresholdUnit === 'C') {
-                        minF = (market.minThreshold * 9 / 5) + 32;
-                        maxF = (market.maxThreshold * 9 / 5) + 32;
-                    }
-
-                    const probAboveMin = this.weatherService.calculateTempExceedsProbability(high, minF);
-                    const probAboveMax = this.weatherService.calculateTempExceedsProbability(high, maxF);
-                    probability = Math.max(0, Math.min(1, probAboveMin - probAboveMax));
-                    hasValidForecast = true;
-                }
-            } else if (market.metricType === 'precipitation') {
-                const targetDateObj = new Date(market.targetDate);
-                targetDateObj.setUTCHours(0, 0, 0, 0);
-
-                const dayForecasts = weatherData.hourly.filter((h: { timestamp: Date }) => {
-                    const hourDate = new Date(h.timestamp);
-                    hourDate.setUTCHours(0, 0, 0, 0);
-                    return hourDate.getTime() === targetDateObj.getTime();
-                });
-
-                if (dayForecasts.length > 0) {
-                    const maxPrecipProb = Math.max(...dayForecasts.map((h: { probabilityOfPrecipitation: number }) => h.probabilityOfPrecipitation));
-                    forecastValue = maxPrecipProb;
-                    probability = maxPrecipProb / 100;
-                    if (market.comparisonType === 'below') probability = 1 - probability;
-                    hasValidForecast = true;
-                }
-            }
-
-            if (!hasValidForecast) continue;
+            const { forecastValue, probability } = extracted;
 
             const currentState = this.store.getMarketState(market.market.id);
             const previousValue = currentState?.lastForecast?.forecastValue;
@@ -604,18 +393,7 @@ export class ForecastMonitor {
             const previousChangeTimestamp = currentState?.lastForecast?.changeTimestamp;
 
             const changeAmount = previousValue !== undefined ? Math.abs(forecastValue - previousValue) : 0;
-
-            let significantChangeThreshold: number;
-            switch (market.metricType) {
-                case 'temperature_high':
-                case 'temperature_low':
-                case 'temperature_threshold':
-                case 'temperature_range':
-                    significantChangeThreshold = 1;
-                    break;
-                default:
-                    significantChangeThreshold = 1;
-            }
+            const significantChangeThreshold = 1;
 
             const sourceChanged = previousSource !== undefined && previousSource !== weatherData.source;
             const valueChanged = !sourceChanged && changeAmount >= significantChangeThreshold;
@@ -652,5 +430,74 @@ export class ForecastMonitor {
 
             this.store.updateForecast(market.market.id, snapshot);
         }
+    }
+
+    /**
+     * Extract forecast value and probability from weather data for a market.
+     * Q1: Shared helper to eliminate duplication between update paths.
+     */
+    private extractForecastValue(
+        market: ParsedWeatherMarket,
+        weatherData: WeatherData
+    ): { forecastValue: number; probability: number } | null {
+        if (!market.targetDate) return null;
+
+        if (market.metricType === 'temperature_high' || market.metricType === 'temperature_threshold') {
+            const high = WeatherService.calculateHigh(weatherData, market.targetDate);
+            if (high !== null && market.threshold !== undefined) {
+                let thresholdF = market.threshold;
+                if (market.thresholdUnit === 'C') {
+                    thresholdF = (market.threshold * 9 / 5) + 32;
+                }
+                let probability = this.weatherService.calculateTempExceedsProbability(high, thresholdF);
+                if (market.comparisonType === 'below') probability = 1 - probability;
+                return { forecastValue: high, probability };
+            }
+        } else if (market.metricType === 'temperature_low') {
+            const low = WeatherService.calculateLow(weatherData, market.targetDate);
+            if (low !== null && market.threshold !== undefined) {
+                let thresholdF = market.threshold;
+                if (market.thresholdUnit === 'C') {
+                    thresholdF = (market.threshold * 9 / 5) + 32;
+                }
+                let probability = this.weatherService.calculateTempExceedsProbability(low, thresholdF);
+                if (market.comparisonType === 'below') probability = 1 - probability;
+                return { forecastValue: low, probability };
+            }
+        } else if (market.metricType === 'temperature_range') {
+            const high = WeatherService.calculateHigh(weatherData, market.targetDate);
+            if (high !== null && market.minThreshold !== undefined && market.maxThreshold !== undefined) {
+                let minF = market.minThreshold;
+                let maxF = market.maxThreshold;
+                if (market.thresholdUnit === 'C') {
+                    minF = (market.minThreshold * 9 / 5) + 32;
+                    maxF = (market.maxThreshold * 9 / 5) + 32;
+                }
+                const probAboveMin = this.weatherService.calculateTempExceedsProbability(high, minF);
+                const probAboveMax = this.weatherService.calculateTempExceedsProbability(high, maxF);
+                const probability = Math.max(0, Math.min(1, probAboveMin - probAboveMax));
+                return { forecastValue: high, probability };
+            }
+        } else if (market.metricType === 'precipitation') {
+            const targetDateObj = new Date(market.targetDate);
+            targetDateObj.setUTCHours(0, 0, 0, 0);
+
+            const dayForecasts = weatherData.hourly.filter((h: { timestamp: Date }) => {
+                const hourDate = new Date(h.timestamp);
+                hourDate.setUTCHours(0, 0, 0, 0);
+                return hourDate.getTime() === targetDateObj.getTime();
+            });
+
+            if (dayForecasts.length > 0) {
+                const maxPrecipProb = Math.max(
+                    ...dayForecasts.map((h: { probabilityOfPrecipitation: number }) => h.probabilityOfPrecipitation)
+                );
+                let probability = maxPrecipProb / 100;
+                if (market.comparisonType === 'below') probability = 1 - probability;
+                return { forecastValue: maxPrecipProb, probability };
+            }
+        }
+
+        return null;
     }
 }

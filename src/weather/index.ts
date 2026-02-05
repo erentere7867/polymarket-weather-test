@@ -6,7 +6,8 @@
 
 import { NOAAClient } from './noaa-client.js';
 import { WeatherProviderManager } from './provider-manager.js';
-import { findCity, KNOWN_CITIES, type CityLocation, type WeatherData, type HourlyForecast, type Coordinates } from './types.js';
+import { WeatherData, HourlyForecast, Coordinates, CityLocation, KNOWN_CITIES, findCity } from './types.js';
+import { exceedanceProbability } from '../probability/normal-cdf.js';
 import { logger } from '../logger.js';
 
 // Export file-based ingestion components
@@ -355,10 +356,7 @@ export class WeatherService {
      * Calculate probability that temperature will exceed a threshold
      */
     calculateTempExceedsProbability(forecastTemp: number, threshold: number, uncertainty: number = 3): number {
-        const diff = forecastTemp - threshold;
-        const z = diff / uncertainty;
-        const probability = 1 / (1 + Math.exp(-1.7 * z));
-        return Math.max(0, Math.min(1, probability));
+        return exceedanceProbability(forecastTemp, threshold, uncertainty);
     }
 
     /**

@@ -158,16 +158,6 @@ export class ExitOptimizer {
             };
         }
 
-        if (position.pnlPercent >= this.takeProfitThreshold) {
-            // Clean up high water mark on take profit
-            this.positionHighWaterMark.delete(position.marketId);
-            return {
-                shouldExit: true,
-                reason: `Take Profit hit: ${(position.pnlPercent * 100).toFixed(1)}%`,
-                urgency: 'MEDIUM'
-            };
-        }
-
         // 3. Take Profit
         if (position.pnlPercent >= this.takeProfitThreshold) {
             // Clean up high water mark on take profit

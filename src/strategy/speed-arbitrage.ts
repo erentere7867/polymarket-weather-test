@@ -13,6 +13,7 @@ import { EdgeCalculator, CalculatedEdge } from '../probability/edge-calculator.j
 import { EntryOptimizer, EntrySignal } from './entry-optimizer.js';
 import { MarketImpactModel } from './market-impact.js';
 import { ParsedWeatherMarket } from '../polymarket/types.js';
+import { normalCDF } from '../probability/normal-cdf.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -21,8 +22,8 @@ import { logger } from '../logger.js';
 const MAX_CHANGE_AGE_MS = 120000;
 
 // Minimum change threshold to trigger detection
-// RELAXED: 0.0 sigma = trade on ANY deviation (Maximum Aggression)
-const MIN_SIGMA_FOR_ARBITRAGE = 0.0;
+// S9: Require at least 0.5 sigma to avoid trading on noise
+const MIN_SIGMA_FOR_ARBITRAGE = 0.5;
 
 export class SpeedArbitrageStrategy {
     private store: DataStore;
@@ -186,14 +187,13 @@ export class SpeedArbitrageStrategy {
             return null;
         }
 
-        // Determine guaranteed probability
-        const diff = forecast.forecastValue - threshold;
-        let guaranteedProb: number;
+        // C3: Use proper CDF probability instead of binary 0/1
+        let forecastProb: number;
 
         if (market.comparisonType === 'above') {
-            guaranteedProb = diff > 0 ? 1.0 : 0.0;
+            forecastProb = this.calculateProbability(forecast.forecastValue, threshold, 'above');
         } else if (market.comparisonType === 'below') {
-            guaranteedProb = diff < 0 ? 1.0 : 0.0;
+            forecastProb = this.calculateProbability(forecast.forecastValue, threshold, 'below');
         } else {
             return null;
         }
@@ -201,7 +201,7 @@ export class SpeedArbitrageStrategy {
         // Calculate edge
         const edge = this.edgeCalculator.calculateEdge(
             market,
-            guaranteedProb,
+            forecastProb,
             priceYes,
             priceNo
         );
@@ -256,53 +256,15 @@ export class SpeedArbitrageStrategy {
         comparisonType: 'above' | 'below'
     ): number {
         const UNCERTAINTY = 3; // Fixed uncertainty of 3°F
-        const diff = forecastValue - threshold;
-        const sigma = diff / UNCERTAINTY;
-        
-        // Normal CDF approximation using error function
-        // P(X > threshold) = 1 - CDF(sigma) for "above" markets
-        // P(X < threshold) = CDF(sigma) for "below" markets
-        const cdf = this.normalCDF(sigma);
+        const z = (forecastValue - threshold) / UNCERTAINTY;
         
         if (comparisonType === 'above') {
-            // Probability that temp is ABOVE threshold
-            return 1 - cdf;
+            // P(actual >= threshold) = CDF(z)
+            return normalCDF(z);
         } else {
-            // Probability that temp is BELOW threshold
-            return cdf;
+            // P(actual < threshold) = 1 - CDF(z)
+            return 1 - normalCDF(z);
         }
-    }
-    
-    /**
-     * Normal CDF approximation (Abramowitz and Stegun formula)
-     * Accurate to within 7.5e-8
-     */
-    private normalCDF(x: number): number {
-        // Handle extreme values
-        if (x < -6) return 0;
-        if (x > 6) return 1;
-        
-        const b1 = 0.319381530;
-        const b2 = -0.356563782;
-        const b3 = 1.781477937;
-        const b4 = -1.821255978;
-        const b5 = 1.330274429;
-        const p = 0.2316419;
-        const c = 0.39894228;
-        
-        const absX = Math.abs(x);
-        const t = 1 / (1 + p * absX);
-        
-        const phi = c * Math.exp(-(x * x) / 2);
-        const poly = b1 * t + b2 * t * t + b3 * Math.pow(t, 3) + b4 * Math.pow(t, 4) + b5 * Math.pow(t, 5);
-        
-        let result = 1 - phi * poly;
-        
-        if (x < 0) {
-            result = 1 - result;
-        }
-        
-        return Math.max(0, Math.min(1, result));
     }
 
     /**

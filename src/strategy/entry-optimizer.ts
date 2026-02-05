@@ -343,6 +343,16 @@ export class EntryOptimizer {
         liquidity: OrderBookDepth,
         orderBook?: OrderBook
     ): number {
+        // C2: If no order book data, skip depth-based constraints entirely
+        // (depth is 0 which would incorrectly constrain size to 0)
+        if (!orderBook) {
+            // Apply spread-based reduction only
+            if (liquidity.spread > 0.05) {
+                return desiredSize * 0.7;
+            }
+            return desiredSize;
+        }
+
         // Don't exceed 10% of order book depth on either side
         const maxSizeFromDepth = Math.min(
             liquidity.totalBidDepth * 0.1,

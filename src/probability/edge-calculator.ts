@@ -113,7 +113,9 @@ export class EdgeCalculator {
             side,
             rawEdge,
             adjustedEdge,
-            confidence: isGuaranteed ? 1.0 : Math.abs(adjustedEdge), // Max confidence for guaranteed
+            // S5: Confidence based on how decisive the forecast is (distance from 50/50)
+            // probWin=0.9 → confidence=0.8, probWin=0.6 → confidence=0.2, probWin=0.5 → confidence=0
+            confidence: isGuaranteed ? 1.0 : Math.min(1.0, Math.abs(probWin - 0.5) * 2),
             KellyFraction: isGuaranteed ? safetyMultiplier : finalKelly, // Higher Kelly for guaranteed
             reason: `Forecast ${(probWin * 100).toFixed(1)}% vs Price ${(price * 100).toFixed(1)}%${isGuaranteed ? ' (GUARANTEED)' : ''}`,
             isGuaranteed

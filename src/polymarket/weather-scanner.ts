@@ -347,7 +347,12 @@ export class WeatherScanner {
             const month = monthMap[monthStr];
             if (month !== undefined) {
                 // Create date in UTC to avoid timezone issues
-                const date = new Date(Date.UTC(year, month, day));
+                let date = new Date(Date.UTC(year, month, day));
+                // S8: Fix year-rollover - if date is >30 days in the past and no year was
+                // explicitly specified, assume it refers to next year
+                if (!monthDayMatch[3] && date.getTime() < now.getTime() - 30 * 24 * 60 * 60 * 1000) {
+                    date = new Date(Date.UTC(year + 1, month, day));
+                }
                 return date;
             }
         }
