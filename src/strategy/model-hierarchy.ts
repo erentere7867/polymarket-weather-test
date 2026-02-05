@@ -65,7 +65,10 @@ export const GLOBAL_HIERARCHY: ModelHierarchyConfig = {
  */
 const CITY_REGIONS: Record<string, 'US' | 'EUROPE' | 'GLOBAL'> = {
     // US Cities (CONUS) - use HRRR
+    // Include common name variants from WeatherScanner + file ingestion
     'new york': 'US',
+    'new york city': 'US',
+    'nyc': 'US',
     'los angeles': 'US',
     'chicago': 'US',
     'miami': 'US',
@@ -74,11 +77,16 @@ const CITY_REGIONS: Record<string, 'US' | 'EUROPE' | 'GLOBAL'> = {
     'denver': 'US',
     'seattle': 'US',
     'washington dc': 'US',
+    'washington': 'US',
     'boston': 'US',
     'atlanta': 'US',
     'san francisco': 'US',
     'dallas': 'US',
     'las vegas': 'US',
+    'san diego': 'US',
+    'san antonio': 'US',
+    'philadelphia': 'US',
+    'san jose': 'US',
 
     // European Cities - use ECMWF
     'london': 'EUROPE',
@@ -91,6 +99,8 @@ const CITY_REGIONS: Record<string, 'US' | 'EUROPE' | 'GLOBAL'> = {
     'vienna': 'EUROPE',
     'zurich': 'EUROPE',
     'stockholm': 'EUROPE',
+    'ankara': 'EUROPE',
+    'seoul': 'EUROPE',
 
     // Global Cities - use GFS
     'tokyo': 'GLOBAL',
@@ -100,6 +110,7 @@ const CITY_REGIONS: Record<string, 'US' | 'EUROPE' | 'GLOBAL'> = {
     'dubai': 'GLOBAL',
     'mumbai': 'GLOBAL',
     'são paulo': 'GLOBAL',
+    'buenos aires': 'GLOBAL',
     'mexico city': 'GLOBAL',
     'toronto': 'US', // Close enough to use HRRR coverage
     'vancouver': 'US', // Close enough to use HRRR coverage
@@ -136,8 +147,26 @@ export class ModelHierarchy {
      * Get the hierarchy for a city
      */
     getHierarchy(cityId: string): ModelHierarchyConfig {
-        const normalized = cityId.toLowerCase().trim();
-        return this.hierarchies.get(normalized) || GLOBAL_HIERARCHY;
+        // Normalize: convert underscores to spaces to match map key format
+        const withSpaces = cityId.toLowerCase().trim().replace(/_/g, ' ');
+        
+        // Try exact match first
+        const exact = this.hierarchies.get(withSpaces);
+        if (exact) return exact;
+        
+        // Try stripping common suffixes like 'city'
+        const stripped = withSpaces.replace(/\s+city$/, '');
+        const strippedMatch = this.hierarchies.get(stripped);
+        if (strippedMatch) return strippedMatch;
+        
+        // Try prefix match (e.g., 'washington dc' starts with 'washington')
+        for (const [key, config] of this.hierarchies) {
+            if (withSpaces.startsWith(key) || key.startsWith(withSpaces)) {
+                return config;
+            }
+        }
+        
+        return GLOBAL_HIERARCHY;
     }
 
     /**
@@ -196,7 +225,7 @@ export class ModelHierarchy {
      * Get region for a city
      */
     getRegion(cityId: string): 'US' | 'EUROPE' | 'GLOBAL' {
-        const normalized = cityId.toLowerCase().trim();
+        const normalized = cityId.toLowerCase().trim().replace(/_/g, ' ');
         return CITY_REGIONS[normalized] || 'GLOBAL';
     }
 
@@ -213,7 +242,7 @@ export class ModelHierarchy {
      * Add or update a city's region
      */
     setCity(cityId: string, region: 'US' | 'EUROPE' | 'GLOBAL'): void {
-        const normalized = cityId.toLowerCase().trim();
+        const normalized = cityId.toLowerCase().trim().replace(/_/g, ' ');
         CITY_REGIONS[normalized] = region;
         this.hierarchies.set(normalized, this.getHierarchyForRegion(region));
         logger.info(`[ModelHierarchy] Set ${cityId} to region ${region}`);

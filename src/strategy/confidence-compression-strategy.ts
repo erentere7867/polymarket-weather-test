@@ -584,14 +584,13 @@ export class ConfidenceCompressionStrategy {
         this.consideredTrades += scanConsidered;
         this.blockedTrades += scanBlocked;
 
-        // Only log scan results periodically (every 10 cycles) or when there are signals
-        const shouldLog = signals.length > 0 || (this.capturedOpportunities.size % 10 === 0 && markets.length > 0);
-        if (shouldLog) {
-            logger.debug(`[ConfidenceCompressionStrategy] Scan: ${signals.length} signals | ` +
-                `Considered: ${scanConsidered}, Blocked: ${scanBlocked} | ` +
-                `Cumulative: ${this.consideredTrades} considered, ${this.blockedTrades} blocked | ` +
-                `Details: first=${blocked.firstRun}, notPrimary=${blocked.notPrimary}, unstable=${blocked.unstable}, ` +
-                `lowConf=${blocked.lowConfidence}, lowEdge=${blocked.lowEdge}, captured=${blocked.captured}`);
+        // Log at info level when markets exist so blocking reasons are visible
+        if (markets.length > 0) {
+            const runStats = this.runHistoryStore.getStats();
+            logger.info(`[ConfidenceCompressionStrategy] Scan: ${signals.length} signals from ${scanConsidered} markets | ` +
+                `Blocked: first=${blocked.firstRun}, notPrimary=${blocked.notPrimary}, unstable=${blocked.unstable}, ` +
+                `lowConf=${blocked.lowConfidence}, lowEdge=${blocked.lowEdge}, captured=${blocked.captured} | ` +
+                `RunHistory: ${runStats.totalKeys} keys, ${runStats.totalRuns} runs`);
         }
 
         return signals;

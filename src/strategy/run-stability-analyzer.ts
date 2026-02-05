@@ -160,6 +160,59 @@ export class RunStabilityAnalyzer {
     }
 
     /**
+     * Check cross-model agreement as a stability substitute.
+     * When same-model runs are insufficient, multiple models agreeing
+     * on the same value provides a form of "spatial stability".
+     */
+    private checkCrossModelStability(
+        cityId: string,
+        primaryModel: ModelType,
+        marketType: 'temperature' | 'precipitation'
+    ): { score: number; modelsAgreeing: number; reason: string } {
+        // Gather latest run from each model that has data for this city
+        const allModels: ModelType[] = ['HRRR', 'RAP', 'GFS', 'ECMWF'];
+        const values: { model: ModelType; value: number }[] = [];
+
+        for (const m of allModels) {
+            const latest = this.runHistoryStore.getLatestRun(cityId, m);
+            if (latest) {
+                if (marketType === 'temperature') {
+                    values.push({ model: m, value: latest.maxTempC });
+                } else {
+                    values.push({ model: m, value: latest.precipFlag ? 1 : 0 });
+                }
+            }
+        }
+
+        if (values.length < 2) {
+            return { score: 0, modelsAgreeing: values.length, reason: 'Insufficient cross-model data' };
+        }
+
+        // Calculate max disagreement
+        const vals = values.map(v => v.value);
+        const maxDiff = Math.max(...vals) - Math.min(...vals);
+
+        let score: number;
+        if (marketType === 'temperature') {
+            // Agreement threshold: within 1°C across models is excellent
+            score = Math.max(0, 1 - maxDiff / 2.0);
+        } else {
+            // Precip: all agree = 1.0, disagree = 0.0
+            score = maxDiff === 0 ? 1.0 : 0.0;
+        }
+
+        // Bonus for more models agreeing
+        const modelBonus = Math.min(1, values.length / 3);
+        score = score * 0.7 + modelBonus * 0.3;
+
+        return {
+            score,
+            modelsAgreeing: values.length,
+            reason: `Cross-model: ${values.length} models, maxDiff=${maxDiff.toFixed(2)}, score=${score.toFixed(2)}`,
+        };
+    }
+
+    /**
      * Check market stability for a city/model combination
      */
     isMarketStable(
@@ -170,20 +223,40 @@ export class RunStabilityAnalyzer {
         const runs = this.runHistoryStore.getLastKRuns(cityId, model, this.config.minStableRuns + 2);
 
         if (runs.length === 0) {
+            // No same-model runs, but cross-model agreement may still provide stability
+            const crossModel = this.checkCrossModelStability(cityId, model, marketType);
             return {
                 isStable: false,
                 runsAnalyzed: 0,
                 consecutiveStableRuns: 0,
-                reason: 'No run history available',
-                stabilityScore: 0,
+                reason: crossModel.score > 0.5
+                    ? `No same-model runs | ${crossModel.reason}`
+                    : 'No run history available',
+                stabilityScore: crossModel.score > 0.5 ? crossModel.score * 0.7 : 0,
             };
         }
 
+        // Check same-model run-to-run stability
+        let result: StabilityResult;
         if (marketType === 'temperature') {
-            return this.checkTemperatureStability(runs);
+            result = this.checkTemperatureStability(runs);
         } else {
-            return this.checkPrecipitationStability(runs);
+            result = this.checkPrecipitationStability(runs);
         }
+
+        // If same-model stability failed due to insufficient runs (not actual instability),
+        // use cross-model agreement as a substitute stability signal
+        if (!result.isStable && runs.length < this.config.minStableRuns) {
+            const crossModel = this.checkCrossModelStability(cityId, model, marketType);
+            if (crossModel.score > 0.5) {
+                // Cross-model agreement provides partial stability
+                result.stabilityScore = crossModel.score * 0.7; // Discount vs same-model
+                result.reason = `${result.reason} | ${crossModel.reason}`;
+                logger.debug(`[RunStabilityAnalyzer] Cross-model stability for ${cityId}/${model}: ${crossModel.reason}`);
+            }
+        }
+
+        return result;
     }
 
     /**

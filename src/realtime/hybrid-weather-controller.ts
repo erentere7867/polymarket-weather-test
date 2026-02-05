@@ -666,7 +666,60 @@ export class HybridWeatherController extends EventEmitter {
                 },
             });
 
-            logger.debug(`[HybridWeatherController] Emitted FORECAST_CHANGED for ${cityId} from ${payload.model} file`);
+            // Emit FORECAST_CHANGE (rich event) — feeds ConfidenceCompressionStrategy run history
+            // This is CRITICAL: without it, processModelRun() is never called and all trades are blocked as FIRST_RUN
+            const prevState = this.dataStore.getMarketState(
+                matchingMarkets.length > 0 ? matchingMarkets[0].market.id : ''
+            );
+            const oldTempF = prevState?.lastForecast?.forecastValue ?? cityData.temperatureF;
+            const tempChangeAmount = Math.abs(cityData.temperatureF - oldTempF);
+
+            this.eventBus.emit({
+                type: 'FORECAST_CHANGE',
+                payload: {
+                    cityId,
+                    cityName: cityData.cityName,
+                    variable: 'TEMPERATURE' as const,
+                    oldValue: (oldTempF - 32) * 5 / 9,       // Convert F → C for run history
+                    newValue: cityData.temperatureC,           // Already in Celsius
+                    changeAmount: tempChangeAmount * 5 / 9,    // Delta in Celsius
+                    changePercent: oldTempF !== 0 ? (tempChangeAmount / Math.abs(oldTempF)) * 100 : 0,
+                    model: payload.model,
+                    cycleHour: payload.cycleHour,
+                    forecastHour: payload.forecastHour,
+                    timestamp: new Date(),
+                    source: 'FILE' as const,
+                    confidence: 'HIGH' as const,
+                    threshold: 0.5,
+                    thresholdExceeded: tempChangeAmount > 0.5,
+                },
+            });
+
+            // Also emit precipitation FORECAST_CHANGE if precipitation data is available
+            if (cityData.totalPrecipitationMm > 0) {
+                this.eventBus.emit({
+                    type: 'FORECAST_CHANGE',
+                    payload: {
+                        cityId,
+                        cityName: cityData.cityName,
+                        variable: 'PRECIPITATION' as const,
+                        oldValue: 0,
+                        newValue: cityData.totalPrecipitationMm,
+                        changeAmount: cityData.totalPrecipitationMm,
+                        changePercent: 100,
+                        model: payload.model,
+                        cycleHour: payload.cycleHour,
+                        forecastHour: payload.forecastHour,
+                        timestamp: new Date(),
+                        source: 'FILE' as const,
+                        confidence: 'HIGH' as const,
+                        threshold: 0.1,
+                        thresholdExceeded: cityData.totalPrecipitationMm > 0.1,
+                    },
+                });
+            }
+
+            logger.info(`[HybridWeatherController] Emitted FORECAST_CHANGE for ${cityId} from ${payload.model} file (tempC=${cityData.temperatureC.toFixed(1)})`);
         }
 
         this.emit('fileConfirmed', payload);

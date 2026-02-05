@@ -40,7 +40,7 @@ export class RunHistoryStore {
      * Generate storage key for a city/model combination
      */
     private getKey(cityId: string, model: ModelType): string {
-        return `${cityId.toLowerCase()}:${model}`;
+        return `${cityId.toLowerCase().replace(/\s+/g, '_')}:${model}`;
     }
 
     /**
