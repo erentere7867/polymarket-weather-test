@@ -146,10 +146,26 @@ export class SimulationRunner {
     private correlatedMarketGroups: Map<string, string[]> = new Map();
 
     // Speed Arbitrage - store state in data/ folder (outside git, in project root)
-    // Can override with SPEED_ARB_STATE_PATH env var
-    private static readonly SPEED_ARB_STATE_FILE = process.env.SPEED_ARB_STATE_PATH 
-        ? path.resolve(process.env.SPEED_ARB_STATE_PATH)
-        : path.join(process.cwd(), 'data', '.speed-arb-state.json');
+    // Falls back to /tmp if data/ is not writable
+    private static readonly SPEED_ARB_STATE_FILE = (() => {
+        const primary = path.join(process.cwd(), 'data', '.speed-arb-state.json');
+        const fallback = '/tmp/.polymarket-speed-arb-state.json';
+        try {
+            // Test if data/ is writable
+            const dir = path.dirname(primary);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            // Test write
+            const testFile = path.join(dir, '.write-test');
+            fs.writeFileSync(testFile, 'test');
+            fs.unlinkSync(testFile);
+            return primary;
+        } catch (e) {
+            logger.warn(`[SpeedArb] Cannot use data/ folder, falling back to ${fallback}: ${(e as Error).message}`);
+            return fallback;
+        }
+    })();
     private speedArbEnabled: boolean = false;
     private speedArbStrategy: SpeedArbitrageStrategy;
     private speedArbStats = {
