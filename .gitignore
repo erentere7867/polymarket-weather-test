@@ -23,4 +23,8 @@ Thumbs.db
 # Cache
 .cache/
 
+# Speed arb state (persisted toggle)
+.speed-arb-state.json
 
+# Data folder (state files)
+data/

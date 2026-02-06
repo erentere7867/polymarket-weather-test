@@ -145,8 +145,11 @@ export class SimulationRunner {
     private correlationSim: CorrelationSimulation;
     private correlatedMarketGroups: Map<string, string[]> = new Map();
 
-    // Speed Arbitrage
-    private static readonly SPEED_ARB_STATE_FILE = path.join(os.homedir(), '.polymarket-weather', 'speed-arb-state.json');
+    // Speed Arbitrage - store state in data/ folder (outside git, in project root)
+    // Can override with SPEED_ARB_STATE_PATH env var
+    private static readonly SPEED_ARB_STATE_FILE = process.env.SPEED_ARB_STATE_PATH 
+        ? path.resolve(process.env.SPEED_ARB_STATE_PATH)
+        : path.join(process.cwd(), 'data', '.speed-arb-state.json');
     private speedArbEnabled: boolean = false;
     private speedArbStrategy: SpeedArbitrageStrategy;
     private speedArbStats = {
@@ -963,25 +966,33 @@ export class SimulationRunner {
         try {
             const dir = path.dirname(SimulationRunner.SPEED_ARB_STATE_FILE);
             if (!fs.existsSync(dir)) {
+                logger.info(`[SpeedArb] Creating state directory: ${dir}`);
                 fs.mkdirSync(dir, { recursive: true });
             }
             fs.writeFileSync(SimulationRunner.SPEED_ARB_STATE_FILE, JSON.stringify({ enabled: this.speedArbEnabled }));
+            logger.info(`[SpeedArb] State saved: enabled=${this.speedArbEnabled} to ${SimulationRunner.SPEED_ARB_STATE_FILE}`);
         } catch (e) {
-            logger.error(`Failed to save speed arb state: ${(e as Error).message}`);
+            logger.error(`[SpeedArb] Failed to save state: ${(e as Error).message}`);
         }
     }
 
     private loadSpeedArbState(): void {
         try {
+            logger.info(`[SpeedArb] Looking for state file at: ${SimulationRunner.SPEED_ARB_STATE_FILE}`);
             if (fs.existsSync(SimulationRunner.SPEED_ARB_STATE_FILE)) {
-                const data = JSON.parse(fs.readFileSync(SimulationRunner.SPEED_ARB_STATE_FILE, 'utf-8'));
+                const content = fs.readFileSync(SimulationRunner.SPEED_ARB_STATE_FILE, 'utf-8');
+                logger.info(`[SpeedArb] Raw state file content: ${content}`);
+                const data = JSON.parse(content);
+                logger.info(`[SpeedArb] Loaded state file: ${JSON.stringify(data)}`);
                 if (typeof data.enabled === 'boolean') {
                     this.speedArbEnabled = data.enabled;
                     logger.info(`⚡ Speed Arbitrage state loaded from disk: ${this.speedArbEnabled ? 'ENABLED' : 'DISABLED'}`);
                 }
+            } else {
+                logger.info(`[SpeedArb] No state file found, starting with speed arb DISABLED`);
             }
         } catch (e) {
-            logger.warn(`Could not load speed arb state: ${(e as Error).message}`);
+            logger.warn(`[SpeedArb] Could not load speed arb state: ${(e as Error).message}`);
         }
     }
 
