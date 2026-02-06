@@ -51,6 +51,10 @@ export class DataStore {
     // Previous run cache for change detection
     private previousRunCache: Map<string, CachedRunValue> = new Map(); // composite key -> value
 
+    // Per-city per-model latest forecast value for consensus detection
+    // Key: "cityId:model" → { value (°F), timestamp }
+    private modelForecastCache: Map<string, { value: number; timestamp: Date }> = new Map();
+
     constructor() { }
 
     /**
@@ -296,6 +300,61 @@ export class DataStore {
 
         logger.debug(`[DataStore] Forecast reconciled for ${marketId} with ${model} ${cycleHour}Z`);
         return true;
+    }
+
+    // ====================
+    // Model Forecast Consensus Methods
+    // ====================
+
+    /**
+     * Update the latest forecast value for a city+model pair.
+     * O(1) write — called on every FILE_CONFIRMED.
+     */
+    updateModelForecast(cityId: string, model: ModelType, valueF: number): void {
+        this.modelForecastCache.set(`${cityId}:${model}`, { value: valueF, timestamp: new Date() });
+    }
+
+    /**
+     * Get the latest forecast value for a city+model pair.
+     * O(1) read.
+     */
+    getModelForecast(cityId: string, model: ModelType): { value: number; timestamp: Date } | undefined {
+        return this.modelForecastCache.get(`${cityId}:${model}`);
+    }
+
+    /**
+     * Check if two models agree on forecast direction for a given threshold.
+     * Returns true if both models have data and both forecast the same side of the threshold.
+     * "Same side" means both above OR both below the threshold.
+     * Returns { consensus: true, direction } or { consensus: false }.
+     * Max staleness: 6 hours (models older than that are ignored).
+     */
+    checkModelConsensus(
+        cityId: string,
+        modelA: ModelType,
+        modelB: ModelType,
+        thresholdF: number
+    ): { consensus: boolean; direction?: 'above' | 'below'; valueA?: number; valueB?: number } {
+        const a = this.modelForecastCache.get(`${cityId}:${modelA}`);
+        const b = this.modelForecastCache.get(`${cityId}:${modelB}`);
+
+        if (!a || !b) return { consensus: false };
+
+        // Staleness check: 6 hours max
+        const now = Date.now();
+        const MAX_AGE = 6 * 60 * 60 * 1000;
+        if (now - a.timestamp.getTime() > MAX_AGE || now - b.timestamp.getTime() > MAX_AGE) {
+            return { consensus: false };
+        }
+
+        const aAbove = a.value >= thresholdF;
+        const bAbove = b.value >= thresholdF;
+
+        if (aAbove === bAbove) {
+            return { consensus: true, direction: aAbove ? 'above' : 'below', valueA: a.value, valueB: b.value };
+        }
+
+        return { consensus: false, valueA: a.value, valueB: b.value };
     }
 
     // ====================

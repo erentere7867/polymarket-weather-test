@@ -276,8 +276,16 @@ export class BotManager {
 
         // Setup forecast monitor
         this.forecastMonitor.onForecastChanged = async (marketId, change) => {
-            // FAST PATH: Handle specific change immediately
+            // FAST PATH: Handle specific change immediately (no debounce — speed matters)
             await this.handleForecastChange(marketId, change);
+
+            // FULL SCAN: Debounce to prevent flooding runCycle on rapid successive changes
+            const now = Date.now();
+            if (this.lastForecastTriggeredCycle && (now - this.lastForecastTriggeredCycle.getTime()) < this.FORECAST_CYCLE_DEBOUNCE_MS) {
+                logger.debug(`[BotManager] Skipping full scan — debounce (${this.FORECAST_CYCLE_DEBOUNCE_MS}ms)`);
+                return;
+            }
+            this.lastForecastTriggeredCycle = new Date(now);
 
             logger.info(`🚨 INTERRUPT: Significant forecast change detected! Triggering full scan.`);
             // Interrupt current delay to run cycle immediately
@@ -339,7 +347,7 @@ export class BotManager {
         
         const cycleStart = new Date();
         this.lastCycleStart = cycleStart;
-        logger.info('Starting scan cycle...');
+        logger.debug('Starting scan cycle...');
 
         try {
             // Log current detection mode if adaptive windows are enabled
@@ -368,7 +376,7 @@ export class BotManager {
 
             this.stats.marketsScanned += allMarkets.length;
 
-            logger.info(`Analyzing ${allMarkets.length} weather markets, ${actionableMarkets.length} actionable`);
+            logger.debug(`Analyzing ${allMarkets.length} weather markets, ${actionableMarkets.length} actionable`);
 
             if (actionableMarkets.length === 0) {
                 logger.info('No actionable markets found this cycle');
@@ -377,7 +385,7 @@ export class BotManager {
 
             // Step 2: Analyze markets for opportunities
             // Run all three strategies: Value Arb, Speed Arb, and Confidence Compression
-            logger.info('Analyzing markets for opportunities...');
+            logger.debug('Analyzing markets for opportunities...');
             
             const [valueOpportunities, speedSignals, confidenceSignals] = await Promise.all([
                 this.opportunityDetector.analyzeMarkets(actionableMarkets),
