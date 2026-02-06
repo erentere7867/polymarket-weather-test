@@ -584,10 +584,11 @@ export class ConfidenceCompressionStrategy {
         this.consideredTrades += scanConsidered;
         this.blockedTrades += scanBlocked;
 
-        // Log at info level when markets exist so blocking reasons are visible
+        // Only log at info when signals are found; otherwise debug to avoid spam
         if (markets.length > 0) {
             const runStats = this.runHistoryStore.getStats();
-            logger.info(`[ConfidenceCompressionStrategy] Scan: ${signals.length} signals from ${scanConsidered} markets | ` +
+            const logFn = signals.length > 0 ? logger.info.bind(logger) : logger.debug.bind(logger);
+            logFn(`[ConfidenceCompressionStrategy] Scan: ${signals.length} signals from ${scanConsidered} markets | ` +
                 `Blocked: first=${blocked.firstRun}, notPrimary=${blocked.notPrimary}, unstable=${blocked.unstable}, ` +
                 `lowConf=${blocked.lowConfidence}, lowEdge=${blocked.lowEdge}, captured=${blocked.captured} | ` +
                 `RunHistory: ${runStats.totalKeys} keys, ${runStats.totalRuns} runs`);
