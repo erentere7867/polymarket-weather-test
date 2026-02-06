@@ -305,45 +305,35 @@ export class GRIB2Parser {
     }
 
     /**
-     * Parse using ecCodes (fallback) - one grib_ls call per city per variable
-     * grib_get/grib_ls only supports a single -l flag per invocation,
-     * so we run one call per (city, variable) pair with concurrency limiting.
+     * Parse using ecCodes (fallback) - per-city extraction
+     * Runs 4 variables × 13 cities = 52 grib_get calls with concurrency control
+     * grib_get only supports one -l flag, so we must call once per city per variable
      */
     private async parseWithEcCodes(filePath: string, options: ParseOptions): Promise<CityGRIBData[]> {
-        logger.info(`[GRIB2Parser] Using ecCodes (grib_ls) for parsing ${KNOWN_CITIES.length} cities`);
+        logger.info('[GRIB2Parser] Using ecCodes (grib_get) for parsing');
 
+        // Run all 4 variable extractions in parallel; each internally spawns per-city calls
         const shortNames = ['2t', '10u', '10v', 'tp'] as const;
+        const factories = shortNames.map(sn => () => this.runGribGetAllCities(filePath, sn));
+        const [tempResults, uWindResults, vWindResults, precipResults] =
+            await this.runWithConcurrencyLimit(factories, 4);
 
-        // Build one task per (variable, city) pair = 4 × 13 = 52 tasks
-        // Run with concurrency limit to avoid fork-bombing
-        const factories: (() => Promise<{ varIdx: number; cityIdx: number; value: number | null }>)[] = [];
-        for (let v = 0; v < shortNames.length; v++) {
-            for (let c = 0; c < KNOWN_CITIES.length; c++) {
-                const sn = shortNames[v];
-                const city = KNOWN_CITIES[c];
-                const vIdx = v;
-                const cIdx = c;
-                factories.push(() => this.runGribLsSingleCity(filePath, sn, city.coordinates, city.name)
-                    .then(value => ({ varIdx: vIdx, cityIdx: cIdx, value })));
-            }
-        }
-
-        const results = await this.runWithConcurrencyLimit(factories, MAX_PARALLEL_WGRIB2);
-
-        // Organize results into per-city arrays: [temp, uWind, vWind, precip]
-        const cityValues: (number | null)[][] = KNOWN_CITIES.map(() => [null, null, null, null]);
-        for (const r of results) {
-            cityValues[r.cityIdx][r.varIdx] = r.value;
-        }
+        // Log extraction results for debugging
+        const tempCount = tempResults.filter(v => v !== null).length;
+        const windCount = uWindResults.filter(v => v !== null).length;
+        logger.info(`[GRIB2Parser] ecCodes extraction: ${tempCount}/${KNOWN_CITIES.length} cities got temperature, ${windCount} got wind`);
 
         // Build city data from combined results
         const cityData: CityGRIBData[] = [];
         for (let i = 0; i < KNOWN_CITIES.length; i++) {
             const city = KNOWN_CITIES[i];
-            const [temp, uWind, vWind, precip] = cityValues[i];
+            const temp = tempResults[i] ?? null;
+            const uWind = uWindResults[i] ?? null;
+            const vWind = vWindResults[i] ?? null;
+            const precip = precipResults[i] ?? null;
 
             if (temp === null) {
-                logger.warn(`[GRIB2Parser] No temperature data for ${city.name}, skipping`);
+                logger.warn(`[GRIB2Parser] No temperature data for ${city.name} (lat=${city.coordinates.lat}, lon=${city.coordinates.lon})`);
                 continue;
             }
 
@@ -370,58 +360,43 @@ export class GRIB2Parser {
             });
         }
 
-        logger.info(`[GRIB2Parser] ecCodes parsed ${cityData.length}/${KNOWN_CITIES.length} cities`);
         return cityData;
     }
 
     /**
-     * Extract a single variable for a single city using grib_ls -l
-     * grib_ls -l lat,lon,1 returns the nearest grid point value
-     * Returns the extracted value or null on failure
+     * Extract a single variable for ALL cities using per-city grib_get calls
+     * grib_get only supports a single -l flag per invocation, so we run
+     * one call per city in parallel for correct results.
+     * Returns an array of values indexed by city order in KNOWN_CITIES
      */
-    private async runGribLsSingleCity(
+    private async runGribGetAllCities(
         filePath: string,
-        shortName: string,
-        coords: Coordinates,
-        cityName: string
-    ): Promise<number | null> {
-        // grib_ls -l lat,lon,1 -w shortName=X -p value file
-        // Mode 1 = nearest point
-        const command = `grib_ls -l ${coords.lat},${coords.lon},1 -w shortName=${shortName} -p value "${filePath}"`;
+        shortName: string
+    ): Promise<(number | null)[]> {
+        const factories = KNOWN_CITIES.map((city) => () => {
+            const { lat, lon } = city.coordinates;
+            // Quote the -l argument to handle negative lat/lon; mode=1 = nearest grid point
+            const command = `grib_get -w shortName=${shortName} -l "${lat},${lon},1" "${filePath}"`;
 
-        try {
-            const { stdout } = await execAsync(command, { timeout: 10000, maxBuffer: 256 * 1024 });
-            // grib_ls output format has a header line, then data lines, then a footer
-            // We need to extract the "value" from the nearest point output
-            // The -l flag appends nearest point info at the end like:
-            //   Input Point: lat=X lon=Y
-            //   Grid Point chosen #1: ... value=Z ...
-            const valueMatch = stdout.match(/value=\s*([-\d.eE+]+)/i);
-            if (valueMatch) {
-                const val = parseFloat(valueMatch[1]);
-                return isNaN(val) ? null : val;
-            }
+            return execAsync(command, { timeout: 15000, maxBuffer: 1024 * 1024 })
+                .then(({ stdout }) => {
+                    const values = stdout.trim().split(/[\s\n]+/);
+                    // Take the first value (first matching GRIB message)
+                    if (values.length > 0) {
+                        const val = parseFloat(values[0]);
+                        return isNaN(val) ? null : val;
+                    }
+                    return null;
+                })
+                .catch(() => {
+                    // grib_get exits with error if no messages match the filter
+                    // (e.g. tp may not exist in analysis files) — this is expected
+                    return null;
+                });
+        });
 
-            // Fallback: try parsing tabular output (value column)
-            const lines = stdout.trim().split('\n');
-            for (let i = lines.length - 1; i >= 0; i--) {
-                const line = lines[i].trim();
-                // Skip footer/header lines
-                if (!line || line.startsWith('Input') || line.startsWith('Grid') ||
-                    line.includes('messages') || line.includes('---') || line.includes('value')) continue;
-                const val = parseFloat(line.split(/\s+/)[0]);
-                if (!isNaN(val)) return val;
-            }
-
-            logger.warn(`[GRIB2Parser] Could not parse grib_ls output for ${shortName}/${cityName}`);
-            return null;
-        } catch (error: any) {
-            // Don't log error for missing variables (e.g., tp may not exist in all ECMWF files)
-            if (!error.message?.includes('not found')) {
-                logger.debug(`[GRIB2Parser] grib_ls failed for ${shortName}/${cityName}: ${error.message}`);
-            }
-            return null;
-        }
+        // Run all cities in parallel (13 concurrent processes, each is a fast point lookup)
+        return this.runWithConcurrencyLimit(factories, KNOWN_CITIES.length);
     }
 
     /**
