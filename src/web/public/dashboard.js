@@ -799,14 +799,18 @@ function setupEventListeners() {
     // Speed Arbitrage Toggle
     const speedArbToggle = document.getElementById('speed-arb-toggle');
     if (speedArbToggle) {
+        console.log('[Dashboard] Speed arb toggle found, attaching listener');
         speedArbToggle.addEventListener('change', async (e) => {
             const enabled = e.target.checked;
+            console.log('[Dashboard] Toggle changed to:', enabled);
             try {
+                console.log('[Dashboard] Sending POST to /api/speed-arb/toggle');
                 const res = await fetch('/api/speed-arb/toggle', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ enabled }),
                 });
+                console.log('[Dashboard] Response status:', res.status);
                 const data = await res.json();
                 console.log('[Dashboard] Speed Arb toggled:', data);
             } catch (err) {
@@ -815,6 +819,8 @@ function setupEventListeners() {
                 e.target.checked = !enabled;
             }
         });
+    } else {
+        console.error('[Dashboard] Speed arb toggle NOT FOUND in DOM');
     }
 
     // Window resize for charts

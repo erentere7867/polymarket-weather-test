@@ -175,11 +175,15 @@ dashboardApp.get('/api/settings', (req, res) => {
 
 // 5b. Speed Arbitrage Toggle (dedicated endpoint)
 dashboardApp.post('/api/speed-arb/toggle', (req, res) => {
+    console.log('[SERVER] Speed arb toggle endpoint hit:', req.body);
     const { enabled } = req.body;
     if (typeof enabled !== 'boolean') {
+        console.log('[SERVER] Invalid request - enabled not boolean');
         return res.status(400).json({ error: 'enabled must be a boolean' });
     }
+    console.log('[SERVER] Calling runner.setSpeedArbEnabled(' + enabled + ')');
     runner.setSpeedArbEnabled(enabled);
+    console.log('[SERVER] Toggle complete, sending response');
     res.json({ success: true, enabled, message: `Speed Arbitrage ${enabled ? 'ENABLED' : 'DISABLED'}` });
 });
 
