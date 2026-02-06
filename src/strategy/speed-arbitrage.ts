@@ -117,7 +117,13 @@ export class SpeedArbitrageStrategy {
 
         // =====================================================
         // SPEED ARBITRAGE CHECK #1: Did forecast change recently?
+        // Speed arb ONLY trades on real forecast changes, never initial data.
         // =====================================================
+        // No previous value = first forecast for this market = not a change
+        if (forecast.previousValue === undefined) {
+            return null;
+        }
+
         const changeAge = now - forecast.changeTimestamp.getTime();
         const isSpeedArb = forecast.valueChanged && (changeAge <= MAX_CHANGE_AGE_MS);
 

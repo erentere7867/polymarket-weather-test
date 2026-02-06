@@ -382,6 +382,9 @@ export class HybridWeatherController extends EventEmitter {
     // Track last update state for each city for arbitration
     private cityUpdateStates: Map<string, CityUpdateState> = new Map();
 
+    // Track markets that have received their first file-based forecast (prevents trading on initial data)
+    private initializedFileMarkets: Set<string> = new Set();
+
     constructor(
         stateMachine: ForecastStateMachine,
         dataStore: DataStore,
@@ -552,6 +555,9 @@ export class HybridWeatherController extends EventEmitter {
         const marketCities = allMarkets.map(m => m.city).filter(Boolean);
         logger.debug(`[HybridWeatherController] Available market cities: ${marketCities.join(', ')}`);
         
+        // Track whether any city had a REAL forecast change (not initial data)
+        let anyRealChange = false;
+
         // Mark cities as file-confirmed and trigger opportunity re-scan
         for (const cityData of payload.cityData) {
             const cityId = cityData.cityName.toLowerCase().replace(/\s+/g, '_');
@@ -638,6 +644,21 @@ export class HybridWeatherController extends EventEmitter {
                     const previousValue = currentState?.lastForecast?.forecastValue;
                     const changeAmount = previousValue !== undefined ? Math.abs(forecastValue - previousValue) : 0;
 
+                    // Track first-seen markets — initial data is NOT a forecast change
+                    const isFirstSeen = !this.initializedFileMarkets.has(marketId);
+                    if (isFirstSeen) {
+                        this.initializedFileMarkets.add(marketId);
+                    }
+
+                    // Real change = value changed significantly AND not first time seeing this market
+                    const isRealChange = !isFirstSeen && previousValue !== undefined && changeAmount >= 1;
+                    if (isRealChange) {
+                        anyRealChange = true;
+                    }
+
+                    // Preserve previous changeTimestamp if no real change occurred
+                    const prevChangeTimestamp = currentState?.lastForecast?.changeTimestamp;
+
                     this.dataStore.updateForecast(marketId, {
                         marketId,
                         weatherData,
@@ -645,9 +666,9 @@ export class HybridWeatherController extends EventEmitter {
                         probability,
                         timestamp: now,
                         previousValue,
-                        valueChanged: previousValue !== undefined ? changeAmount >= 1 : false,
+                        valueChanged: isRealChange,
                         changeAmount,
-                        changeTimestamp: now,
+                        changeTimestamp: isRealChange ? now : (prevChangeTimestamp || now),
                     });
 
                     try {
@@ -658,16 +679,19 @@ export class HybridWeatherController extends EventEmitter {
                 }
             }
 
-            this.eventBus.emit({
-                type: 'FORECAST_CHANGED',
-                payload: {
-                    cityId,
-                    provider: payload.model,
-                    newValue: cityData.temperatureF,
-                    changeAmount: 1.0,
-                    timestamp: new Date(),
-                },
-            });
+            // Only emit FORECAST_CHANGED (trading trigger) on REAL changes, not initial data
+            if (anyRealChange) {
+                this.eventBus.emit({
+                    type: 'FORECAST_CHANGED',
+                    payload: {
+                        cityId,
+                        provider: payload.model,
+                        newValue: cityData.temperatureF,
+                        changeAmount: 1.0,
+                        timestamp: new Date(),
+                    },
+                });
+            }
 
             // Emit FORECAST_CHANGE (rich event) — feeds ConfidenceCompressionStrategy run history
             // This is CRITICAL: without it, processModelRun() is never called and all trades are blocked as FIRST_RUN
@@ -725,7 +749,13 @@ export class HybridWeatherController extends EventEmitter {
             logger.info(`[HybridWeatherController] Emitted FORECAST_CHANGE for ${cityId} from ${payload.model} file (tempC=${cityData.temperatureC.toFixed(1)})`);
         }
 
-        this.emit('fileConfirmed', payload);
+        // Only trigger runCycle (speed arb scan) when at least one city had a REAL forecast change
+        // Initial data populates the store but does NOT trigger trading
+        if (anyRealChange) {
+            this.emit('fileConfirmed', payload);
+        } else {
+            logger.debug(`[HybridWeatherController] File confirmed (${payload.model} ${payload.cycleHour}Z) — initial data only, no trading trigger`);
+        }
     }
 
     /**
