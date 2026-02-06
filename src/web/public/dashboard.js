@@ -35,7 +35,19 @@ const dashboardState = {
         endToEnd: [],
     },
     maxHistoryPoints: 50,
+    // Change-detection hashes to skip redundant DOM rebuilds
+    _hashes: {},
 };
+
+/**
+ * Simple hash for change detection — returns true if data changed since last call for this key
+ */
+function hasChanged(key, data) {
+    const hash = JSON.stringify(data);
+    if (dashboardState._hashes[key] === hash) return false;
+    dashboardState._hashes[key] = hash;
+    return true;
+}
 
 // API base URL
 const API_BASE = '/api/dashboard';
@@ -47,16 +59,8 @@ const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws/dashboard`;
  * Initialize dashboard
  */
 function initDashboard() {
-    console.log('[Dashboard] Initializing...');
-
     // Connect WebSocket
     connectWebSocket();
-
-    // Initial data fetch
-    fetchAllDashboardData();
-
-    // Setup auto-refresh for non-WS data
-    setInterval(fetchNonWsData, 5000);
 
     // Setup event listeners
     setupEventListeners();
@@ -77,7 +81,7 @@ function connectWebSocket() {
         dashboardState.ws = new WebSocket(WS_URL);
 
         dashboardState.ws.onopen = () => {
-            console.log('[Dashboard] WebSocket connected');
+            // WebSocket connected
             dashboardState.isConnected = true;
             dashboardState.reconnectAttempts = 0;
             updateConnectionStatus(true);
@@ -88,24 +92,24 @@ function connectWebSocket() {
                 const message = JSON.parse(event.data);
                 handleWebSocketMessage(message);
             } catch (err) {
-                console.error('[Dashboard] Error parsing WebSocket message:', err);
+                // Parse error on WS message
             }
         };
 
         dashboardState.ws.onclose = () => {
-            console.log('[Dashboard] WebSocket disconnected');
+            // WebSocket disconnected
             dashboardState.isConnected = false;
             updateConnectionStatus(false);
             attemptReconnect();
         };
 
         dashboardState.ws.onerror = (error) => {
-            console.error('[Dashboard] WebSocket error:', error);
+            // WebSocket error
             dashboardState.isConnected = false;
             updateConnectionStatus(false);
         };
     } catch (err) {
-        console.error('[Dashboard] Error creating WebSocket:', err);
+        // WebSocket creation error
         attemptReconnect();
     }
 }
@@ -167,21 +171,41 @@ function handleWebSocketMessage(message) {
 }
 
 /**
- * Fetch all dashboard data via REST API
+ * Single consolidated poll — replaces all individual fetch intervals
+ * Fetches everything from /api/poll in one request
  */
 async function fetchAllDashboardData() {
-    console.log('[Dashboard] Fetching all dashboard data...');
     try {
-        const response = await fetch(`${API_BASE}/all`);
+        const response = await fetch('/api/poll');
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         const data = await response.json();
-        console.log('[Dashboard] Received dashboard data:', data);
-        updateDashboard(data);
+        
+        // Update status display
+        if (data.status) updateStatusDisplay(data.status);
+        
+        // Update portfolio
+        if (data.portfolio) updatePortfolioDisplay(data.portfolio);
+        
+        // Update positions
+        if (data.activePositions || data.closedPositions) {
+            updatePositionsDisplay(data.activePositions || [], data.closedPositions || []);
+        }
+        
+        // Update speed arb
+        if (data.speedArb) updateSpeedArbDisplay(data.speedArb);
+        
+        // Update webhook/cycle counts
+        if (data.webhook) updateWebhookDisplay(data.webhook);
+        
+        // Update confidence compression
+        if (data.confidence) updateConfidencePanel(data.confidence);
+        
+        // Update weather dashboard sections
+        if (data.weather) updateDashboard(data.weather);
     } catch (err) {
-        console.error('[Dashboard] Error fetching dashboard data:', err);
-        showError('Failed to load dashboard data: ' + err.message);
+        console.error('[Dashboard] Poll error:', err.message);
     }
 }
 
@@ -189,8 +213,6 @@ async function fetchAllDashboardData() {
  * Show error message in UI
  */
 function showError(message) {
-    console.error('[Dashboard] Error:', message);
-    // Update key elements to show error state
     const elements = [
         'fi-system-status',
         'city-coverage-container',
@@ -205,31 +227,38 @@ function showError(message) {
 }
 
 /**
- * Fetch non-WebSocket data (periodic updates)
+ * Update speed arb display from batched poll data
  */
-async function fetchNonWsData() {
-    try {
-        // Fetch latency metrics (these update frequently)
-        const latencyRes = await fetch(`${API_BASE}/latency`);
-        const latencyData = await latencyRes.json();
-        updateLatencyMetrics(latencyData);
-
-        // Fetch events
-        const eventsRes = await fetch(`${API_BASE}/events?limit=20`);
-        const eventsData = await eventsRes.json();
-        updateEventLog(eventsData);
-
-        // Fetch confidence compression data (from /api/confidence, not /api/dashboard/confidence)
-        try {
-            const confidenceRes = await fetch('/api/confidence');
-            const confidenceData = await confidenceRes.json();
-            updateConfidencePanel(confidenceData);
-        } catch (ccErr) {
-            console.warn('[Dashboard] Confidence data not available:', ccErr);
-        }
-    } catch (err) {
-        console.error('[Dashboard] Error fetching non-WS data:', err);
+function updateSpeedArbDisplay(stats) {
+    const toggle = document.getElementById('speed-arb-toggle');
+    if (toggle && toggle.checked !== stats.enabled) {
+        toggle.checked = stats.enabled;
     }
+    const tradesEl = document.getElementById('speed-arb-trades');
+    const oppsEl = document.getElementById('speed-arb-opportunities');
+    const pnlEl = document.getElementById('speed-arb-pnl');
+    const lastTradeEl = document.getElementById('speed-arb-last-trade');
+
+    if (tradesEl) tradesEl.textContent = stats.trades || 0;
+    if (oppsEl) oppsEl.textContent = `${stats.opportunities || 0} detected / ${stats.skipped || 0} skipped`;
+    if (pnlEl) {
+        const pnl = stats.pnl || 0;
+        pnlEl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+        pnlEl.className = `text-2xl font-bold mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+    }
+    if (lastTradeEl) {
+        lastTradeEl.textContent = stats.lastTradeTime ? formatTimeAgo(new Date(stats.lastTradeTime)) : '--';
+    }
+}
+
+/**
+ * Update webhook/cycle display from batched poll data
+ */
+function updateWebhookDisplay(webhook) {
+    const webhookCountEl = document.getElementById('webhook-count');
+    const fetchCyclesEl = document.getElementById('fetch-cycles');
+    if (webhookCountEl) webhookCountEl.textContent = webhook.webhooksReceived || 0;
+    if (fetchCyclesEl) fetchCyclesEl.textContent = `${webhook.fetchCyclesCompleted || 0} fetch cycles`;
 }
 
 /**
@@ -276,7 +305,6 @@ function updateDashboard(data) {
  * Update system status panel
  */
 function updateSystemStatus(status) {
-    console.log('[Dashboard] Updating system status:', status);
     const statusEl = document.getElementById('fi-system-status');
     const modeEl = document.getElementById('fi-operational-mode');
     const windowsEl = document.getElementById('fi-active-windows');
@@ -315,7 +343,6 @@ function updateSystemStatus(status) {
  * Update model status grid
  */
 function updateModelStatus(models) {
-    console.log('[Dashboard] Updating model status:', models);
     if (!Array.isArray(models)) {
         console.error('[Dashboard] Invalid models data:', models);
         return;
@@ -394,9 +421,9 @@ function updateModelStatus(models) {
  * Update city coverage table
  */
 function updateCityCoverage(cities) {
-    console.log('[Dashboard] Updating city coverage:', cities);
     const container = document.getElementById('city-coverage-container');
     if (!container) return;
+    if (!hasChanged('cities', cities)) return;
 
     if (!Array.isArray(cities) || cities.length === 0) {
         container.innerHTML = '<div class="text-slate-500 text-sm italic">No city data available</div>';
@@ -471,7 +498,6 @@ function updateCityCoverage(cities) {
  * Update latency metrics panel
  */
 function updateLatencyMetrics(metrics) {
-    console.log('[Dashboard] Updating latency metrics:', metrics);
     if (!metrics) {
         console.error('[Dashboard] Invalid metrics data');
         return;
@@ -538,7 +564,6 @@ function updateLatencyMetrics(metrics) {
  * Update API fallback status panel
  */
 function updateApiFallbackStatus(status) {
-    console.log('[Dashboard] Updating API fallback status:', status);
     if (!status) return;
 
     const statusEl = document.getElementById('api-status');
@@ -571,9 +596,9 @@ function updateApiFallbackStatus(status) {
  * Update event log
  */
 function updateEventLog(events) {
-    console.log('[Dashboard] Updating event log:', events);
     const container = document.getElementById('event-log-container');
     if (!container) return;
+    if (!hasChanged('events', events)) return;
 
     if (!Array.isArray(events) || events.length === 0) {
         container.innerHTML = '<div class="text-slate-500 text-sm italic">No events yet</div>';
@@ -616,9 +641,9 @@ function updateEventLog(events) {
  * Update detection windows display
  */
 function updateDetectionWindows(windows) {
-    console.log('[Dashboard] Updating detection windows:', windows);
     const container = document.getElementById('detection-windows-container');
     if (!container) return;
+    if (!hasChanged('windows', windows)) return;
 
     if (!Array.isArray(windows) || windows.length === 0) {
         container.innerHTML = '<div class="text-slate-500 text-sm italic">No active detection windows</div>';
@@ -652,9 +677,9 @@ function updateDetectionWindows(windows) {
  * Update upcoming runs display
  */
 function updateUpcomingRuns(runs) {
-    console.log('[Dashboard] Updating upcoming runs:', runs);
     const container = document.getElementById('upcoming-runs-container');
     if (!container) return;
+    if (!hasChanged('upcoming', runs)) return;
 
     if (!Array.isArray(runs) || runs.length === 0) {
         container.innerHTML = '<div class="text-slate-500 text-sm italic">No upcoming runs scheduled</div>';
@@ -673,48 +698,79 @@ function updateUpcomingRuns(runs) {
  * Handle file detected event
  */
 function handleFileDetected(payload) {
-    console.log('[Dashboard] File detected:', payload);
-    // Trigger a refresh of model status
-    fetch(`${API_BASE}/models`).then(r => r.json()).then(updateModelStatus);
+    // Model status will be refreshed on next poll cycle
+    // Add inline event indicator for immediate feedback
+    addInlineEvent('FILE_DETECTED', payload.model ? `${payload.model} file detected` : 'File detected', 'info');
 }
 
 /**
  * Handle file confirmed event
  */
 function handleFileConfirmed(payload) {
-    console.log('[Dashboard] File confirmed:', payload);
-    // Trigger refresh of model status and city coverage
-    Promise.all([
-        fetch(`${API_BASE}/models`).then(r => r.json()),
-        fetch(`${API_BASE}/cities`).then(r => r.json()),
-    ]).then(([models, cities]) => {
-        updateModelStatus(models);
-        updateCityCoverage(cities);
-    });
+    addInlineEvent('FILE_CONFIRMED', payload.model ? `${payload.model} confirmed` : 'File confirmed', 'success');
 }
 
 /**
  * Handle API data received event
  */
 function handleApiDataReceived(payload) {
-    console.log('[Dashboard] API data received:', payload);
-    fetch(`${API_BASE}/cities`).then(r => r.json()).then(updateCityCoverage);
+    addInlineEvent('API_DATA_RECEIVED', payload.cityName ? `${payload.cityName} data received` : 'API data received', 'info');
 }
 
 /**
  * Handle forecast change event
  */
 function handleForecastChange(payload) {
-    console.log('[Dashboard] Forecast change:', payload);
-    fetch(`${API_BASE}/cities`).then(r => r.json()).then(updateCityCoverage);
+    const msg = payload.cityName && payload.variable
+        ? `${payload.cityName}: ${payload.variable} ${payload.changeAmount > 0 ? '+' : ''}${(payload.changeAmount || 0).toFixed(1)}`
+        : 'Forecast changed';
+    addInlineEvent('FORECAST_CHANGE', msg, payload.confidence === 'HIGH' ? 'success' : 'warning');
 }
 
 /**
  * Handle detection window start event
  */
 function handleDetectionWindowStart(payload) {
-    console.log('[Dashboard] Detection window start:', payload);
-    fetch(`${API_BASE}/windows`).then(r => r.json()).then(updateDetectionWindows);
+    addInlineEvent('DETECTION_WINDOW_START', payload.model ? `${payload.model} detection window started` : 'Detection window started', 'info');
+}
+
+/**
+ * Add an inline event to the event log without a full re-render
+ */
+function addInlineEvent(type, message, severity) {
+    const container = document.getElementById('event-log-container');
+    if (!container) return;
+    // Remove "no events" placeholder
+    const placeholder = container.querySelector('.text-slate-500.italic');
+    if (placeholder) placeholder.remove();
+
+    const severityColors = {
+        'info': 'border-blue-500/30 bg-blue-500/10 text-blue-400',
+        'success': 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
+        'warning': 'border-amber-500/30 bg-amber-500/10 text-amber-400',
+        'error': 'border-rose-500/30 bg-rose-500/10 text-rose-400',
+    };
+    const typeColors = {
+        'FILE_DETECTED': 'text-blue-400',
+        'FILE_CONFIRMED': 'text-emerald-400',
+        'API_DATA_RECEIVED': 'text-amber-400',
+        'FORECAST_CHANGE': 'text-violet-400',
+        'DETECTION_WINDOW_START': 'text-cyan-400',
+    };
+    const div = document.createElement('div');
+    div.className = `p-2 rounded border-l-2 ${severityColors[severity] || severityColors.info} mb-1 text-sm`;
+    div.innerHTML = `
+        <div class="flex items-center justify-between">
+            <span class="font-mono text-xs text-slate-500">${formatTime(new Date())}</span>
+            <span class="text-xs ${typeColors[type] || 'text-slate-400'}">${type}</span>
+        </div>
+        <div class="mt-1 text-slate-200">${message}</div>
+    `;
+    container.insertBefore(div, container.firstChild);
+    // Cap at 30 visible events
+    while (container.children.length > 30) {
+        container.removeChild(container.lastChild);
+    }
 }
 
 /**
@@ -840,46 +896,6 @@ function setupEventListeners() {
     });
 }
 
-/**
- * Fetch speed arbitrage stats and toggle state
- */
-async function fetchSpeedArbData() {
-    try {
-        // Fetch current settings to get toggle state
-        const settingsRes = await fetch('/api/settings');
-        const settings = await settingsRes.json();
-        const toggle = document.getElementById('speed-arb-toggle');
-        if (toggle && toggle.checked !== settings.speedArbEnabled) {
-            toggle.checked = settings.speedArbEnabled;
-        }
-
-        // Fetch speed arb stats
-        const statsRes = await fetch('/api/speed-arb/stats');
-        const stats = await statsRes.json();
-
-        const tradesEl = document.getElementById('speed-arb-trades');
-        const oppsEl = document.getElementById('speed-arb-opportunities');
-        const pnlEl = document.getElementById('speed-arb-pnl');
-        const lastTradeEl = document.getElementById('speed-arb-last-trade');
-
-        if (tradesEl) tradesEl.textContent = stats.trades || 0;
-        if (oppsEl) oppsEl.textContent = `${stats.opportunities || 0} detected / ${stats.skipped || 0} skipped`;
-        if (pnlEl) {
-            const pnl = stats.pnl || 0;
-            pnlEl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
-            pnlEl.className = `text-2xl font-bold mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
-        }
-        if (lastTradeEl) {
-            if (stats.lastTradeTime) {
-                lastTradeEl.textContent = formatTimeAgo(new Date(stats.lastTradeTime));
-            } else {
-                lastTradeEl.textContent = '--';
-            }
-        }
-    } catch (err) {
-        console.error('[Dashboard] Error fetching speed arb data:', err);
-    }
-}
 
 /**
  * Format time
@@ -923,56 +939,13 @@ function formatTimeAgo(date) {
     return isFuture ? `Expected in ${timeStr}` : `${timeStr} ago`;
 }
 
-/**
- * Fetch portfolio data from the API
- */
-async function fetchPortfolioData() {
-    console.log('[Dashboard] Fetching portfolio data...');
-    try {
-        const response = await fetch('/api/portfolio');
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        const data = await response.json();
-        console.log('[Dashboard] Received portfolio data:', data);
-        updatePortfolioDisplay(data);
-    } catch (err) {
-        console.error('[Dashboard] Error fetching portfolio data:', err);
-    }
-}
-
-/**
- * Fetch positions data from the API
- */
-async function fetchPositionsData() {
-    console.log('[Dashboard] Fetching positions data...');
-    try {
-        // Fetch active positions
-        const activeResponse = await fetch('/api/positions/active');
-        if (!activeResponse.ok) {
-            throw new Error(`HTTP error! status: ${activeResponse.status}`);
-        }
-        const activePositions = await activeResponse.json();
-        console.log('[Dashboard] Received active positions:', activePositions);
-
-        // Fetch closed positions
-        const closedResponse = await fetch('/api/positions/closed');
-        if (!closedResponse.ok) {
-            throw new Error(`HTTP error! status: ${closedResponse.status}`);
-        }
-        const closedPositions = await closedResponse.json();
-        console.log('[Dashboard] Received closed positions:', closedPositions);
-
-        updatePositionsDisplay(activePositions, closedPositions);
-    } catch (err) {
-        console.error('[Dashboard] Error fetching positions data:', err);
-    }
-}
 
 /**
  * Update positions display elements
  */
 function updatePositionsDisplay(activePositions, closedPositions) {
+    if (!hasChanged('positions', { activePositions, closedPositions })) return;
+
     const openPositionsEl = document.getElementById('open-positions-count');
     const positionsListEl = document.getElementById('positions-list');
     const closedPositionsEl = document.getElementById('closed-positions-list');
@@ -1078,36 +1051,18 @@ function updatePortfolioDisplay(data) {
     }
 
     if (openPositionsEl) {
-        // openPositions is now updated by fetchPositionsData, but we keep this as fallback
+        // Fallback from portfolio data
         if (!openPositionsEl.textContent || openPositionsEl.textContent === '--') {
             openPositionsEl.textContent = data.openPositions || '0';
         }
     }
 }
 
-/**
- * Fetch status data from the API
- */
-async function fetchStatusData() {
-    console.log('[Dashboard] Fetching status data...');
-    try {
-        const response = await fetch('/api/status');
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        const data = await response.json();
-        console.log('[Dashboard] Received status data:', data);
-        updateStatusDisplay(data);
-    } catch (err) {
-        console.error('[Dashboard] Error fetching status data:', err);
-    }
-}
 
 /**
  * Update status display elements
  */
 function updateStatusDisplay(data) {
-    console.log('[Dashboard] Updating status display:', data);
     const webhookCountEl = document.getElementById('webhook-count');
     const fetchCyclesEl = document.getElementById('fetch-cycles');
     const statusTextEl = document.getElementById('status-text');
@@ -1132,34 +1087,16 @@ function updateStatusDisplay(data) {
 
 // Initialize dashboard when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('[Dashboard] DOM ready, initializing...');
-
     // Initialize dashboard (WebSocket, event listeners, charts)
     initDashboard();
 
-    // Fetch portfolio data immediately and periodically
-    fetchPortfolioData();
-    fetchStatusData();
-    fetchPositionsData();
-
-    // Fetch speed arb data
-    fetchSpeedArbData();
-
-    // Set up periodic refresh intervals
-    setInterval(fetchPortfolioData, 5000);
-    setInterval(fetchStatusData, 5000);
-    setInterval(fetchPositionsData, 5000);
-    setInterval(fetchSpeedArbData, 3000);
-
-    console.log('[Dashboard] Initialization complete');
+    // Single consolidated poll — fetch everything in one request
+    fetchAllDashboardData();
+    setInterval(fetchAllDashboardData, 5000);
 });
 
 // Export for global access
 window.dashboard = {
     refresh: fetchAllDashboardData,
     reconnect: connectWebSocket,
-    fetchPortfolio: fetchPortfolioData,
-    fetchStatus: fetchStatusData,
-    fetchPositions: fetchPositionsData,
-    fetchSpeedArb: fetchSpeedArbData,
 };

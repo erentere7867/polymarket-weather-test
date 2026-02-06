@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Weather Ingestion Dashboard | Speed Arbitrage Bot</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss-cdn@3.4.3/tailwindcss.min.css" rel="stylesheet">
     <link rel="stylesheet" href="dashboard.css">
     <style>
         body {
@@ -600,73 +600,7 @@
     <!-- Dashboard JavaScript -->
     <script src="dashboard.js"></script>
 
-    <!-- Portfolio & Stats Logic -->
-    <script>
-        const API_BASE = '/api';
-
-        async function fetchStats() {
-            try {
-                // 1. Status
-                const statusRes = await fetch(`${API_BASE}/status`);
-                const statusData = await statusRes.json();
-
-                // 2. Portfolio
-                const portRes = await fetch(`${API_BASE}/portfolio`);
-                const portData = await portRes.json();
-
-                document.getElementById('total-equity').innerText = formatCurrency(portData.totalValue);
-                document.getElementById('cash-balance').innerText = formatCurrency(portData.currentCash);
-
-                const pnl = portData.unrealizedPnL + portData.realizedPnL;
-                const pnlEl = document.getElementById('total-pnl');
-                pnlEl.innerText = `${pnl >= 0 ? '+' : ''}${formatCurrency(pnl)} (${portData.totalPnLPercent.toFixed(2)}%)`;
-                pnlEl.className = `text-sm mt-2 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
-
-            } catch (err) {
-                console.error('Fetch error:', err);
-                document.getElementById('status-text').innerText = 'OFFLINE';
-                document.getElementById('status-text').className = 'text-rose-500 font-bold font-mono';
-            }
-        }
-
-        async function fetchWebhookStats() {
-            try {
-                // Webhook Status
-                const webhookRes = await fetch(`${API_BASE}/webhook/status`);
-                const webhookData = await webhookRes.json();
-
-                document.getElementById('webhook-count').innerText = webhookData.webhooksReceived || 0;
-
-            } catch (err) {
-                console.error('Webhook stats error:', err);
-            }
-        }
-
-        async function fetchForecastTriggers() {
-            try {
-                const res = await fetch(`${API_BASE}/forecast/triggers`);
-                const data = await res.json();
-
-                document.getElementById('fetch-cycles').innerText = `${data.fetchCyclesCompleted || 0} fetch cycles`;
-
-            } catch (err) {
-                console.error('Forecast triggers error:', err);
-            }
-        }
-
-        function formatCurrency(num) {
-            return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(num);
-        }
-
-        // Poll every 3 seconds
-        fetchStats();
-        fetchWebhookStats();
-        fetchForecastTriggers();
-
-        setInterval(fetchStats, 3000);
-        setInterval(fetchWebhookStats, 3000);
-        setInterval(fetchForecastTriggers, 3000);
-    </script>
+    <!-- Portfolio & Stats Logic handled by dashboard.js -->
 </body>
 
 </html>

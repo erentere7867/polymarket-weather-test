@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import cors from 'cors';
 import path from 'path';
 import { createServer } from 'http';
@@ -58,6 +59,7 @@ const dashboardController = new DashboardController(
 );
 
 // Middleware (Dashboard)
+dashboardApp.use(compression());
 dashboardApp.use(cors());
 dashboardApp.use(express.json());
 dashboardApp.use(express.static(path.join(process.cwd(), 'src/web/public')));
@@ -549,6 +551,85 @@ dashboardApp.get('/api/confidence', (req, res) => {
 // 21. Mount Dashboard Router
 dashboardApp.use('/api/dashboard', createDashboardRouter(dashboardController));
 
+// 22. Batched Dashboard Poll — single endpoint for all periodic data
+dashboardApp.get('/api/poll', (req, res) => {
+    const sim = runner.getSimulator();
+    const cycles = runner.getCycles();
+    const uptime = process.uptime();
+    const eventStats = eventBus.getEventStats();
+    const settings = runner.getSettings();
+    const speedArbStats = runner.getSpeedArbStats();
+    const perf = runner.getComponentPerformance();
+    const markets = runner.getStore().getAllMarkets();
+    const strategyStats = runner.getStrategy().getStats();
+
+    const activePositions = sim.getOpenPositions().map(p => {
+        const state = runner.getStore().getMarketState(p.marketId);
+        return {
+            ...p,
+            marketTitle: state?.market?.eventTitle || p.marketId,
+            currentPrice: p.currentPrice,
+            pnlPercent: ((p.currentPrice - p.entryPrice) / p.entryPrice) * 100
+        };
+    });
+
+    const closedPositions = sim.getClosedPositions().map(p => {
+        const holdDurationMs = p.exitTime && p.entryTime
+            ? p.exitTime.getTime() - p.entryTime.getTime()
+            : 0;
+        const pnlPercent = p.entryPrice > 0
+            ? ((p.exitPrice || 0) - p.entryPrice) / p.entryPrice * 100
+            : 0;
+        return {
+            id: p.id, marketQuestion: p.marketQuestion, side: p.side,
+            shares: p.shares, entryPrice: p.entryPrice,
+            exitPrice: p.exitPrice || 0, entryTime: p.entryTime,
+            exitTime: p.exitTime, realizedPnL: p.realizedPnL || 0,
+            pnlPercent, holdDurationSeconds: Math.floor(holdDurationMs / 1000),
+            status: p.status
+        };
+    }).reverse();
+
+    res.json({
+        status: {
+            online: runner.isSimulationRunning(),
+            cycles,
+            cyclesPerMinute: uptime > 0 ? Math.round((cycles / uptime) * 60) : 0,
+            uptime,
+        },
+        portfolio: sim.getPortfolio(),
+        activePositions,
+        closedPositions,
+        speedArb: {
+            ...speedArbStats,
+            enabled: settings.speedArbEnabled,
+        },
+        webhook: {
+            webhooksReceived: eventStats.webhooksReceived,
+            fetchCyclesCompleted: eventStats.fetchCyclesCompleted,
+        },
+        confidence: {
+            totalMarketsAnalyzed: markets.length,
+            firstRunBlocks: strategyStats.blockReasons.FIRST_RUN,
+            stabilityBlocks: strategyStats.blockReasons.STABILITY_CHECK_FAILED,
+            confidenceBlocks: strategyStats.blockReasons.CONFIDENCE_BELOW_THRESHOLD,
+            signalsGenerated: perf.confidenceCompression.signalsGenerated,
+            tradesExecuted: perf.confidenceCompression.tradesExecuted,
+            thresholds: { temperature: 0.60, precipitation: 0.75 },
+        },
+        weather: {
+            status: dashboardController.getSystemStatus(),
+            models: dashboardController.getModelStatus(),
+            cities: dashboardController.getCityCoverage(),
+            latency: dashboardController.getLatencyMetrics(),
+            apiFallback: dashboardController.getApiFallbackStatus(),
+            events: dashboardController.getRecentEvents(20),
+            windows: dashboardController.getActiveWindows(),
+            upcoming: dashboardController.getUpcomingRuns(5),
+        },
+    });
+});
+
 // ========================
 // Webhook Routes (Webhook)
 // ========================
@@ -556,7 +637,6 @@ dashboardApp.use('/api/dashboard', createDashboardRouter(dashboardController));
 // 7. Tomorrow.io Webhook Endpoint
 // Mount the webhook router at /tomorrow with validation middleware
 webhookApp.use('/tomorrow', webhookValidator, createWebhookRouter());
-
 
 // Start Server
 async function startServer() {
