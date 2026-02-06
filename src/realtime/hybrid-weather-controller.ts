@@ -211,7 +211,7 @@ export interface HybridControllerState {
 }
 
 interface CityUpdateState {
-    lastUpdateSource: 'GFS' | 'ECMWF' | 'OTHER';
+    lastUpdateSource: ModelType;
     lastUpdateTimestamp: Date; // Wall-clock time when the update was processed
     lastModelRunTime?: Date;    // The 'runDate' of the model (e.g., 12z)
 }
@@ -563,9 +563,9 @@ export class HybridWeatherController extends EventEmitter {
                 continue;
             }
 
-            // Update arbitration state
+            // Update arbitration state — track actual model for all sources
             this.cityUpdateStates.set(cityId, {
-                lastUpdateSource: payload.model === 'ECMWF' || payload.model === 'GFS' ? payload.model : 'OTHER',
+                lastUpdateSource: payload.model,
                 lastUpdateTimestamp: new Date(),
                 // payload.timestamp is usually creation time, we want run time if possible, but timestamp is close enough for now
                 lastModelRunTime: payload.timestamp 
@@ -728,19 +728,27 @@ export class HybridWeatherController extends EventEmitter {
     /**
      * Determines if a new forecast should be applied based on arbitration rules.
      * 
-     * Rules:
+     * SPEED_ARBITRAGE_MODE (default): First-model-wins.
+     * Accept ANY model update immediately — trade on whichever model publishes first.
+     * Zero additional latency. All models feed all cities.
+     * 
+     * Legacy mode (SPEED_ARBITRAGE_MODE=false):
      * 1. Race: Whichever arrives first triggers update.
      * 2. ECMWF Preference: If ECMWF arrives after GFS, always update.
-     * 3. GFS Restriction: If GFS arrives after ECMWF:
-     *    - < 5 mins since ECMWF: IGNORE GFS.
-     *    - > 1 hour since ECMWF: UPDATE with GFS (freshness wins).
-     *    - 5m - 1h: IGNORE (Implicitly prefer ECMWF).
+     * 3. GFS Restriction: If GFS arrives after ECMWF within 5-60min, ignore.
      */
     private shouldUpdateForecast(
         cityId: string, 
         newModel: ModelType, 
         newTimestamp: Date // Current wall-clock time
     ): boolean {
+        // SPEED ARBITRAGE MODE: Accept every model update immediately
+        // This is the critical path — no blocking, no delays
+        if (config.SPEED_ARBITRAGE_MODE) {
+            return true;
+        }
+
+        // --- Legacy arbitration logic (only when speed mode is off) ---
         const currentState = this.cityUpdateStates.get(cityId);
 
         // Rule 1: First arrival (no previous state) -> Update
@@ -749,42 +757,36 @@ export class HybridWeatherController extends EventEmitter {
         }
 
         // Rule 2: ECMWF Preference
-        // If the new update is ECMWF, we generally always accept it.
         if (newModel === 'ECMWF') {
             return true; 
         }
 
         // Rule 3: GFS Handling
         if (newModel === 'GFS') {
-            // If previous was also GFS, update (newer GFS replaces older GFS)
             if (currentState.lastUpdateSource === 'GFS') {
                 return true;
             }
 
-            // If previous was ECMWF, check time diff
             if (currentState.lastUpdateSource === 'ECMWF') {
                 const timeSinceLastUpdateMs = newTimestamp.getTime() - currentState.lastUpdateTimestamp.getTime();
                 const timeSinceLastUpdateMinutes = timeSinceLastUpdateMs / (1000 * 60);
 
-                // "Short time" (< 5 mins) -> Ignore
                 if (timeSinceLastUpdateMinutes < 5) {
                     logger.info(`Ignoring GFS update for ${cityId}: Too close to ECMWF update (${timeSinceLastUpdateMinutes.toFixed(1)}m)`);
                     return false;
                 }
 
-                // "Long time" (> 1 hour) -> Update
                 if (timeSinceLastUpdateMinutes > 60) {
                      logger.info(`Accepting GFS update for ${cityId}: Significantly fresher than ECMWF (${timeSinceLastUpdateMinutes.toFixed(1)}m)`);
                     return true;
                 }
 
-                // Implicit: 5m - 60m -> Ignore (Stick with preferred ECMWF)
                 logger.info(`Ignoring GFS update for ${cityId}: Within ECMWF preference window (${timeSinceLastUpdateMinutes.toFixed(1)}m)`);
                 return false;
             }
         }
 
-        // Default: Allow update (e.g. from other sources if we support them)
+        // Default: Allow update
         return true;
     }
 

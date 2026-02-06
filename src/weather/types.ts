@@ -391,26 +391,26 @@ export interface GridPointData {
 
 /**
  * City-to-model mapping for 13 supported cities
- * HRRR: High-resolution, best for CONUS cities
- * RAP: Rapid refresh, good for all cities
- * GFS: Global, fallback for international cities
+ * Speed Arbitrage Mode: ALL cities monitored via GFS+ECMWF (global models)
+ * US cities additionally monitored via HRRR+RAP for fastest detection
+ * Trade triggers on ANY single model's forecast change (first-model-wins)
  */
 export const CITY_MODEL_CONFIGS: CityModelConfig[] = [
-    // CONUS cities - HRRR primary
-    { cityName: 'New York City', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS'] },
-    { cityName: 'Washington DC', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS'] },
-    { cityName: 'Chicago', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS'] },
-    { cityName: 'Los Angeles', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS'] },
-    { cityName: 'Miami', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS'] },
-    { cityName: 'Dallas', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS'] },
-    { cityName: 'Seattle', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS'] },
-    { cityName: 'Atlanta', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS'] },
-    // International cities - ECMWF primary (Dual Model Arbitration)
-    { cityName: 'Toronto', primaryModel: 'GFS', fallbackModels: ['RAP', 'HRRR'] }, // Keep GFS/RAP for Toronto as it's close to US
-    { cityName: 'London', primaryModel: 'ECMWF', fallbackModels: ['GFS'] },
-    { cityName: 'Seoul', primaryModel: 'ECMWF', fallbackModels: ['GFS'] },
-    { cityName: 'Ankara', primaryModel: 'ECMWF', fallbackModels: ['GFS'] },
-    { cityName: 'Buenos Aires', primaryModel: 'ECMWF', fallbackModels: ['GFS'] },
+    // CONUS cities - HRRR primary (fastest: hourly, ~25min delay), also GFS+ECMWF
+    { cityName: 'New York City', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS', 'ECMWF'] },
+    { cityName: 'Washington DC', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS', 'ECMWF'] },
+    { cityName: 'Chicago', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS', 'ECMWF'] },
+    { cityName: 'Los Angeles', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS', 'ECMWF'] },
+    { cityName: 'Miami', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS', 'ECMWF'] },
+    { cityName: 'Dallas', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS', 'ECMWF'] },
+    { cityName: 'Seattle', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS', 'ECMWF'] },
+    { cityName: 'Atlanta', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS', 'ECMWF'] },
+    // International cities - GFS primary (global, 6h cycle, ~3.5h delay), also ECMWF
+    { cityName: 'Toronto', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
+    { cityName: 'London', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
+    { cityName: 'Seoul', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
+    { cityName: 'Ankara', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
+    { cityName: 'Buenos Aires', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
 ];
 
 /**

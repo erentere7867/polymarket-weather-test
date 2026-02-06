@@ -43,6 +43,7 @@ export interface Config {
 
     // Speed arbitrage settings
     skipPriceCheck: boolean;              // Skip market price reaction check on forecast changes (trade immediately)
+    SPEED_ARBITRAGE_MODE: boolean;        // First-model-wins: all cities monitored via GFS+ECMWF, US cities also HRRR+RAP, trade on ANY model change
 
     // Webhook-based forecast detection settings
     TOMORROW_WEBHOOK_SECRET: string;      // Secret for validating Tomorrow.io webhooks
@@ -153,6 +154,7 @@ export const config: Config = {
 
     // Speed arbitrage settings
     skipPriceCheck: getEnvVarBool('SKIP_PRICE_CHECK', false), // Skip market price reaction check on forecast changes
+    SPEED_ARBITRAGE_MODE: getEnvVarBool('SPEED_ARBITRAGE_MODE', true), // First-model-wins mode
 
     // Webhook-based forecast detection settings
     TOMORROW_WEBHOOK_SECRET: getEnvVarOptional('TOMORROW_WEBHOOK_SECRET', ''),
