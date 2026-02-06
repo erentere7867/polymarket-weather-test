@@ -232,7 +232,7 @@ export class GRIB2Parser {
                     }
                 }
 
-                if (bestCityIdx >= 0 && bestDist < 4.0) { // Within ~2 degrees tolerance
+                if (bestCityIdx >= 0 && bestDist < 16.0) { // Within ~4 degrees tolerance (was 2 degrees)
                     const cr = cityResults.get(bestCityIdx)!;
                     if (varName === 'TMP') cr.TMP = val;
                     else if (varName === 'UGRD') cr.UGRD = val;
