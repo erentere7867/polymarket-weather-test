@@ -14,6 +14,7 @@ import { EntryOptimizer, EntrySignal } from './entry-optimizer.js';
 import { MarketImpactModel } from './market-impact.js';
 import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { normalCDF } from '../probability/normal-cdf.js';
+import { ModelHierarchy } from './model-hierarchy.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 
@@ -32,6 +33,7 @@ export class SpeedArbitrageStrategy {
     private marketImpactModel: MarketImpactModel;
     private edgeCalculator: EdgeCalculator;
     private entryOptimizer: EntryOptimizer;
+    private modelHierarchy: ModelHierarchy;
 
     // Track opportunities we've already captured - prevents re-buying at higher prices
     // Key: marketId, Value: { forecastValue we traded on, when we captured it }
@@ -50,6 +52,7 @@ export class SpeedArbitrageStrategy {
         this.marketImpactModel = new MarketImpactModel();
         this.edgeCalculator = new EdgeCalculator(this.marketModel);
         this.entryOptimizer = new EntryOptimizer(this.marketModel, this.marketImpactModel);
+        this.modelHierarchy = new ModelHierarchy();
     }
 
     /**
@@ -124,7 +127,20 @@ export class SpeedArbitrageStrategy {
         }
 
         // =====================================================
-        // CHECK #1: Have we already captured this opportunity?
+        // CHECK #1a: Model Consensus (when speed arb mode is OFF)
+        // Speed arb ON  → every model change is a trade opportunity
+        // Speed arb OFF → US cities need HRRR+RAP agreement,
+        //                  global/EU cities need GFS+ECMWF agreement
+        // =====================================================
+        if (!config.SPEED_ARBITRAGE_MODE) {
+            const consensusResult = this.checkConsensusForMarket(market);
+            if (!consensusResult.pass) {
+                return null;
+            }
+        }
+
+        // =====================================================
+        // CHECK #1b: Have we already captured this opportunity?
         // =====================================================
         if (this.isOpportunityCaptured(market.market.id, forecast.forecastValue)) {
             return null;
@@ -258,6 +274,42 @@ export class SpeedArbitrageStrategy {
         }
 
         return opportunities;
+    }
+
+    /**
+     * Check model consensus for a market (used when speed arb mode is OFF).
+     * US cities: HRRR + RAP must agree on same side of threshold.
+     * Global/EU cities: GFS + ECMWF must agree on same side of threshold.
+     * O(1) lookups — no async, no loops.
+     */
+    private checkConsensusForMarket(market: ParsedWeatherMarket): { pass: boolean; reason?: string } {
+        const city = market.city;
+        if (!city) return { pass: false, reason: 'no city' };
+
+        const cityId = city.toLowerCase().replace(/\s+/g, '_');
+        const region = this.modelHierarchy.getRegion(cityId);
+
+        let thresholdF = market.threshold;
+        if (thresholdF === undefined) return { pass: false, reason: 'no threshold' };
+        if (market.thresholdUnit === 'C') {
+            thresholdF = (thresholdF * 9 / 5) + 32;
+        }
+
+        let consensus: ReturnType<DataStore['checkModelConsensus']>;
+
+        if (region === 'US') {
+            consensus = this.store.checkModelConsensus(cityId, 'HRRR', 'RAP', thresholdF);
+        } else {
+            consensus = this.store.checkModelConsensus(cityId, 'GFS', 'ECMWF', thresholdF);
+        }
+
+        if (!consensus.consensus) {
+            logger.debug(`[Consensus] No consensus for ${city} (${region}): models disagree or missing data`);
+            return { pass: false, reason: `no ${region === 'US' ? 'HRRR+RAP' : 'GFS+ECMWF'} consensus` };
+        }
+
+        logger.info(`✅ [Consensus] ${city} (${region}): ${region === 'US' ? 'HRRR+RAP' : 'GFS+ECMWF'} agree → ${consensus.direction} threshold`);
+        return { pass: true };
     }
 
     /**

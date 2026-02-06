@@ -555,6 +555,9 @@ export class HybridWeatherController extends EventEmitter {
         // Mark cities as file-confirmed and trigger opportunity re-scan
         for (const cityData of payload.cityData) {
             const cityId = cityData.cityName.toLowerCase().replace(/\s+/g, '_');
+
+            // ALWAYS update per-model forecast cache (O(1) write) — needed for consensus detection
+            this.dataStore.updateModelForecast(cityId, payload.model, cityData.temperatureF);
             
             // DUAL MODEL ARBITRATION LOGIC
             // Check if we should update this city based on model priority/timing
