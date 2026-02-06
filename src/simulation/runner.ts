@@ -18,6 +18,7 @@
 import { ParsedWeatherMarket } from '../polymarket/types.js';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { GammaClient } from '../polymarket/gamma-client.js';
 import { PortfolioSimulator } from './portfolio.js';
@@ -145,7 +146,7 @@ export class SimulationRunner {
     private correlatedMarketGroups: Map<string, string[]> = new Map();
 
     // Speed Arbitrage
-    private static readonly SPEED_ARB_STATE_FILE = path.join(process.cwd(), '.speed-arb-state.json');
+    private static readonly SPEED_ARB_STATE_FILE = path.join(os.homedir(), '.polymarket-weather', 'speed-arb-state.json');
     private speedArbEnabled: boolean = false;
     private speedArbStrategy: SpeedArbitrageStrategy;
     private speedArbStats = {
@@ -960,6 +961,10 @@ export class SimulationRunner {
 
     private saveSpeedArbState(): void {
         try {
+            const dir = path.dirname(SimulationRunner.SPEED_ARB_STATE_FILE);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
             fs.writeFileSync(SimulationRunner.SPEED_ARB_STATE_FILE, JSON.stringify({ enabled: this.speedArbEnabled }));
         } catch (e) {
             logger.error(`Failed to save speed arb state: ${(e as Error).message}`);
