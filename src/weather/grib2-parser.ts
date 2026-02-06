@@ -57,13 +57,15 @@ export interface GRIBParseResult {
  */
 export class GRIB2Parser {
     private useWgrib2: boolean;
+    private wgrib2Path: string;
     private tempDir: string;
     private cityCoordinates: Map<string, Coordinates>;
     // Pre-computed city ID mappings for zero-allocation lookups
     private cityIdMap: Map<string, string>;
 
     constructor() {
-        this.useWgrib2 = this.checkWgrib2Available();
+        this.wgrib2Path = this.findWgrib2Path();
+        this.useWgrib2 = this.wgrib2Path !== '';
         // Use RAM-backed tmpfs on Linux for faster temp file I/O
         this.tempDir = this.selectTempDir();
 
@@ -112,11 +114,18 @@ export class GRIB2Parser {
 
             let cityData: CityGRIBData[];
 
-            // Use wgrib2 for NCEP models (HRRR, RAP, GFS) where we know the variable mapping
-            // Use ecCodes for ECMWF as it reliably handles ECMWF shortNames (2t, 10u, etc.)
-            if (this.useWgrib2 && options.model !== 'ECMWF') {
-                // Use parallel extraction for maximum speed
+            if (this.useWgrib2) {
+                // wgrib2 is fastest: single process call for all cities
+                // Works for NCEP (HRRR, RAP, GFS) and ECMWF (WMO standard GRIB2 encoding)
                 cityData = await this.parseWithWgrib2Parallel(tempFile, options);
+                logger.info(`[GRIB2Parser] wgrib2 batch: ${options.model} → ${cityData.length}/${KNOWN_CITIES.length} cities extracted`);
+
+                // Fall back to ecCodes for ECMWF if wgrib2 returned 0 cities
+                // (handles edge cases where ECMWF encoding differs from wgrib2 expectations)
+                if (cityData.length === 0 && options.model === 'ECMWF') {
+                    logger.warn('[GRIB2Parser] wgrib2 returned 0 cities for ECMWF, falling back to ecCodes');
+                    cityData = await this.parseWithEcCodes(tempFile, options);
+                }
             } else {
                 cityData = await this.parseWithEcCodes(tempFile, options);
             }
@@ -159,17 +168,19 @@ export class GRIB2Parser {
      */
     private async runWgrib2BatchAllCities(filePath: string): Promise<CityGRIBData[]> {
         // Match any of the variables we need
+        // APCP = NCEP accumulated precipitation, TPRATE = ECMWF total precipitation rate
         const matchers = [
             '(:TMP:2 m above ground:)',
             '(:UGRD:10 m above ground:)',
             '(:VGRD:10 m above ground:)',
-            '(:APCP:surface:)'
+            '(:APCP:surface:)',
+            '(:TPRATE:surface:)'
         ].join('|');
 
         // Build multiple -lon flags, one per city
         const lonFlags = KNOWN_CITIES.map(city => `-lon ${city.coordinates.lon} ${city.coordinates.lat}`).join(' ');
 
-        const command = `wgrib2 "${filePath}" -match "${matchers}" ${lonFlags}`;
+        const command = `${this.wgrib2Path} "${filePath}" -match "${matchers}" ${lonFlags}`;
 
         try {
             const { stdout } = await execAsync(command, { timeout: 10000, maxBuffer: 4 * 1024 * 1024 });
@@ -198,6 +209,7 @@ export class GRIB2Parser {
                 else if (line.includes(':UGRD:10 m above ground:')) varName = 'UGRD';
                 else if (line.includes(':VGRD:10 m above ground:')) varName = 'VGRD';
                 else if (line.includes(':APCP:surface:')) varName = 'APCP';
+                else if (line.includes(':TPRATE:surface:')) varName = 'APCP'; // Map ECMWF TPRATE → APCP slot
 
                 if (!varName) continue;
 
@@ -307,6 +319,7 @@ export class GRIB2Parser {
     /**
      * Parse using ecCodes (fallback) - batched per variable
      * Runs 4 grib_get calls (one per variable) instead of 4 × 13 = 52
+     * Only used when wgrib2 is unavailable or returns 0 cities for ECMWF
      */
     private async parseWithEcCodes(filePath: string, options: ParseOptions): Promise<CityGRIBData[]> {
         logger.info('[GRIB2Parser] Using ecCodes (grib_get) for parsing');
@@ -387,15 +400,27 @@ export class GRIB2Parser {
     }
 
     /**
-     * Check if wgrib2 is available
+     * Find wgrib2 binary - checks PATH and common install locations
      */
-    private checkWgrib2Available(): boolean {
-        try {
-            execSync('wgrib2 -version', { stdio: 'ignore' });
-            return true;
-        } catch {
-            return false;
+    private findWgrib2Path(): string {
+        const candidates = [
+            'wgrib2',
+            '/usr/local/bin/wgrib2',
+            '/usr/bin/wgrib2',
+            '/opt/wgrib2/bin/wgrib2',
+            '/tmp/grib2/wgrib2/wgrib2',
+        ];
+        for (const candidate of candidates) {
+            try {
+                execSync(`${candidate} -version`, { stdio: 'ignore' });
+                logger.info(`[GRIB2Parser] wgrib2 found at '${candidate}' — using fast batch extraction for all models`);
+                return candidate;
+            } catch {
+                // Try next candidate
+            }
         }
+        logger.warn('[GRIB2Parser] wgrib2 not found in PATH or common locations — will use ecCodes (grib_get) fallback');
+        return '';
     }
 
     /**
