@@ -16,6 +16,8 @@
  */
 
 import { ParsedWeatherMarket } from '../polymarket/types.js';
+import fs from 'fs';
+import path from 'path';
 import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { GammaClient } from '../polymarket/gamma-client.js';
 import { PortfolioSimulator } from './portfolio.js';
@@ -143,6 +145,7 @@ export class SimulationRunner {
     private correlatedMarketGroups: Map<string, string[]> = new Map();
 
     // Speed Arbitrage
+    private static readonly SPEED_ARB_STATE_FILE = path.join(process.cwd(), '.speed-arb-state.json');
     private speedArbEnabled: boolean = false;
     private speedArbStrategy: SpeedArbitrageStrategy;
     private speedArbStats = {
@@ -173,6 +176,9 @@ export class SimulationRunner {
 
         // Initialize Speed Arbitrage Strategy
         this.speedArbStrategy = new SpeedArbitrageStrategy(this.store);
+
+        // Load persisted speed arb state
+        this.loadSpeedArbState();
 
         // Initialize Simulator
         this.simulator = new PortfolioSimulator(startingCapital);
@@ -944,11 +950,34 @@ export class SimulationRunner {
     }
 
     /**
-     * Enable/disable speed arbitrage mode
+     * Enable/disable speed arbitrage mode (persisted to disk)
      */
     setSpeedArbEnabled(enabled: boolean): void {
         this.speedArbEnabled = enabled;
+        this.saveSpeedArbState();
         logger.info(`⚡ Speed Arbitrage mode ${enabled ? 'ENABLED' : 'DISABLED'}`);
+    }
+
+    private saveSpeedArbState(): void {
+        try {
+            fs.writeFileSync(SimulationRunner.SPEED_ARB_STATE_FILE, JSON.stringify({ enabled: this.speedArbEnabled }));
+        } catch (e) {
+            logger.error(`Failed to save speed arb state: ${(e as Error).message}`);
+        }
+    }
+
+    private loadSpeedArbState(): void {
+        try {
+            if (fs.existsSync(SimulationRunner.SPEED_ARB_STATE_FILE)) {
+                const data = JSON.parse(fs.readFileSync(SimulationRunner.SPEED_ARB_STATE_FILE, 'utf-8'));
+                if (typeof data.enabled === 'boolean') {
+                    this.speedArbEnabled = data.enabled;
+                    logger.info(`⚡ Speed Arbitrage state loaded from disk: ${this.speedArbEnabled ? 'ENABLED' : 'DISABLED'}`);
+                }
+            }
+        } catch (e) {
+            logger.warn(`Could not load speed arb state: ${(e as Error).message}`);
+        }
     }
 
     /**
@@ -997,7 +1026,7 @@ export class SimulationRunner {
             this.speedArbStats.opportunitiesDetected++;
 
             const forecast = state.lastForecast;
-            if (!forecast || !forecast.valueChanged) {
+            if (!forecast) {
                 this.speedArbStats.opportunitiesSkipped++;
                 return;
             }
@@ -1026,11 +1055,7 @@ export class SimulationRunner {
 
             const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
 
-            // Speed arb accepts lower sigma (0.3) — we're trading on stale price
-            if (sigma < 0.3) {
-                this.speedArbStats.opportunitiesSkipped++;
-                return;
-            }
+            // NO sigma gate — speed arb bypasses all entry checks
 
             // Calculate probability using CDF
             const z = (forecast.forecastValue - threshold) / uncertainty;
@@ -1061,15 +1086,13 @@ export class SimulationRunner {
                 edge = edgeNo;
             }
 
-            // Speed arb accepts 2% minimum edge (stale price IS the edge)
-            const SPEED_ARB_MIN_EDGE = 0.02;
-            if (edge < SPEED_ARB_MIN_EDGE) {
+            // NO edge minimum — any positive edge is accepted, stale price IS the edge
+            if (edge <= 0) {
                 this.speedArbStats.opportunitiesSkipped++;
-                logger.debug(`⚡ Speed arb skipped: edge ${(edge * 100).toFixed(1)}% < ${(SPEED_ARB_MIN_EDGE * 100)}% for ${market.market.question.substring(0, 40)}`);
                 return;
             }
 
-            // Check if we already have a position on this side
+            // Only check: do we already hold this position?
             const existingPos = this.simulator.getAllPositions().find(p => p.marketId === marketId && p.side === side);
             if (existingPos) {
                 this.speedArbStats.opportunitiesSkipped++;
@@ -1078,7 +1101,6 @@ export class SimulationRunner {
 
             // Full position size for speed arb — max conviction
             const size = config.maxPositionSize;
-            if (size < 5) return;
 
             try {
                 const position = this.simulator.openPosition({

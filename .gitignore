@@ -22,3 +22,6 @@ Thumbs.db
 
 # Cache
 .cache/
+
+# Speed arb state (persisted toggle)
+.speed-arb-state.json
