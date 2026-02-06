@@ -129,6 +129,11 @@ export class FileBasedIngestion extends EventEmitter {
             });
         });
         
+        // Pre-warm S3 clients (fire-and-forget to avoid blocking startup)
+        this.s3Detector.warmup().catch(err => {
+            logger.warn(`[FileBasedIngestion] S3 warmup failed (non-fatal): ${err}`);
+        });
+        
         // Start schedule manager
         this.scheduleManager.start();
         

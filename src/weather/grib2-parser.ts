@@ -7,8 +7,9 @@
 import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 import { promises as fs } from 'fs';
-import { tmpdir } from 'os';
+import { tmpdir, platform } from 'os';
 import { join } from 'path';
+import { existsSync } from 'fs';
 import {
     ModelType,
     ParsedGRIBData,
@@ -63,7 +64,8 @@ export class GRIB2Parser {
 
     constructor() {
         this.useWgrib2 = this.checkWgrib2Available();
-        this.tempDir = tmpdir();
+        // Use RAM-backed tmpfs on Linux for faster temp file I/O
+        this.tempDir = this.selectTempDir();
 
         // Pre-compute city coordinates and IDs at startup
         this.cityCoordinates = new Map();
@@ -73,6 +75,25 @@ export class GRIB2Parser {
             // Pre-compute normalized city ID to avoid regex at runtime
             this.cityIdMap.set(city.name, city.name.toLowerCase().replace(/\s+/g, '_'));
         }
+    }
+
+    /**
+     * Select the fastest available temp directory
+     * Prefers RAM-backed tmpfs (/dev/shm) on Linux for zero disk I/O
+     */
+    private selectTempDir(): string {
+        if (platform() === 'linux') {
+            const shmPath = '/dev/shm';
+            try {
+                if (existsSync(shmPath)) {
+                    logger.info('[GRIB2Parser] Using /dev/shm (tmpfs) for temp files');
+                    return shmPath;
+                }
+            } catch {
+                // Fall through to default
+            }
+        }
+        return tmpdir();
     }
 
     /**
@@ -124,90 +145,20 @@ export class GRIB2Parser {
     }
 
     /**
-     * Parse using wgrib2 with PARALLEL execution
-     * This is the key optimization - runs all city extractions concurrently
+     * Parse using wgrib2 with a SINGLE process call for ALL cities
+     * Key optimization: one wgrib2 invocation with multiple -lon flags
+     * eliminates 12 process spawns (~80ms saved)
      */
     private async parseWithWgrib2Parallel(filePath: string, options: ParseOptions): Promise<CityGRIBData[]> {
-        // Create extraction promises for all cities
-        const cityPromises = KNOWN_CITIES.map(city => this.extractCityData(filePath, city));
-
-        // Execute all extractions with concurrency limit
-        const results = await this.runWithConcurrencyLimit(cityPromises, MAX_PARALLEL_WGRIB2);
-
-        // Filter out null results and return valid city data
-        return results.filter((data): data is CityGRIBData => data !== null);
+        return this.runWgrib2BatchAllCities(filePath);
     }
 
     /**
-     * Extract data for a single city - all variables in parallel
-     * Optimized: Uses a SINGLE wgrib2 process call to fetch all variables
+     * Extract ALL cities in a single wgrib2 process call
+     * Uses multiple -lon flags to extract all locations at once
      */
-    private async extractCityData(filePath: string, city: typeof KNOWN_CITIES[0]): Promise<CityGRIBData | null> {
-        const { lat, lon } = city.coordinates;
-
-        try {
-            // Unified variables mapping
-            const results = await this.runWgrib2Multi(filePath, lat, lon);
-
-            // Build city data object
-            const values: Partial<CityGRIBData> = {
-                cityName: city.name,
-                coordinates: city.coordinates,
-            };
-
-            // Set temperature if available
-            if (results.TMP !== null) {
-                values.temperatureC = results.TMP;
-                values.temperatureF = (results.TMP * 9 / 5) + 32;
-            }
-
-            // Calculate wind from U/V components
-            if (results.UGRD !== null && results.VGRD !== null) {
-                const u = results.UGRD;
-                const v = results.VGRD;
-                const windSpeedMps = Math.sqrt(u * u + v * v);
-                const windDirection = (Math.atan2(v, u) * 180 / Math.PI + 360) % 360;
-                values.windSpeedMps = windSpeedMps;
-                values.windSpeedMph = windSpeedMps * 2.23694;
-                values.windDirection = windDirection;
-            }
-
-            // Set precipitation
-            if (results.APCP !== null) {
-                values.totalPrecipitationMm = results.APCP;
-                values.totalPrecipitationIn = results.APCP / 25.4;
-                values.precipitationRateMmHr = results.APCP;
-            } else {
-                values.totalPrecipitationMm = 0;
-                values.totalPrecipitationIn = 0;
-                values.precipitationRateMmHr = 0;
-            }
-
-            // Only return if we have at least temperature
-            if (values.temperatureC !== undefined) {
-                return values as CityGRIBData;
-            }
-
-            return null;
-        } catch (error) {
-            logger.debug(`[GRIB2Parser] Error extracting data for ${city.name}: ${error}`);
-            return null;
-        }
-    }
-
-    /**
-     * Run wgrib2 command to extract ALL variables at specific location in one go
-     */
-    private async runWgrib2Multi(
-        filePath: string,
-        lat: number,
-        lon: number
-    ): Promise<{ TMP: number | null; UGRD: number | null; VGRD: number | null; APCP: number | null }> {
-        // Match ANY of the variables we need
-        // TMP:2 m above ground
-        // UGRD:10 m above ground
-        // VGRD:10 m above ground
-        // APCP:surface
+    private async runWgrib2BatchAllCities(filePath: string): Promise<CityGRIBData[]> {
+        // Match any of the variables we need
         const matchers = [
             '(:TMP:2 m above ground:)',
             '(:UGRD:10 m above ground:)',
@@ -215,197 +166,223 @@ export class GRIB2Parser {
             '(:APCP:surface:)'
         ].join('|');
 
-        // wgrib2 logic: match regex AND extract at location
-        const command = `wgrib2 "${filePath}" -match "${matchers}" -lon ${lon} ${lat} -csv -`;
+        // Build multiple -lon flags, one per city
+        const lonFlags = KNOWN_CITIES.map(city => `-lon ${city.coordinates.lon} ${city.coordinates.lat}`).join(' ');
 
-        const result = {
-            TMP: null as number | null,
-            UGRD: null as number | null,
-            VGRD: null as number | null,
-            APCP: null as number | null
-        };
+        const command = `wgrib2 "${filePath}" -match "${matchers}" ${lonFlags}`;
 
         try {
-            const { stdout } = await execAsync(command, { timeout: 8000 });
+            const { stdout } = await execAsync(command, { timeout: 10000, maxBuffer: 4 * 1024 * 1024 });
 
-            // Parse CSV output lines
-            // "time1","time2","VAR","LEVEL",lon,lat,val
+            // Initialize per-city results
+            const cityResults = new Map<number, { TMP: number | null; UGRD: number | null; VGRD: number | null; APCP: number | null }>();
+            for (let i = 0; i < KNOWN_CITIES.length; i++) {
+                cityResults.set(i, { TMP: null, UGRD: null, VGRD: null, APCP: null });
+            }
+
+            // Parse output: each matched record produces one line per -lon flag
+            // Format: "recNum:offset:date VAR LEVEL:lon=X,lat=Y,val=Z"
+            // With multiple -lon flags, each record outputs N lines (one per -lon)
             const lines = stdout.trim().split('\n');
 
-            for (const line of lines) {
-                if (!line.includes(',')) continue;
+            // Group lines: for each matched variable, wgrib2 outputs KNOWN_CITIES.length lines
+            const cityCount = KNOWN_CITIES.length;
 
-                // Remove quotes
-                const parts = line.replace(/"/g, '').split(',');
-                if (parts.length < 7) continue;
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (!line) continue;
 
-                const varName = parts[2]; // e.g., TMP
-                const valStr = parts[6];
-                const val = parseFloat(valStr);
+                // Determine which variable this line belongs to
+                let varName: string | null = null;
+                if (line.includes(':TMP:2 m above ground:')) varName = 'TMP';
+                else if (line.includes(':UGRD:10 m above ground:')) varName = 'UGRD';
+                else if (line.includes(':VGRD:10 m above ground:')) varName = 'VGRD';
+                else if (line.includes(':APCP:surface:')) varName = 'APCP';
 
-                if (!isNaN(val)) {
-                    if (varName === 'TMP') result.TMP = val;
-                    else if (varName === 'UGRD') result.UGRD = val;
-                    else if (varName === 'VGRD') result.VGRD = val;
-                    else if (varName === 'APCP') result.APCP = val;
+                if (!varName) continue;
+
+                // Extract val from "val=X" pattern
+                const valMatch = line.match(/val=([\-\d.eE+]+)/);
+                if (!valMatch) continue;
+                const val = parseFloat(valMatch[1]);
+                if (isNaN(val)) continue;
+
+                // Determine which city this line corresponds to by matching lon/lat
+                const lonMatch = line.match(/lon=([\-\d.]+),lat=([\-\d.]+)/);
+                if (!lonMatch) continue;
+                const outLon = parseFloat(lonMatch[1]);
+                const outLat = parseFloat(lonMatch[2]);
+
+                // Find closest city (wgrib2 snaps to nearest grid point)
+                let bestCityIdx = -1;
+                let bestDist = Infinity;
+                for (let c = 0; c < cityCount; c++) {
+                    const city = KNOWN_CITIES[c];
+                    // Normalize lon to 0-360 for comparison (wgrib2 may output 0-360)
+                    let cityLon = city.coordinates.lon;
+                    if (cityLon < 0) cityLon += 360;
+                    let compLon = outLon;
+                    if (compLon < 0) compLon += 360;
+                    const dLon = compLon - cityLon;
+                    const dLat = outLat - city.coordinates.lat;
+                    const dist = dLon * dLon + dLat * dLat;
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        bestCityIdx = c;
+                    }
+                }
+
+                if (bestCityIdx >= 0 && bestDist < 4.0) { // Within ~2 degrees tolerance
+                    const cr = cityResults.get(bestCityIdx)!;
+                    if (varName === 'TMP') cr.TMP = val;
+                    else if (varName === 'UGRD') cr.UGRD = val;
+                    else if (varName === 'VGRD') cr.VGRD = val;
+                    else if (varName === 'APCP') cr.APCP = val;
                 }
             }
 
-            return result;
+            // Convert results to CityGRIBData
+            const cityData: CityGRIBData[] = [];
+            for (let i = 0; i < KNOWN_CITIES.length; i++) {
+                const city = KNOWN_CITIES[i];
+                const r = cityResults.get(i)!;
+
+                if (r.TMP === null) continue; // Need at least temperature
+
+                const windSpeedMps = (r.UGRD !== null && r.VGRD !== null)
+                    ? Math.sqrt(r.UGRD * r.UGRD + r.VGRD * r.VGRD)
+                    : 0;
+                const windDirection = (r.UGRD !== null && r.VGRD !== null)
+                    ? (Math.atan2(r.VGRD, r.UGRD) * 180 / Math.PI + 360) % 360
+                    : 0;
+
+                cityData.push({
+                    cityName: city.name,
+                    coordinates: city.coordinates,
+                    temperatureC: r.TMP,
+                    temperatureF: (r.TMP * 9 / 5) + 32,
+                    windSpeedMps,
+                    windSpeedMph: windSpeedMps * 2.23694,
+                    windDirection,
+                    totalPrecipitationMm: r.APCP ?? 0,
+                    totalPrecipitationIn: (r.APCP ?? 0) / 25.4,
+                    precipitationRateMmHr: r.APCP ?? 0,
+                });
+            }
+
+            return cityData;
         } catch (error) {
-            logger.error(`[GRIB2Parser] wgrib2 multi-extract failed: ${error}`);
-            return result;
+            logger.error(`[GRIB2Parser] wgrib2 batch extraction failed: ${error}`);
+            return [];
         }
     }
 
     /**
-     * Run wgrib2 command to extract value at specific location
-     * @deprecated Used only for individual calls if needed
-     */
-    private async runWgrib2(
-        filePath: string,
-        varName: string,
-        level: string,
-        lat: number,
-        lon: number
-    ): Promise<number | null> {
-        // Should minimal implementation or throw, keeping just in case
-        return null;
-    }
-
-    /**
-     * Run promises with concurrency limit
-     * Prevents overwhelming the system with too many parallel wgrib2 processes
+     * Run task factories with proper concurrency limit
+     * Uses factory functions to ensure tasks don't start until a slot is available
      */
     private async runWithConcurrencyLimit<T>(
-        promises: Promise<T>[],
+        factories: (() => Promise<T>)[],
         limit: number
     ): Promise<T[]> {
-        const results: T[] = [];
-        const executing: Promise<void>[] = [];
+        const results: T[] = new Array(factories.length);
+        let nextIndex = 0;
 
-        for (const [index, promise] of promises.entries()) {
-            const p = promise.then(result => {
-                results[index] = result;
-            });
-
-            executing.push(p);
-
-            if (executing.length >= limit) {
-                await Promise.race(executing);
-                executing.splice(executing.findIndex(ep => ep === p), 1);
+        async function worker(): Promise<void> {
+            while (nextIndex < factories.length) {
+                const idx = nextIndex++;
+                results[idx] = await factories[idx]();
             }
         }
 
-        await Promise.all(executing);
+        // Spawn `limit` workers
+        const workers: Promise<void>[] = [];
+        for (let i = 0; i < Math.min(limit, factories.length); i++) {
+            workers.push(worker());
+        }
+        await Promise.all(workers);
         return results;
     }
 
     /**
-     * Legacy sequential parsing - kept for reference but not used
-     * @deprecated Use parseWithWgrib2Parallel instead
-     */
-    private async parseWithWgrib2(filePath: string, options: ParseOptions): Promise<CityGRIBData[]> {
-        // Delegate to parallel version
-        return this.parseWithWgrib2Parallel(filePath, options);
-    }
-
-    /**
-     * Parse using ecCodes (fallback)
+     * Parse using ecCodes (fallback) - batched per variable
+     * Runs 4 grib_get calls (one per variable) instead of 4 × 13 = 52
      */
     private async parseWithEcCodes(filePath: string, options: ParseOptions): Promise<CityGRIBData[]> {
         logger.info('[GRIB2Parser] Using ecCodes (grib_get) for parsing');
 
-        // Parallel extraction for all cities
-        const cityPromises = KNOWN_CITIES.map(city => this.extractCityDataEcCodes(filePath, city));
-        const results = await this.runWithConcurrencyLimit(cityPromises, MAX_PARALLEL_WGRIB2);
+        // Run all 4 variable extractions in parallel (4 processes instead of 52)
+        const shortNames = ['2t', '10u', '10v', 'tp'] as const;
+        const factories = shortNames.map(sn => () => this.runGribGetAllCities(filePath, sn));
+        const [tempResults, uWindResults, vWindResults, precipResults] =
+            await this.runWithConcurrencyLimit(factories, 4);
 
-        return results.filter((data): data is CityGRIBData => data !== null);
-    }
+        // Build city data from combined results
+        const cityData: CityGRIBData[] = [];
+        for (let i = 0; i < KNOWN_CITIES.length; i++) {
+            const city = KNOWN_CITIES[i];
+            const temp = tempResults[i] ?? null;
+            const uWind = uWindResults[i] ?? null;
+            const vWind = vWindResults[i] ?? null;
+            const precip = precipResults[i] ?? null;
 
-    private async extractCityDataEcCodes(filePath: string, city: typeof KNOWN_CITIES[0]): Promise<CityGRIBData | null> {
-        const { lat, lon } = city.coordinates;
+            if (temp === null) continue; // Need at least temperature
 
-        try {
-            // Extract variables using grib_get
-            // TMP 2m -> shortName=2t
-            // UGRD 10m -> shortName=10u
-            // VGRD 10m -> shortName=10v
-            // APCP surface -> shortName=tp (Total Precipitation)
+            // Kelvin to Celsius
+            const temperatureC = temp - 273.15;
+            const windSpeedMps = (uWind !== null && vWind !== null)
+                ? Math.sqrt(uWind * uWind + vWind * vWind)
+                : 0;
+            const windDirection = (uWind !== null && vWind !== null)
+                ? (Math.atan2(vWind, uWind) * 180 / Math.PI + 360) % 360
+                : 0;
 
-            const [tempResult, uWindResult, vWindResult, precipResult] = await Promise.all([
-                this.runGribGet(filePath, '2t', lat, lon).catch(() => null),
-                this.runGribGet(filePath, '10u', lat, lon).catch(() => null),
-                this.runGribGet(filePath, '10v', lat, lon).catch(() => null),
-                this.runGribGet(filePath, 'tp', lat, lon).catch(() => null),
-            ]);
-
-            // Build city data object
-            const values: Partial<CityGRIBData> = {
+            cityData.push({
                 cityName: city.name,
                 coordinates: city.coordinates,
-            };
-
-            // Set temperature if available
-            if (tempResult !== null) {
-                // Kelvin to Celsius
-                values.temperatureC = tempResult - 273.15;
-                values.temperatureF = (values.temperatureC * 9 / 5) + 32;
-            }
-
-            // Calculate wind from U/V components
-            if (uWindResult !== null && vWindResult !== null) {
-                const windSpeedMps = Math.sqrt(uWindResult * uWindResult + vWindResult * vWindResult);
-                const windDirection = (Math.atan2(vWindResult, uWindResult) * 180 / Math.PI + 360) % 360;
-                values.windSpeedMps = windSpeedMps;
-                values.windSpeedMph = windSpeedMps * 2.23694;
-                values.windDirection = windDirection;
-            }
-
-            // Set precipitation
-            if (precipResult !== null) {
-                values.totalPrecipitationMm = precipResult;
-                values.totalPrecipitationIn = precipResult / 25.4;
-                values.precipitationRateMmHr = precipResult; // Approximation for hourly files
-            } else {
-                values.totalPrecipitationMm = 0;
-                values.totalPrecipitationIn = 0;
-                values.precipitationRateMmHr = 0;
-            }
-
-            if (values.temperatureC !== undefined) {
-                return values as CityGRIBData;
-            }
-
-            return null;
-        } catch (error) {
-            logger.error(`[GRIB2Parser] Error extracting data (ecCodes) for ${city.name}: ${error}`);
-            return null;
+                temperatureC,
+                temperatureF: (temperatureC * 9 / 5) + 32,
+                windSpeedMps,
+                windSpeedMph: windSpeedMps * 2.23694,
+                windDirection,
+                totalPrecipitationMm: precip ?? 0,
+                totalPrecipitationIn: (precip ?? 0) / 25.4,
+                precipitationRateMmHr: precip ?? 0,
+            });
         }
+
+        return cityData;
     }
 
-    private async runGribGet(
+    /**
+     * Extract a single variable for ALL cities in one grib_get call
+     * Returns an array of values indexed by city order in KNOWN_CITIES
+     */
+    private async runGribGetAllCities(
         filePath: string,
-        shortName: string,
-        lat: number,
-        lon: number
-    ): Promise<number | null> {
-        // grib_get -w shortName=... -l lat,lon file
-        // Note: grib_get expects lat,lon (comma separated, no space)
-        // Returns "val1 val2 val3 val4" for nearest neighbors
-        const command = `grib_get -w shortName=${shortName} -l ${lat},${lon} "${filePath}"`;
+        shortName: string
+    ): Promise<(number | null)[]> {
+        // Build multiple -l flags for all cities
+        const lFlags = KNOWN_CITIES.map(city =>
+            `-l ${city.coordinates.lat},${city.coordinates.lon}`
+        ).join(' ');
+
+        const command = `grib_get -w shortName=${shortName} ${lFlags} "${filePath}"`;
 
         try {
-            const { stdout } = await execAsync(command, { timeout: 30000 });
-            const valueStr = stdout.trim().split(/\s+/)[0]; // Take first value
-            const value = parseFloat(valueStr);
-            if (!isNaN(value)) {
-                return value;
-            }
-            return null;
+            const { stdout } = await execAsync(command, { timeout: 15000, maxBuffer: 1024 * 1024 });
+            // grib_get outputs space-separated values, one per -l flag
+            const values = stdout.trim().split(/\s+/);
+            return KNOWN_CITIES.map((_, i) => {
+                if (i < values.length) {
+                    const val = parseFloat(values[i]);
+                    return isNaN(val) ? null : val;
+                }
+                return null;
+            });
         } catch (error: any) {
-            logger.error(`[GRIB2Parser] grib_get failed for ${shortName}: ${error.message} \nStdout: ${error.stdout} \nStderr: ${error.stderr}`);
-            return null;
+            logger.error(`[GRIB2Parser] grib_get batch failed for ${shortName}: ${error.message}`);
+            return KNOWN_CITIES.map(() => null);
         }
     }
 

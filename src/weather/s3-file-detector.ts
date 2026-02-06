@@ -4,7 +4,10 @@
  */
 
 import { EventEmitter } from 'events';
+import http from 'http';
+import https from 'https';
 import { S3Client, HeadObjectCommand, GetObjectCommand, HeadObjectOutput } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import {
     ModelType,
     ExpectedFileInfo,
@@ -82,8 +85,25 @@ export class S3FileDetector extends EventEmitter {
      * Create an S3 client for a specific region
      */
     private createClient(region: string): S3Client {
+        // Configure HTTP keep-alive and connection pooling for lower latency
+        const requestHandler = new NodeHttpHandler({
+            httpAgent: new http.Agent({
+                keepAlive: true,
+                maxSockets: 25,
+                keepAliveMsecs: 30000,
+            }),
+            httpsAgent: new https.Agent({
+                keepAlive: true,
+                maxSockets: 25,
+                keepAliveMsecs: 30000,
+            }),
+            connectionTimeout: 5000,
+            socketTimeout: 30000,
+        });
+
         return new S3Client({
             region: region,
+            requestHandler,
             // For public buckets, we use no credentials and a void signer
             // to prevent the SDK from trying to sign requests or look for creds
             ...(this.config.publicBuckets && {
@@ -312,7 +332,7 @@ export class S3FileDetector extends EventEmitter {
             let idxResponse;
             const client = this.getClient(region);
 
-            // Retry logic for .idx file (up to 3 times, 500ms delay)
+            // Retry logic for .idx file (up to 3 times, 150ms delay)
             for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
                     const command = new GetObjectCommand({
@@ -326,8 +346,8 @@ export class S3FileDetector extends EventEmitter {
                     // If .idx doesn't exist, retry if we have attempts left
                     if (e.name === 'NoSuchKey' || e.name === 'NotFound' || e.$metadata?.httpStatusCode === 404) {
                         if (attempt < 3) {
-                            logger.warn(`[S3FileDetector] .idx not found (attempt ${attempt}/3), retrying in 500ms...`);
-                            await new Promise(resolve => setTimeout(resolve, 500));
+                            logger.warn(`[S3FileDetector] .idx not found (attempt ${attempt}/3), retrying in 150ms...`);
+                            await new Promise(resolve => setTimeout(resolve, 150));
                             continue;
                         }
                         logger.info(`[S3FileDetector] .idx file not found for ${key}, falling back to full download (Check took ${Date.now() - idxStart}ms)`);
@@ -526,6 +546,39 @@ export class S3FileDetector extends EventEmitter {
             logger.error(`[S3FileDetector] Error downloading/parsing ${expectedFile.key}:`, error);
             this.emit('error', { expectedFile, error });
         }
+    }
+
+    /**
+     * Pre-warm S3 clients by making a lightweight request
+     * Eliminates cold-start latency (DNS, TLS handshake) on first real detection
+     */
+    public async warmup(): Promise<void> {
+        const warmupStart = Date.now();
+        logger.info('[S3FileDetector] Pre-warming S3 clients...');
+
+        // Warm up default client with a HEAD to a known old file
+        try {
+            await this.s3Client.send(new HeadObjectCommand({
+                Bucket: 'noaa-hrrr-bdp-pds',
+                Key: 'hrrr.20200101/conus/hrrr.t00z.wrfsfcf00.grib2',
+            }));
+        } catch {
+            // Expected to fail (404/403) - that's fine, we just want the connection warmed
+        }
+
+        // Warm up any pre-created regional clients
+        for (const [region, client] of this.regionClients) {
+            try {
+                await client.send(new HeadObjectCommand({
+                    Bucket: 'noaa-gfs-bdp-pds',
+                    Key: 'gfs.20200101/00/atmos/gfs.t00z.pgrb2.0p25.f003',
+                }));
+            } catch {
+                // Expected to fail - connection warmup only
+            }
+        }
+
+        logger.info(`[S3FileDetector] S3 clients pre-warmed in ${Date.now() - warmupStart}ms`);
     }
 
     /**
