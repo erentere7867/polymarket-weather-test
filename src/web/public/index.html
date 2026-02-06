@@ -171,6 +171,45 @@
             </div>
         </div>
 
+        <!-- Speed Arbitrage Controls -->
+        <div class="glass p-6 rounded-xl">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-5 h-5 mr-2 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                </svg>
+                Speed Arbitrage
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <!-- Enable/Disable Toggle -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700 flex items-center justify-between">
+                    <div>
+                        <p class="text-slate-500 text-xs uppercase tracking-wider">Speed Arb Mode</p>
+                        <p class="text-sm text-slate-400 mt-1">Instant execution on forecast changes</p>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer ml-4">
+                        <input type="checkbox" id="speed-arb-toggle" class="sr-only peer">
+                        <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-500 rounded-full peer peer-checked:bg-emerald-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-full"></div>
+                    </label>
+                </div>
+                <!-- Speed Arb Trades -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Speed Arb Trades</p>
+                    <h2 id="speed-arb-trades" class="text-2xl font-bold mt-1 text-slate-200">0</h2>
+                    <p id="speed-arb-opportunities" class="text-sm mt-2 text-blue-400">0 opportunities</p>
+                </div>
+                <!-- Speed Arb PnL -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Speed Arb P&L</p>
+                    <h2 id="speed-arb-pnl" class="text-2xl font-bold mt-1 text-emerald-400">$0.00</h2>
+                </div>
+                <!-- Last Speed Arb Trade -->
+                <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                    <p class="text-slate-500 text-xs uppercase tracking-wider">Last Speed Arb Trade</p>
+                    <h2 id="speed-arb-last-trade" class="text-lg font-mono mt-1 text-slate-400">--</h2>
+                </div>
+            </div>
+        </div>
+
         <!-- Positions Panel -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <!-- Open Positions -->

@@ -450,7 +450,9 @@ export class OpportunityDetector {
             }
 
             let probability: number;
-            const uncertainty = 3; // Typical forecast uncertainty in °F
+            // Dynamic uncertainty based on days to event
+            const daysAhead = Math.max(0, (targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+            const uncertainty = 1.5 + 0.8 * daysAhead; // 1.5°F day-0, 3.9°F day-3, 7.1°F day-7
 
             // Normalize thresholds to F
             let minF = market.minThreshold;
@@ -479,7 +481,6 @@ export class OpportunityDetector {
             // Ensure valid probability
             probability = Math.max(0, Math.min(1, probability));
 
-            const daysAhead = (targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
             const confidence = Math.max(0.3, 0.9 - daysAhead * 0.1);
 
             return {
@@ -518,7 +519,9 @@ export class OpportunityDetector {
 
             // Calculate probability based on comparison type
             let probability: number;
-            const uncertainty = 3; // Typical forecast uncertainty in °F
+            // Dynamic uncertainty based on days to event
+            const daysAhead = Math.max(0, (targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+            const uncertainty = 1.5 + 0.8 * daysAhead; // 1.5°F day-0, 3.9°F day-3, 7.1°F day-7
 
             // Normalize threshold to F
             let thresholdF = market.threshold;
@@ -543,7 +546,6 @@ export class OpportunityDetector {
             }
 
             // Confidence decreases with forecast distance
-            const daysAhead = (targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
             const confidence = Math.max(0.3, 0.9 - daysAhead * 0.1);
 
             logger.debug(`Temperature analysis for ${market.city}`, {
@@ -591,7 +593,9 @@ export class OpportunityDetector {
             }
 
             let probability: number;
-            const uncertainty = 3;
+            // Dynamic uncertainty based on days to event
+            const daysAhead = Math.max(0, (targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+            const uncertainty = 1.5 + 0.8 * daysAhead; // 1.5°F day-0, 3.9°F day-3, 7.1°F day-7
 
             // Normalize threshold to F
             let thresholdF = market.threshold;
@@ -613,7 +617,6 @@ export class OpportunityDetector {
                 );
             }
 
-            const daysAhead = (targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
             const confidence = Math.max(0.3, 0.9 - daysAhead * 0.1);
 
             return {
@@ -731,13 +734,14 @@ export class OpportunityDetector {
         }
 
         // Get uncertainty for this metric type
+        // Dynamic uncertainty based on metric type (daysToEvent not available here, use base values)
         let uncertainty: number;
         switch (metricType) {
             case 'temperature_high':
             case 'temperature_low':
             case 'temperature_threshold':
             case 'temperature_range':
-                uncertainty = 3; // °F
+                uncertainty = 3.9; // ~day-3 calibrated: 1.5 + 0.8*3
                 break;
             case 'precipitation':
                 uncertainty = 10; // percentage points

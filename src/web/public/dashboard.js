@@ -796,12 +796,74 @@ function setupEventListeners() {
         refreshBtn.addEventListener('click', fetchAllDashboardData);
     }
 
+    // Speed Arbitrage Toggle
+    const speedArbToggle = document.getElementById('speed-arb-toggle');
+    if (speedArbToggle) {
+        speedArbToggle.addEventListener('change', async (e) => {
+            const enabled = e.target.checked;
+            try {
+                const res = await fetch('/api/speed-arb/toggle', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled }),
+                });
+                const data = await res.json();
+                console.log('[Dashboard] Speed Arb toggled:', data);
+            } catch (err) {
+                console.error('[Dashboard] Error toggling speed arb:', err);
+                // Revert toggle on error
+                e.target.checked = !enabled;
+            }
+        });
+    }
+
     // Window resize for charts
     window.addEventListener('resize', () => {
         Object.values(dashboardState.charts).forEach(chart => {
             if (chart.canvas) drawChart(chart);
         });
     });
+}
+
+/**
+ * Fetch speed arbitrage stats and toggle state
+ */
+async function fetchSpeedArbData() {
+    try {
+        // Fetch current settings to get toggle state
+        const settingsRes = await fetch('/api/settings');
+        const settings = await settingsRes.json();
+        const toggle = document.getElementById('speed-arb-toggle');
+        if (toggle && toggle.checked !== settings.speedArbEnabled) {
+            toggle.checked = settings.speedArbEnabled;
+        }
+
+        // Fetch speed arb stats
+        const statsRes = await fetch('/api/speed-arb/stats');
+        const stats = await statsRes.json();
+
+        const tradesEl = document.getElementById('speed-arb-trades');
+        const oppsEl = document.getElementById('speed-arb-opportunities');
+        const pnlEl = document.getElementById('speed-arb-pnl');
+        const lastTradeEl = document.getElementById('speed-arb-last-trade');
+
+        if (tradesEl) tradesEl.textContent = stats.trades || 0;
+        if (oppsEl) oppsEl.textContent = `${stats.opportunities || 0} detected / ${stats.skipped || 0} skipped`;
+        if (pnlEl) {
+            const pnl = stats.pnl || 0;
+            pnlEl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+            pnlEl.className = `text-2xl font-bold mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+        }
+        if (lastTradeEl) {
+            if (stats.lastTradeTime) {
+                lastTradeEl.textContent = formatTimeAgo(new Date(stats.lastTradeTime));
+            } else {
+                lastTradeEl.textContent = '--';
+            }
+        }
+    } catch (err) {
+        console.error('[Dashboard] Error fetching speed arb data:', err);
+    }
 }
 
 /**
@@ -1065,10 +1127,14 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchStatusData();
     fetchPositionsData();
 
+    // Fetch speed arb data
+    fetchSpeedArbData();
+
     // Set up periodic refresh intervals
     setInterval(fetchPortfolioData, 5000);
     setInterval(fetchStatusData, 5000);
     setInterval(fetchPositionsData, 5000);
+    setInterval(fetchSpeedArbData, 3000);
 
     console.log('[Dashboard] Initialization complete');
 });
@@ -1080,4 +1146,5 @@ window.dashboard = {
     fetchPortfolio: fetchPortfolioData,
     fetchStatus: fetchStatusData,
     fetchPositions: fetchPositionsData,
+    fetchSpeedArb: fetchSpeedArbData,
 };

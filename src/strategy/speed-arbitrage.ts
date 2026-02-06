@@ -142,7 +142,7 @@ export class SpeedArbitrageStrategy {
         const priceYes = priceYesPoint.price;
         const priceNo = 1 - priceYes;
 
-        // For speed arb, ensure market hasn't already reacted to THIS change
+        // For speed arb, only block if market moved >80% toward fair value (price almost fully caught up)
         if (priceYesPoint.timestamp.getTime() > forecast.changeTimestamp.getTime()) {
             const priceBeforeChange = this.findPriceBeforeChange(state.priceHistory.yes.history, forecast.changeTimestamp);
             
@@ -151,9 +151,11 @@ export class SpeedArbitrageStrategy {
                 const expectedProb = market.comparisonType === 'above' ? (diff > 0 ? 1 : 0) : (diff < 0 ? 1 : 0);
                 const priceMovedTowards = (expectedProb > 0.5 && priceYes > priceBeforeChange) ||
                                         (expectedProb < 0.5 && priceYes < priceBeforeChange);
+                const priceMovement = Math.abs(priceYes - priceBeforeChange);
                 
-                if (priceMovedTowards && Math.abs(priceYes - priceBeforeChange) > 0.05) {
-                    return null; // Market beat us
+                // Only block if market moved >15¢ toward expected — that means most of the edge is gone
+                if (priceMovedTowards && priceMovement > 0.15) {
+                    return null; // Market already caught up
                 }
             }
         }
@@ -169,15 +171,19 @@ export class SpeedArbitrageStrategy {
             threshold = (threshold * 9 / 5) + 32;
         }
 
+        // Dynamic uncertainty based on days to event
+        const daysToEvent = market.targetDate
+            ? Math.max(0, (new Date(market.targetDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+            : 3;
         let uncertainty: number;
         switch (market.metricType) {
             case 'temperature_high':
             case 'temperature_low':
             case 'temperature_threshold':
-                uncertainty = 3; 
+                uncertainty = 1.5 + 0.8 * daysToEvent;
                 break;
             default:
-                uncertainty = 5;
+                uncertainty = 3 + 1.0 * daysToEvent;
         }
 
         const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
@@ -206,8 +212,8 @@ export class SpeedArbitrageStrategy {
             priceNo
         );
 
-        // Require slightly higher edge for stale data to cover spread/risk
-        const minEdge = 0.05; // 5% edge for speed arb
+        // Speed arb: lower edge threshold (2%) — stale price IS the edge
+        const minEdge = 0.02;
 
         if (edge && Math.abs(edge.adjustedEdge) >= minEdge) {
             logger.info(`🚀 SPEED ARB OPPORTUNITY DETECTED:`, {
@@ -216,9 +222,22 @@ export class SpeedArbitrageStrategy {
                 sigma: sigma.toFixed(1),
                 edge: (edge.adjustedEdge * 100).toFixed(1) + '%',
                 price: (priceYes * 100).toFixed(1) + '%',
+                daysToEvent: daysToEvent.toFixed(1),
+                uncertainty: uncertainty.toFixed(1),
             });
 
-            return this.entryOptimizer.optimizeEntry(edge);
+            // Build minimal EntrySignal directly — skip EntryOptimizer for speed
+            return {
+                marketId: edge.marketId,
+                side: edge.side,
+                size: config.maxPositionSize,
+                orderType: 'MARKET' as const,
+                urgency: 'HIGH' as const,
+                estimatedEdge: edge.adjustedEdge,
+                confidence: edge.confidence,
+                reason: `SPEED ARB: ${sigma.toFixed(1)}σ, edge ${(edge.adjustedEdge * 100).toFixed(1)}%`,
+                isGuaranteed: edge.isGuaranteed,
+            };
         }
 
         return null;

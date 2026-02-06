@@ -33,6 +33,8 @@ import { EntryOptimizer } from '../strategy/entry-optimizer.js';
 import { MarketModel } from '../probability/market-model.js';
 import { MarketImpactModel, LiquidityProfile } from '../strategy/market-impact.js';
 import { CrossMarketArbitrage } from '../strategy/cross-market-arbitrage.js';
+import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
+import { normalCDF } from '../probability/normal-cdf.js';
 
 /**
  * Performance metrics by strategy component
@@ -140,6 +142,17 @@ export class SimulationRunner {
     private correlationSim: CorrelationSimulation;
     private correlatedMarketGroups: Map<string, string[]> = new Map();
 
+    // Speed Arbitrage
+    private speedArbEnabled: boolean = false;
+    private speedArbStrategy: SpeedArbitrageStrategy;
+    private speedArbStats = {
+        tradesExecuted: 0,
+        totalPnl: 0,
+        lastTradeTime: null as Date | null,
+        opportunitiesDetected: 0,
+        opportunitiesSkipped: 0,
+    };
+
     constructor(startingCapital: number = 10000, maxCycles: number = 20) {
         logger.info(`[SimulationRunner] Initializing v3 with startingCapital: $${startingCapital}`);
 
@@ -157,6 +170,9 @@ export class SimulationRunner {
             config.maxPositionSize
         );
         this.crossMarketArbitrage = new CrossMarketArbitrage();
+
+        // Initialize Speed Arbitrage Strategy
+        this.speedArbStrategy = new SpeedArbitrageStrategy(this.store);
 
         // Initialize Simulator
         this.simulator = new PortfolioSimulator(startingCapital);
@@ -909,25 +925,43 @@ export class SimulationRunner {
         return this.optimizationParameters.map(p => ({ ...p }));
     }
 
-    updateSettings(settings: { takeProfit: number; stopLoss: number; skipPriceCheck?: boolean }): void {
-        // Convert percentage (e.g. 5) to fraction (0.05) if needed, but assuming input is fraction or %?
-        // Let's assume input is raw number from UI (e.g. 5 for 5%) -> div 100
-        // OR input is already fraction.
-        // Let's standardize: UI sends PERCENTAGE (5, 10). We convert to fraction here.
-        // Wait, standard is fraction in optimizer. I'll document input as fraction.
-
+    updateSettings(settings: { takeProfit: number; stopLoss: number; skipPriceCheck?: boolean; speedArbEnabled?: boolean }): void {
         this.exitOptimizer.updateConfig(settings.takeProfit, settings.stopLoss);
 
-        // Update skipPriceCheck if provided (not applicable for confidence compression)
-        // The new strategy doesn't use skipPriceCheck as it relies on stability analysis
+        if (typeof settings.speedArbEnabled === 'boolean') {
+            this.setSpeedArbEnabled(settings.speedArbEnabled);
+        }
 
         logger.info('Simulation settings updated');
     }
 
-    getSettings(): { takeProfit: number; stopLoss: number; skipPriceCheck: boolean } {
+    getSettings(): { takeProfit: number; stopLoss: number; skipPriceCheck: boolean; speedArbEnabled: boolean } {
         return {
             ...this.exitOptimizer.getConfig(),
-            skipPriceCheck: false // Not applicable for confidence compression strategy
+            skipPriceCheck: this.speedArbEnabled,
+            speedArbEnabled: this.speedArbEnabled,
+        };
+    }
+
+    /**
+     * Enable/disable speed arbitrage mode
+     */
+    setSpeedArbEnabled(enabled: boolean): void {
+        this.speedArbEnabled = enabled;
+        logger.info(`⚡ Speed Arbitrage mode ${enabled ? 'ENABLED' : 'DISABLED'}`);
+    }
+
+    /**
+     * Get speed arbitrage stats for dashboard
+     */
+    getSpeedArbStats(): { enabled: boolean; trades: number; pnl: number; opportunities: number; skipped: number; lastTradeTime: Date | null } {
+        return {
+            enabled: this.speedArbEnabled,
+            trades: this.speedArbStats.tradesExecuted,
+            pnl: this.speedArbStats.totalPnl,
+            opportunities: this.speedArbStats.opportunitiesDetected,
+            skipped: this.speedArbStats.opportunitiesSkipped,
+            lastTradeTime: this.speedArbStats.lastTradeTime,
         };
     }
 
@@ -945,20 +979,143 @@ export class SimulationRunner {
 
     /**
      * Execute opportunity immediately when forecast changes (bypass cycle loop)
+     * When speedArbEnabled: uses SpeedArbitrageStrategy for instant execution
+     * When disabled: falls back to ConfidenceCompression strategy
      */
     private async executeImmediateOpportunity(marketId: string): Promise<void> {
+        const executionStart = Date.now();
         const state = this.store.getMarketState(marketId);
         if (!state) return;
 
         // Update prices first to get latest market data
         this.updatePortfolioPrices();
 
-        // Get signals for this specific market
+        // =====================================================
+        // SPEED ARBITRAGE FAST PATH
+        // =====================================================
+        if (this.speedArbEnabled) {
+            this.speedArbStats.opportunitiesDetected++;
+
+            const forecast = state.lastForecast;
+            if (!forecast || !forecast.valueChanged) {
+                this.speedArbStats.opportunitiesSkipped++;
+                return;
+            }
+
+            const market = state.market;
+            let threshold = market.threshold;
+            if (threshold === undefined) return;
+            if (market.thresholdUnit === 'C') {
+                threshold = (threshold * 9 / 5) + 32;
+            }
+
+            // Dynamic uncertainty based on days to event
+            let uncertainty: number;
+            const daysToEvent = market.targetDate
+                ? Math.max(0, (new Date(market.targetDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+                : 3;
+            switch (market.metricType) {
+                case 'temperature_high':
+                case 'temperature_low':
+                case 'temperature_threshold':
+                    uncertainty = 1.5 + 0.8 * daysToEvent;
+                    break;
+                default:
+                    uncertainty = 3 + 1.0 * daysToEvent;
+            }
+
+            const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
+
+            // Speed arb accepts lower sigma (0.3) — we're trading on stale price
+            if (sigma < 0.3) {
+                this.speedArbStats.opportunitiesSkipped++;
+                return;
+            }
+
+            // Calculate probability using CDF
+            const z = (forecast.forecastValue - threshold) / uncertainty;
+            let forecastProb: number;
+            if (market.comparisonType === 'above') {
+                forecastProb = normalCDF(z);
+            } else if (market.comparisonType === 'below') {
+                forecastProb = 1 - normalCDF(z);
+            } else {
+                return;
+            }
+
+            // Get current market price (stale — that's the opportunity)
+            const priceYes = market.yesPrice;
+            const priceNo = market.noPrice;
+
+            // Calculate edge directly — no EdgeCalculator overhead
+            const edgeYes = forecastProb - priceYes;
+            const edgeNo = (1 - forecastProb) - priceNo;
+
+            let side: 'yes' | 'no';
+            let edge: number;
+            if (edgeYes > edgeNo) {
+                side = 'yes';
+                edge = edgeYes;
+            } else {
+                side = 'no';
+                edge = edgeNo;
+            }
+
+            // Speed arb accepts 2% minimum edge (stale price IS the edge)
+            const SPEED_ARB_MIN_EDGE = 0.02;
+            if (edge < SPEED_ARB_MIN_EDGE) {
+                this.speedArbStats.opportunitiesSkipped++;
+                logger.debug(`⚡ Speed arb skipped: edge ${(edge * 100).toFixed(1)}% < ${(SPEED_ARB_MIN_EDGE * 100)}% for ${market.market.question.substring(0, 40)}`);
+                return;
+            }
+
+            // Check if we already have a position on this side
+            const existingPos = this.simulator.getAllPositions().find(p => p.marketId === marketId && p.side === side);
+            if (existingPos) {
+                this.speedArbStats.opportunitiesSkipped++;
+                return;
+            }
+
+            // Full position size for speed arb — max conviction
+            const size = config.maxPositionSize;
+            if (size < 5) return;
+
+            try {
+                const position = this.simulator.openPosition({
+                    market: state.market,
+                    forecastProbability: forecastProb,
+                    marketProbability: priceYes,
+                    edge: edge,
+                    action: side === 'yes' ? 'buy_yes' : 'buy_no',
+                    confidence: Math.min(1, sigma / 3),
+                    reason: `⚡ SPEED ARB: ${sigma.toFixed(1)}σ, edge ${(edge * 100).toFixed(1)}%, forecast ${forecast.forecastValue.toFixed(1)} vs threshold ${threshold}`,
+                    weatherDataSource: 'noaa',
+                    isGuaranteed: sigma >= 3,
+                    snapshotYesPrice: priceYes,
+                    snapshotNoPrice: priceNo,
+                    snapshotTimestamp: new Date(),
+                }, size);
+
+                if (position) {
+                    const latencyMs = Date.now() - executionStart;
+                    this.speedArbStats.tradesExecuted++;
+                    this.speedArbStats.lastTradeTime = new Date();
+                    this.speedArbStrategy.markOpportunityCaptured(marketId, forecast.forecastValue);
+                    logger.info(`⚡ SPEED ARB EXECUTED in ${latencyMs}ms: ${position.id} | ${side.toUpperCase()} | edge ${(edge * 100).toFixed(1)}% | size $${size} | ${market.market.question.substring(0, 50)}`);
+                }
+            } catch (e) {
+                logger.error(`Exception in speed arb execution: ${(e as Error).message}`);
+            }
+            return;
+        }
+
+        // =====================================================
+        // CONFIDENCE COMPRESSION FALLBACK PATH
+        // =====================================================
         const allSignals = this.strategy.detectOpportunities();
         const marketSignals = allSignals.filter(s => s.marketId === marketId);
 
         for (const signal of marketSignals) {
-            // Check if we already have a position
             const existingPos = this.simulator.getAllPositions().find(p => p.marketId === signal.marketId && p.side === signal.side);
             if (existingPos) continue;
 

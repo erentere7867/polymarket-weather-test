@@ -142,7 +142,7 @@ dashboardApp.get('/api/positions/closed', (req, res) => {
 
 // 5. Settings Update
 dashboardApp.post('/api/settings', (req, res) => {
-    const { takeProfit, stopLoss, skipPriceCheck } = req.body;
+    const { takeProfit, stopLoss, skipPriceCheck, speedArbEnabled } = req.body;
 
     if (typeof takeProfit !== 'number' || typeof stopLoss !== 'number') {
         return res.status(400).json({ error: 'Invalid settings format. Expected numbers for takeProfit and stopLoss (percentages).' });
@@ -153,7 +153,8 @@ dashboardApp.post('/api/settings', (req, res) => {
     runner.updateSettings({
         takeProfit: takeProfit / 100,
         stopLoss: stopLoss / 100,
-        skipPriceCheck: typeof skipPriceCheck === 'boolean' ? skipPriceCheck : undefined
+        skipPriceCheck: typeof skipPriceCheck === 'boolean' ? skipPriceCheck : undefined,
+        speedArbEnabled: typeof speedArbEnabled === 'boolean' ? speedArbEnabled : undefined,
     });
 
     res.json({ success: true, message: 'Settings updated' });
@@ -166,9 +167,25 @@ dashboardApp.get('/api/settings', (req, res) => {
         takeProfit: settings.takeProfit * 100,
         stopLoss: settings.stopLoss * 100,
         skipPriceCheck: settings.skipPriceCheck,
+        speedArbEnabled: settings.speedArbEnabled,
         cacheTtlMs: runner.getCacheTtl(),
         pollIntervalMs: runner.getPollInterval()
     });
+});
+
+// 5b. Speed Arbitrage Toggle (dedicated endpoint)
+dashboardApp.post('/api/speed-arb/toggle', (req, res) => {
+    const { enabled } = req.body;
+    if (typeof enabled !== 'boolean') {
+        return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
+    runner.setSpeedArbEnabled(enabled);
+    res.json({ success: true, enabled, message: `Speed Arbitrage ${enabled ? 'ENABLED' : 'DISABLED'}` });
+});
+
+// 5c. Speed Arbitrage Stats
+dashboardApp.get('/api/speed-arb/stats', (req, res) => {
+    res.json(runner.getSpeedArbStats());
 });
 
 // 7. Cache TTL Control (Dynamic adjustment)
