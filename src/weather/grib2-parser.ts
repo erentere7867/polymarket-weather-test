@@ -412,11 +412,16 @@ export class GRIB2Parser {
         ];
         for (const candidate of candidates) {
             try {
-                execSync(`${candidate} -version`, { stdio: 'ignore' });
+                // Use -config (exits 0) instead of -version (exits non-zero)
+                execSync(`${candidate} -config`, { stdio: 'ignore', timeout: 5000 });
                 logger.info(`[GRIB2Parser] wgrib2 found at '${candidate}' — using fast batch extraction for all models`);
                 return candidate;
             } catch {
-                // Try next candidate
+                // If it's an absolute path, check if the file exists as fallback
+                if (candidate.startsWith('/') && existsSync(candidate)) {
+                    logger.info(`[GRIB2Parser] wgrib2 binary exists at '${candidate}' — using fast batch extraction for all models`);
+                    return candidate;
+                }
             }
         }
         logger.warn('[GRIB2Parser] wgrib2 not found in PATH or common locations — will use ecCodes (grib_get) fallback');
