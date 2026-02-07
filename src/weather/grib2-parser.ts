@@ -401,12 +401,18 @@ export class GRIB2Parser {
 
     /**
      * Check if wgrib2 is available
+     * Note: wgrib2 -version returns exit code 8, so we check if it runs at all
      */
     private checkWgrib2Available(): boolean {
         try {
-            execSync('wgrib2 -version', { stdio: 'ignore' });
+            execSync('wgrib2 -version', { stdio: 'pipe' });
             return true;
-        } catch {
+        } catch (error: any) {
+            // wgrib2 returns exit code 8 for -version but still works fine
+            // Check if error has stdout (meaning wgrib2 ran but returned non-zero)
+            if (error.stdout && error.stdout.toString().includes('v3.')) {
+                return true;
+            }
             return false;
         }
     }
