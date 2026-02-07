@@ -1,4 +1,3 @@
-<<<<<<< C:/antigravity projects/polymarket-weather/src/bot/manager.ts
 /**
  * Bot Manager
  * Main orchestrator for the weather arbitrage bot
@@ -706,43 +705,7 @@ export class BotManager {
 }
 
 export default BotManager;
-=======
-/**
- * Bot Manager
- * Main orchestrator for the weather arbitrage bot
- * 
- * Integrated Features:
- * - Cross-Market Arbitrage detection and execution
- * - Market Impact Model for slippage estimation
- * - Hybrid Weather Controller for adaptive detection windows
- * - Performance tracking by data source and strategy component
- * - Enhanced order execution with position scaling
- */
 
-import { WeatherScanner } from '../polymarket/weather-scanner.js';
-import { TradingClient } from '../polymarket/clob-client.js';
-import { OpportunityDetector } from './opportunity-detector.js';
-import { OrderExecutor } from './order-executor.js';
-import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
-import { ConfidenceCompressionStrategy } from '../strategy/confidence-compression-strategy.js';
-import { EntrySignal } from '../strategy/entry-optimizer.js';
-import { DataStore } from '../realtime/data-store.js';
-import { PriceTracker } from '../realtime/price-tracker.js';
-import { ForecastMonitor } from '../realtime/forecast-monitor.js';
-import { FileBasedIngestion } from '../weather/file-based-ingestion.js';
-import { HybridWeatherController } from '../realtime/hybrid-weather-controller.js';
-import { CrossMarketArbitrage, CorrelatedMarketPair } from '../strategy/cross-market-arbitrage.js';
-import { MarketImpactModel, LiquidityProfile } from '../strategy/market-impact.js';
-import { EntryOptimizer } from '../strategy/entry-optimizer.js';
-import { ExitOptimizer } from '../strategy/exit-optimizer.js';
-import { MarketModel } from '../probability/market-model.js';
-import { config, validateConfig } from '../config.js';
-import { logger } from '../logger.js';
-import { TradingOpportunity, ParsedWeatherMarket } from '../polymarket/types.js';
-import { eventBus } from '../realtime/event-bus.js';
-import { forecastStateMachine } from '../realtime/forecast-state-machine.js';
-
-interface BotStats {
     startTime: Date;
     cyclesCompleted: number;
     marketsScanned: number;
@@ -1413,5 +1376,3 @@ export class BotManager {
     }
 }
 
-export default BotManager;
->>>>>>> C:/Users/ozgur/.windsurf/worktrees/polymarket-weather/polymarket-weather-5909a3fa/src/bot/manager.ts
