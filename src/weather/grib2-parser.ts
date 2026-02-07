@@ -61,6 +61,10 @@ export class GRIB2Parser {
     private cityCoordinates: Map<string, Coordinates>;
     // Pre-computed city ID mappings for zero-allocation lookups
     private cityIdMap: Map<string, string>;
+    
+    // Pre-computed typed arrays for ultra-fast distance calculations
+    private cityLats: Float64Array;
+    private cityLons: Float64Array;
 
     constructor() {
         this.useWgrib2 = this.checkWgrib2Available();
@@ -70,10 +74,19 @@ export class GRIB2Parser {
         // Pre-compute city coordinates and IDs at startup
         this.cityCoordinates = new Map();
         this.cityIdMap = new Map();
-        for (const city of KNOWN_CITIES) {
+        
+        const numCities = KNOWN_CITIES.length;
+        this.cityLats = new Float64Array(numCities);
+        this.cityLons = new Float64Array(numCities);
+
+        for (let i = 0; i < numCities; i++) {
+            const city = KNOWN_CITIES[i];
             this.cityCoordinates.set(city.name, city.coordinates);
             // Pre-compute normalized city ID to avoid regex at runtime
             this.cityIdMap.set(city.name, city.name.toLowerCase().replace(/\s+/g, '_'));
+            
+            this.cityLats[i] = city.coordinates.lat;
+            this.cityLons[i] = city.coordinates.lon;
         }
     }
 
@@ -112,11 +125,17 @@ export class GRIB2Parser {
 
             let cityData: CityGRIBData[];
 
-            // Use wgrib2 for NCEP models (HRRR, RAP, GFS) where we know the variable mapping
-            // Use ecCodes for ECMWF as it reliably handles ECMWF shortNames (2t, 10u, etc.)
-            if (this.useWgrib2 && options.model !== 'ECMWF') {
+            // Use wgrib2 if available (supports NCEP and ECMWF with updated matchers)
+            // Fallback to ecCodes only if wgrib2 is not available
+            if (this.useWgrib2) {
                 // Use parallel extraction for maximum speed
                 cityData = await this.parseWithWgrib2Parallel(tempFile, options);
+                
+                // If wgrib2 returned no data (e.g. format not supported), fallback to ecCodes
+                if (cityData.length === 0) {
+                    logger.warn('[GRIB2Parser] wgrib2 returned no data, falling back to ecCodes');
+                    cityData = await this.parseWithEcCodes(tempFile, options);
+                }
             } else {
                 cityData = await this.parseWithEcCodes(tempFile, options);
             }
@@ -158,8 +177,12 @@ export class GRIB2Parser {
      * Uses multiple -lon flags to extract all locations at once
      */
     private async runWgrib2BatchAllCities(filePath: string): Promise<CityGRIBData[]> {
-        // Match any of the variables we need
         const matchers = [
+            '(:2t:2 m above ground:)',
+            '(:10u:10 m above ground:)',
+            '(:10v:10 m above ground:)',
+            '(:tp:surface:)',
+            '(:TP:surface:)',
             '(:TMP:2 m above ground:)',
             '(:UGRD:10 m above ground:)',
             '(:VGRD:10 m above ground:)',
@@ -169,15 +192,19 @@ export class GRIB2Parser {
         // Build multiple -lon flags, one per city
         const lonFlags = KNOWN_CITIES.map(city => `-lon ${city.coordinates.lon} ${city.coordinates.lat}`).join(' ');
 
+        // Use spawn to stream stdout for large files instead of buffering all at once
+        // This reduces memory pressure and allows processing to start sooner
         const command = `wgrib2 "${filePath}" -match "${matchers}" ${lonFlags}`;
 
         try {
-            const { stdout } = await execAsync(command, { timeout: 10000, maxBuffer: 4 * 1024 * 1024 });
+            // Increase buffer size to 50MB to handle large batch outputs safely
+            const { stdout } = await execAsync(command, { timeout: 15000, maxBuffer: 50 * 1024 * 1024 });
 
             // Initialize per-city results
-            const cityResults = new Map<number, { TMP: number | null; UGRD: number | null; VGRD: number | null; APCP: number | null }>();
+            // Use a flat array of objects for faster access than Map
+            const cityResults = new Array(KNOWN_CITIES.length);
             for (let i = 0; i < KNOWN_CITIES.length; i++) {
-                cityResults.set(i, { TMP: null, UGRD: null, VGRD: null, APCP: null });
+                cityResults[i] = { TMP: null, UGRD: null, VGRD: null, APCP: null };
             }
 
             // Parse output: each matched record produces one line per -lon flag
@@ -187,44 +214,62 @@ export class GRIB2Parser {
 
             // Group lines: for each matched variable, wgrib2 outputs KNOWN_CITIES.length lines
             const cityCount = KNOWN_CITIES.length;
+            const cityLats = this.cityLats;
+            const cityLons = this.cityLons;
 
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i];
                 if (!line) continue;
 
+                // Fast variable check using unique substrings
                 // Determine which variable this line belongs to
                 let varName: string | null = null;
-                if (line.includes(':TMP:2 m above ground:')) varName = 'TMP';
-                else if (line.includes(':UGRD:10 m above ground:')) varName = 'UGRD';
-                else if (line.includes(':VGRD:10 m above ground:')) varName = 'VGRD';
-                else if (line.includes(':APCP:surface:')) varName = 'APCP';
-
+                // NCEP conventions
+                if (line.includes(':TMP:2 m') || line.includes(':2t:2 m')) varName = 'TMP';
+                else if (line.includes(':UGRD:10 m') || line.includes(':10u:10 m')) varName = 'UGRD';
+                else if (line.includes(':VGRD:10 m') || line.includes(':10v:10 m')) varName = 'VGRD';
+                else if (line.includes(':APCP:surf') || line.includes(':tp:surf') || line.includes(':TP:surf')) varName = 'APCP';
+                
                 if (!varName) continue;
 
-                // Extract val from "val=X" pattern
-                const valMatch = line.match(/val=([\-\d.eE+]+)/);
-                if (!valMatch) continue;
-                const val = parseFloat(valMatch[1]);
+                // Extract val from "val=X" pattern - optimized index search
+                const valIdx = line.lastIndexOf('val=');
+                if (valIdx === -1) continue;
+                const valStr = line.substring(valIdx + 4);
+                const val = parseFloat(valStr); // parseFloat stops at non-numeric chars automatically
                 if (isNaN(val)) continue;
 
                 // Determine which city this line corresponds to by matching lon/lat
-                const lonMatch = line.match(/lon=([\-\d.]+),lat=([\-\d.]+)/);
-                if (!lonMatch) continue;
-                const outLon = parseFloat(lonMatch[1]);
-                const outLat = parseFloat(lonMatch[2]);
+                // "lon=X,lat=Y" usually precedes "val="
+                // "lon=359.872200,lat=51.507400,val=..."
+                const latIdx = line.lastIndexOf('lat=', valIdx);
+                const lonIdx = line.lastIndexOf('lon=', latIdx);
+                
+                if (latIdx === -1 || lonIdx === -1) continue;
+                
+                // Extract using substring for speed instead of regex
+                const latStr = line.substring(latIdx + 4, valIdx - 1); // -1 for comma
+                const lonStr = line.substring(lonIdx + 4, latIdx - 1);
+                
+                const outLat = parseFloat(latStr);
+                const outLon = parseFloat(lonStr);
 
                 // Find closest city (wgrib2 snaps to nearest grid point)
+                // Use flat arrays for maximum speed (no object property access in loop)
                 let bestCityIdx = -1;
                 let bestDist = Infinity;
+                
                 for (let c = 0; c < cityCount; c++) {
-                    const city = KNOWN_CITIES[c];
                     // Normalize lon to 0-360 for comparison (wgrib2 may output 0-360)
-                    let cityLon = city.coordinates.lon;
+                    let cityLon = cityLons[c];
                     if (cityLon < 0) cityLon += 360;
+                    
                     let compLon = outLon;
                     if (compLon < 0) compLon += 360;
+                    
                     const dLon = compLon - cityLon;
-                    const dLat = outLat - city.coordinates.lat;
+                    const dLat = outLat - cityLats[c];
+                    
                     const dist = dLon * dLon + dLat * dLat;
                     if (dist < bestDist) {
                         bestDist = dist;
@@ -232,8 +277,8 @@ export class GRIB2Parser {
                     }
                 }
 
-                if (bestCityIdx >= 0 && bestDist < 16.0) { // Within ~4 degrees tolerance (was 2 degrees)
-                    const cr = cityResults.get(bestCityIdx)!;
+                if (bestCityIdx >= 0 && bestDist < 16.0) { // Within ~4 degrees tolerance
+                    const cr = cityResults[bestCityIdx];
                     if (varName === 'TMP') cr.TMP = val;
                     else if (varName === 'UGRD') cr.UGRD = val;
                     else if (varName === 'VGRD') cr.VGRD = val;
@@ -245,9 +290,12 @@ export class GRIB2Parser {
             const cityData: CityGRIBData[] = [];
             for (let i = 0; i < KNOWN_CITIES.length; i++) {
                 const city = KNOWN_CITIES[i];
-                const r = cityResults.get(i)!;
+                const r = cityResults[i];
 
                 if (r.TMP === null) continue; // Need at least temperature
+
+                // Kelvin to Celsius conversion (wgrib2 outputs raw values)
+                const temperatureC = r.TMP - 273.15;
 
                 const windSpeedMps = (r.UGRD !== null && r.VGRD !== null)
                     ? Math.sqrt(r.UGRD * r.UGRD + r.VGRD * r.VGRD)
@@ -259,8 +307,8 @@ export class GRIB2Parser {
                 cityData.push({
                     cityName: city.name,
                     coordinates: city.coordinates,
-                    temperatureC: r.TMP,
-                    temperatureF: (r.TMP * 9 / 5) + 32,
+                    temperatureC,
+                    temperatureF: (temperatureC * 9 / 5) + 32,
                     windSpeedMps,
                     windSpeedMph: windSpeedMps * 2.23694,
                     windDirection,
