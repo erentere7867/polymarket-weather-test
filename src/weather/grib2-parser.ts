@@ -180,15 +180,11 @@ export class GRIB2Parser {
         // Build multiple -lon flags, one per city
         const lonFlags = KNOWN_CITIES.map(city => `-lon ${city.coordinates.lon} ${city.coordinates.lat}`).join(' ');
 
-        const command = `${this.wgrib2Path} "${filePath}" -match "${matchers}" ${lonFlags}`;
-        logger.debug(`[GRIB2Parser] wgrib2 command: ${command.substring(0, 200)}...`);
+        // -s includes short inventory (variable names) in output alongside -lon values
+        const command = `${this.wgrib2Path} "${filePath}" -s -match "${matchers}" ${lonFlags}`;
 
         try {
-            const { stdout, stderr } = await execAsync(command, { timeout: 10000, maxBuffer: 4 * 1024 * 1024 });
-
-            if (stderr && stderr.trim()) {
-                logger.warn(`[GRIB2Parser] wgrib2 stderr: ${stderr.trim().substring(0, 300)}`);
-            }
+            const { stdout } = await execAsync(command, { timeout: 10000, maxBuffer: 4 * 1024 * 1024 });
 
             // Initialize per-city results
             const cityResults = new Map<number, { TMP: number | null; UGRD: number | null; VGRD: number | null; APCP: number | null }>();
@@ -200,7 +196,6 @@ export class GRIB2Parser {
             // Format: "recNum:offset:date VAR LEVEL:lon=X,lat=Y,val=Z"
             // With multiple -lon flags, each record outputs N lines (one per -lon)
             const lines = stdout.trim().split('\n');
-            logger.info(`[GRIB2Parser] wgrib2 output: ${lines.length} lines, first: ${lines[0]?.substring(0, 150) ?? '(empty)'}`);
 
             // Group lines: for each matched variable, wgrib2 outputs KNOWN_CITIES.length lines
             const cityCount = KNOWN_CITIES.length;
@@ -288,30 +283,9 @@ export class GRIB2Parser {
                 });
             }
 
-            if (cityData.length === 0 && lines.length > 0) {
-                logger.warn(`[GRIB2Parser] wgrib2 got ${lines.length} output lines but matched 0 cities — checking variable names...`);
-                // Log a sample of unique variable patterns for debugging
-                const varSamples = new Set<string>();
-                for (const line of lines.slice(0, 20)) {
-                    const m = line.match(/:\w+:[^:]*:/);
-                    if (m) varSamples.add(m[0]);
-                }
-                logger.warn(`[GRIB2Parser] Variable patterns in output: ${[...varSamples].join(', ')}`);
-            }
-
             return cityData;
-        } catch (error: any) {
-            // Log stderr from the failed command for debugging
-            const stderr = error.stderr ? error.stderr.toString().substring(0, 300) : '';
-            logger.error(`[GRIB2Parser] wgrib2 batch extraction failed: ${error.message}`);
-            if (stderr) logger.error(`[GRIB2Parser] wgrib2 stderr: ${stderr}`);
-
-            // Run inventory of variables in the file for debugging
-            try {
-                const { stdout: inventory } = await execAsync(`${this.wgrib2Path} "${filePath}" -s | head -10`, { timeout: 5000 });
-                logger.info(`[GRIB2Parser] File inventory (first 10 records): ${inventory.trim().substring(0, 500)}`);
-            } catch { /* ignore */ }
-
+        } catch (error) {
+            logger.error(`[GRIB2Parser] wgrib2 batch extraction failed: ${error}`);
             return [];
         }
     }
