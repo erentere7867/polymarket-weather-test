@@ -24,7 +24,8 @@ module.exports = {
             env: {
                 NODE_ENV: "production",
                 DASHBOARD_PORT: 8034,
-                LOG_LEVEL: "info"
+                LOG_LEVEL: "info",
+                PATH: "/usr/local/bin:/usr/bin:/bin"
             }
         }
     ]
