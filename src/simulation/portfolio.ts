@@ -45,6 +45,15 @@ export interface PortfolioStats {
     largestLoss: number;
     currentExposure: number;
     maxDrawdown: number;
+    
+    // New: Kelly heat management stats
+    kellyHeat: number;
+    kellyHeatPercent: number;
+    maxKellyHeat: number;
+    exposurePercent: number;
+    cashReservePercent: number;
+    recentWinRate: number;  // Last 20 trades
+    avgEdgeRealized: number;  // Average edge on realized trades
 }
 
 export interface TradeRecord {
@@ -58,6 +67,16 @@ export interface TradeRecord {
     value: number;
     reason: string;
     pnl?: number;
+    kellyFraction?: number;
+    edge?: number;
+}
+
+export interface KellyPortfolioConfig {
+    maxTotalExposure: number;      // Max % of portfolio in positions
+    maxKellyHeat: number;          // Max sum of Kelly fractions
+    minCashReserve: number;        // Minimum % cash reserve
+    concentrationFactor: number;   // Multiplier for concentration
+    correlationPenalty: number;    // Penalty per correlated position
 }
 
 export class PortfolioSimulator {
@@ -74,6 +93,22 @@ export class PortfolioSimulator {
     private maxExposurePerMarketDay: number = 100;    // $100 max per market day
     private cityExposure: Map<string, number> = new Map();
     private marketDayExposure: Map<string, number> = new Map(); // key: city:date
+    
+    // Kelly-based portfolio heat management
+    private kellyPortfolioConfig: KellyPortfolioConfig = {
+        maxTotalExposure: 0.50,      // Max 50% of portfolio in open positions
+        maxKellyHeat: 0.30,          // Max 30% Kelly sum across all positions
+        minCashReserve: 0.10,        // Minimum 10% cash reserve
+        concentrationFactor: 1.5,    // Allow concentration in best opportunities
+        correlationPenalty: 0.10     // Penalty per correlated position
+    };
+    
+    // Track position Kelly fractions for heat calculation
+    private positionKellyFractions: Map<string, number> = new Map();
+    
+    // Track realized performance for Kelly adjustment
+    private recentTrades: { pnl: number; edge: number; timestamp: Date }[] = [];
+    private readonly MAX_RECENT_TRADES = 50;
 
     constructor(startingCash: number = 10000) {
         this.startingCash = startingCash;
@@ -83,11 +118,121 @@ export class PortfolioSimulator {
 
 
     /**
+     * Check Kelly-based heat constraints
+     */
+    private checkKellyHeat(
+        positionSize: number,
+        kellyFraction: number,
+        opportunity: TradingOpportunity
+    ): { allowed: boolean; adjustedSize: number; reason?: string } {
+        const portfolioValue = this.getTotalValue();
+        const currentExposure = this.getCurrentExposure();
+        const kellyHeat = this.getKellyHeat();
+        
+        // Check 1: Total exposure limit
+        const exposureAfterTrade = currentExposure + positionSize;
+        const exposureRatio = exposureAfterTrade / portfolioValue;
+        
+        if (exposureRatio > this.kellyPortfolioConfig.maxTotalExposure) {
+            // Scale down to fit within exposure limit
+            const maxAllowedExposure = portfolioValue * this.kellyPortfolioConfig.maxTotalExposure;
+            const adjustedSize = Math.max(0, maxAllowedExposure - currentExposure);
+            
+            if (adjustedSize < 5) {
+                return { allowed: false, adjustedSize: 0, reason: 'Max portfolio exposure reached' };
+            }
+            
+            return { allowed: true, adjustedSize, reason: 'Scaled to fit exposure limit' };
+        }
+        
+        // Check 2: Kelly heat limit
+        const kellyAfterTrade = kellyHeat + kellyFraction;
+        
+        if (kellyAfterTrade > this.kellyPortfolioConfig.maxKellyHeat) {
+            // Scale down Kelly fraction
+            const maxAdditionalKelly = this.kellyPortfolioConfig.maxKellyHeat - kellyHeat;
+            const kellyRatio = Math.max(0.1, maxAdditionalKelly / kellyFraction);
+            const adjustedSize = positionSize * kellyRatio;
+            
+            if (adjustedSize < 5) {
+                return { allowed: false, adjustedSize: 0, reason: 'Max Kelly heat reached' };
+            }
+            
+            return { allowed: true, adjustedSize, reason: 'Scaled to fit Kelly heat limit' };
+        }
+        
+        // Check 3: Cash reserve limit
+        const cashAfterTrade = this.cash - positionSize;
+        const cashReserveRatio = cashAfterTrade / portfolioValue;
+        
+        if (cashReserveRatio < this.kellyPortfolioConfig.minCashReserve) {
+            const minCash = portfolioValue * this.kellyPortfolioConfig.minCashReserve;
+            const adjustedSize = Math.max(0, this.cash - minCash);
+            
+            if (adjustedSize < 5) {
+                return { allowed: false, adjustedSize: 0, reason: 'Minimum cash reserve required' };
+            }
+            
+            return { allowed: true, adjustedSize, reason: 'Scaled to maintain cash reserve' };
+        }
+        
+        // Check 4: Concentration bonus for high-edge opportunities
+        if (opportunity.edge > 0.10 && kellyFraction > 0.20) {
+            const boostedSize = positionSize * this.kellyPortfolioConfig.concentrationFactor;
+            return { allowed: true, adjustedSize: boostedSize, reason: 'Concentration bonus applied' };
+        }
+        
+        return { allowed: true, adjustedSize: positionSize };
+    }
+
+    /**
+     * Get current total exposure
+     */
+    private getCurrentExposure(): number {
+        let exposure = 0;
+        for (const position of this.positions.values()) {
+            if (position.status === 'open') {
+                exposure += position.shares * position.entryPrice;
+            }
+        }
+        return exposure;
+    }
+
+    /**
+     * Get current Kelly heat (sum of all position Kelly fractions)
+     */
+    private getKellyHeat(): number {
+        let heat = 0;
+        for (const kelly of this.positionKellyFractions.values()) {
+            heat += kelly;
+        }
+        return heat;
+    }
+
+    /**
+     * Record trade result for Kelly adjustment
+     */
+    recordTradeResult(pnl: number, edge: number): void {
+        this.recentTrades.push({
+            pnl,
+            edge,
+            timestamp: new Date()
+        });
+        
+        // Keep only recent trades
+        if (this.recentTrades.length > this.MAX_RECENT_TRADES) {
+            this.recentTrades.shift();
+        }
+    }
+
+    /**
      * Open a new position based on opportunity
+     * Enhanced with Kelly-based heat management
      */
     openPosition(
         opportunity: TradingOpportunity,
-        maxPositionSize: number = 10000
+        maxPositionSize: number = 10000,
+        kellyFraction: number = 0.25
     ): SimulatedPosition | null {
         if (opportunity.action === 'none') {
             return null;
@@ -114,6 +259,28 @@ export class PortfolioSimulator {
                 maxPositionSize,
                 this.cash * 0.2 // Max 20% of available cash per trade
             );
+        }
+
+        // Apply Kelly-based heat management
+        const heatCheck = this.checkKellyHeat(positionValue, kellyFraction, opportunity);
+        if (!heatCheck.allowed) {
+            logger.warn(`Position rejected: ${heatCheck.reason}`, {
+                edge: `${(edge * 100).toFixed(1)}%`,
+                kellyFraction: `${(kellyFraction * 100).toFixed(1)}%`
+            });
+            return null;
+        }
+        
+        // Use adjusted size if needed
+        if (heatCheck.adjustedSize < positionValue) {
+            logger.info(`Position scaled: ${heatCheck.reason}`, {
+                original: `$${positionValue.toFixed(2)}`,
+                adjusted: `$${heatCheck.adjustedSize.toFixed(2)}`
+            });
+            positionValue = heatCheck.adjustedSize;
+        } else if (heatCheck.adjustedSize > positionValue) {
+            // Concentration bonus
+            positionValue = heatCheck.adjustedSize;
         }
 
         // Lower minimum position size to $5 (was $10) to capture more opportunities
@@ -171,11 +338,15 @@ export class PortfolioSimulator {
             status: 'open',
         };
 
-        // Deduct cash
+        // Deduct cash and track Kelly fraction
         this.cash -= actualCost;
         this.positions.set(position.id, position);
+        this.positionKellyFractions.set(position.id, kellyFraction);
+        
+        // Track exposure
+        this.trackExposure(opportunity.market.city || 'unknown', opportunity.market.targetDate, actualCost);
 
-        // Record trade
+        // Record trade with Kelly fraction and edge
         this.tradeHistory.push({
             id: `trade_${Date.now()}`,
             timestamp: new Date(),
@@ -186,6 +357,8 @@ export class PortfolioSimulator {
             price: executionPrice,
             value: actualCost,
             reason: opportunity.reason,
+            kellyFraction,
+            edge: opportunity.edge
         });
 
         logger.info(`📈 Opened position: ${position.side.toUpperCase()} ${shares} shares @ $${executionPrice.toFixed(3)}`, {
@@ -245,6 +418,13 @@ export class PortfolioSimulator {
         // Move to closed positions
         this.closedPositions.push(position);
         this.positions.delete(positionId);
+        
+        // Clean up Kelly fraction tracking
+        const kellyFraction = this.positionKellyFractions.get(positionId) || 0;
+        this.positionKellyFractions.delete(positionId);
+        
+        // Record trade result for Kelly adjustment
+        this.recordTradeResult(pnl, 0);  // Edge not available on close
 
         // Record trade
         this.tradeHistory.push({
@@ -386,6 +566,24 @@ export class PortfolioSimulator {
         const averageLoss = losingTrades > 0 ? totalLosses / losingTrades : 0;
         const totalPnL = realizedPnL + unrealizedPnL;
         const totalPnLPercent = (totalPnL / this.startingCash) * 100;
+        
+        // Calculate Kelly heat and exposure
+        const kellyHeat = this.getKellyHeat();
+        const maxKellyHeat = this.kellyPortfolioConfig.maxKellyHeat;
+        const kellyHeatPercent = (kellyHeat / maxKellyHeat) * 100;
+        const exposurePercent = (currentExposure / totalValue) * 100;
+        const cashReservePercent = (this.cash / totalValue) * 100;
+        
+        // Calculate recent win rate (last 20 trades)
+        const recentTrades = this.recentTrades.slice(-20);
+        const recentWins = recentTrades.filter(t => t.pnl > 0).length;
+        const recentWinRate = recentTrades.length > 0 ? (recentWins / recentTrades.length) * 100 : winRate;
+        
+        // Calculate average edge realized
+        const tradesWithEdge = this.recentTrades.filter(t => t.edge !== undefined);
+        const avgEdgeRealized = tradesWithEdge.length > 0
+            ? tradesWithEdge.reduce((sum, t) => sum + (t.edge || 0), 0) / tradesWithEdge.length
+            : 0;
 
         return {
             startingCash: this.startingCash,
@@ -406,6 +604,14 @@ export class PortfolioSimulator {
             largestLoss,
             currentExposure,
             maxDrawdown: this.maxDrawdown,
+            // New: Kelly heat stats
+            kellyHeat,
+            kellyHeatPercent,
+            maxKellyHeat,
+            exposurePercent,
+            cashReservePercent,
+            recentWinRate,
+            avgEdgeRealized
         };
     }
 

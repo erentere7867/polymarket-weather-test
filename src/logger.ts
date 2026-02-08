@@ -27,3 +27,64 @@ export const logger = winston.createLogger({
         }),
     ],
 });
+
+/**
+ * Rate-limited logger wrapper to prevent log spam
+ * Production-ready logging with automatic throttling
+ */
+export class RateLimitedLogger {
+    private lastLogTime: Map<string, number> = new Map();
+    private logCounts: Map<string, number> = new Map();
+    private readonly minIntervalMs: number;
+    private readonly burstLimit: number;
+
+    constructor(minIntervalMs: number = 60000, burstLimit: number = 5) {
+        this.minIntervalMs = minIntervalMs;
+        this.burstLimit = burstLimit;
+    }
+
+    /**
+     * Log a message with rate limiting per key
+     */
+    log(key: string, level: 'info' | 'warn' | 'error' | 'debug', message: string, meta?: Record<string, unknown>): void {
+        const now = Date.now();
+        const lastTime = this.lastLogTime.get(key) || 0;
+        const count = (this.logCounts.get(key) || 0) + 1;
+        
+        this.logCounts.set(key, count);
+
+        const shouldLog = 
+            count <= this.burstLimit || // Allow burst
+            (now - lastTime) >= this.minIntervalMs; // Or interval passed
+
+        if (shouldLog) {
+            if (count > this.burstLimit) {
+                message = `${message} (repeated ${count} times)`;
+                this.logCounts.set(key, 0);
+            }
+            this.lastLogTime.set(key, now);
+            logger.log(level, message, meta);
+        }
+    }
+
+    info(key: string, message: string, meta?: Record<string, unknown>): void {
+        this.log(key, 'info', message, meta);
+    }
+
+    warn(key: string, message: string, meta?: Record<string, unknown>): void {
+        this.log(key, 'warn', message, meta);
+    }
+
+    error(key: string, message: string, meta?: Record<string, unknown>): void {
+        this.log(key, 'error', message, meta);
+    }
+
+    debug(key: string, message: string, meta?: Record<string, unknown>): void {
+        this.log(key, 'debug', message, meta);
+    }
+}
+
+/**
+ * Global rate-limited logger instance (5 min default interval)
+ */
+export const rateLimitedLogger = new RateLimitedLogger(300000, 3);

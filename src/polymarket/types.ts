@@ -112,6 +112,9 @@ export interface TradingOpportunity {
     snapshotYesPrice: number;   // YES price at detection time
     snapshotNoPrice: number;    // NO price at detection time
     snapshotTimestamp: Date;    // When the snapshot was taken
+
+    // Optional: Suggested position size (set by strategy orchestrator)
+    suggestedSize?: number;
 }
 
 /**

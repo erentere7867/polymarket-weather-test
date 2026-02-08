@@ -40,7 +40,7 @@ export interface FileBasedIngestionConfig {
  */
 const DEFAULT_CONFIG: FileBasedIngestionConfig = {
     enabled: true,
-    s3PollIntervalMs: 150,
+    s3PollIntervalMs: 50, // OPTIMIZED: 50ms (was 150ms)
     maxDetectionDurationMs: 45 * 60 * 1000, // 45 minutes
     awsRegion: 'us-east-1',
     publicBuckets: true,

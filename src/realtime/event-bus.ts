@@ -20,7 +20,8 @@ export type EventType =
     | 'FORECAST_CHANGE'
     | 'FORECAST_UPDATED'
     | 'FORECAST_BATCH_UPDATED'
-    | 'RATE_LIMIT_HIT';
+    | 'RATE_LIMIT_HIT'
+    | 'EARLY_TRIGGER_MODE';
 
 // Event payload interfaces
 export interface ForecastTriggerEvent {
@@ -207,6 +208,16 @@ export interface RateLimitHitEvent {
     };
 }
 
+export interface EarlyTriggerModeEvent {
+    type: 'EARLY_TRIGGER_MODE';
+    payload: {
+        model: string;
+        cycleHour: number;
+        minutesUntilExpected: number;
+        aggressivePollIntervalMs: number;
+    };
+}
+
 // Union type of all events
 export type Event =
     | ForecastTriggerEvent
@@ -221,7 +232,8 @@ export type Event =
     | ForecastChangeEvent
     | ForecastUpdatedEvent
     | ForecastBatchUpdatedEvent
-    | RateLimitHitEvent;
+    | RateLimitHitEvent
+    | EarlyTriggerModeEvent;
 
 // Event handler type
 export type EventHandler<T extends Event> = (event: T) => void | Promise<void>;
@@ -266,6 +278,7 @@ export class EventBus {
             'FORECAST_UPDATED',
             'FORECAST_BATCH_UPDATED',
             'RATE_LIMIT_HIT',
+            'EARLY_TRIGGER_MODE',
         ];
         for (const type of eventTypes) {
             this.handlers.set(type, new Set());

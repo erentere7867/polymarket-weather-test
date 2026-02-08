@@ -99,6 +99,74 @@ export interface Config {
     TRACK_CROSS_MARKET_PERFORMANCE: boolean;      // Track cross-market vs single-market (default: true)
     MAX_IMPACT_ESTIMATE_HISTORY: number;          // Max history for impact estimates (default: 100)
     MAX_CONFIDENCE_HISTORY: number;               // Max history for confidence scores (default: 100)
+
+    // =====================================
+    // NEW: Dynamic Kelly Sizing Settings
+    // =====================================
+    KELLY_FRACTION_HIGH: number;                  // Half-Kelly for sigma > 2.0 (default: 0.50)
+    KELLY_FRACTION_MEDIUM: number;                // Quarter-Kelly for 0.5 < sigma < 2.0 (default: 0.25)
+    KELLY_FRACTION_LOW: number;                   // 1/8-Kelly for low confidence (default: 0.125)
+    KELLY_FRACTION_GUARANTEED: number;            // 3/4-Kelly for guaranteed trades (default: 0.75)
+    
+    // =====================================
+    // NEW: Edge Decay Settings
+    // =====================================
+    EDGE_DECAY_HALF_LIFE_MS: number;              // Half-life for edge decay (default: 60000 = 1min)
+    EDGE_DECAY_MAX_AGE_MS: number;                // Max age for trading (default: 180000 = 3min)
+    URGENCY_SIZE_MULTIPLIER: number;              // Max size boost for fresh signals (default: 1.5)
+    
+    // =====================================
+    // NEW: Regime-Based Exit Settings
+    // =====================================
+    ENABLE_REGIME_BASED_EXITS: boolean;           // Enable regime-based exit management (default: true)
+    REGIME_TAKE_PROFIT_TRENDING: number;          // TP in trending markets (default: 0.15)
+    REGIME_STOP_LOSS_TRENDING: number;            // SL in trending markets (default: -0.20)
+    REGIME_TAKE_PROFIT_RANGING: number;           // TP in ranging markets (default: 0.08)
+    REGIME_STOP_LOSS_RANGING: number;             // SL in ranging markets (default: -0.10)
+    ENABLE_PARTIAL_EXITS: boolean;                // Enable partial exit logic (default: true)
+    PARTIAL_EXIT_THRESHOLD: number;               // Profit % to trigger partial exit (default: 0.05)
+    PARTIAL_EXIT_PERCENT: number;                 // % of position to exit (default: 0.50)
+    
+    // =====================================
+    // NEW: Kelly Portfolio Heat Management
+    // =====================================
+    MAX_PORTFOLIO_EXPOSURE: number;               // Max % of portfolio in positions (default: 0.50)
+    MAX_KELLY_HEAT: number;                       // Max sum of Kelly fractions (default: 0.30)
+    MIN_CASH_RESERVE: number;                     // Minimum % cash reserve (default: 0.10)
+    CONCENTRATION_FACTOR: number;                 // Bonus for high-edge opportunities (default: 1.5)
+
+    // =====================================
+    // NEW: Strategy Orchestrator Settings
+    // =====================================
+    ENABLE_STRATEGY_ORCHESTRATOR: boolean;        // Enable multi-strategy orchestration
+    TARGET_WIN_RATE: number;                      // Target win rate (default: 0.80)
+    MIN_WIN_RATE_ADJUSTMENT: number;              // Min win rate before adjusting (default: 0.50)
+    MAX_DAILY_TRADES: number;                     // Max trades per day (default: 50)
+    MAX_DAILY_LOSS_PERCENT: number;               // Max daily loss % (default: 0.05)
+    COMPOUND_RESET_DAYS: number;                  // Days before resetting compound base (default: 30)
+    
+    // Strategy weights
+    STRATEGY_WEIGHT_CERTAINTY: number;            // Certainty arbitrage weight
+    STRATEGY_WEIGHT_CONFIDENCE: number;           // Confidence compression weight
+    STRATEGY_WEIGHT_CROSS_MARKET: number;         // Cross-market lag weight
+    STRATEGY_WEIGHT_TIME_DECAY: number;           // Time decay weight
+    STRATEGY_WEIGHT_DIVERGENCE: number;           // Model divergence weight
+    
+    // Certainty Arbitrage
+    CERTAINTY_SIGMA_THRESHOLD_BASE: number;       // Base sigma threshold (default: 3.0)
+    CERTAINTY_DAYS_TO_EVENT_MAX: number;          // Max days to event (default: 3)
+    CERTAINTY_MIN_EDGE: number;                   // Min edge for certainty trades
+    CERTAINTY_ONLY_MODE: boolean;                 // Only trade guaranteed outcomes (default: false)
+    
+    // Cross-Market Lag
+    CROSS_MARKET_MIN_CORRELATION: number;         // Min correlation (default: 0.60)
+    CROSS_MARKET_MAX_LAG_SECONDS: number;         // Max lag to exploit (default: 300)
+    CROSS_MARKET_REENTRY_COOLDOWN_MINUTES: number; // Reentry cooldown (default: 10)
+    
+    // Early Trigger / Anticipation System
+    ENABLE_EARLY_TRIGGER: boolean;                // Enable early trigger mode (default: true)
+    EARLY_TRIGGER_MINUTES_BEFORE: number;         // Minutes before expected publication (default: 2)
+    EARLY_TRIGGER_AGGRESSIVE_POLL_MS: number;     // Poll interval in early trigger (default: 25)
 }
 
 function getEnvVarOptional(name: string, defaultValue: string): string {
@@ -210,6 +278,76 @@ export const config: Config = {
     TRACK_CROSS_MARKET_PERFORMANCE: getEnvVarBool('TRACK_CROSS_MARKET_PERFORMANCE', true),
     MAX_IMPACT_ESTIMATE_HISTORY: getEnvVarNumber('MAX_IMPACT_ESTIMATE_HISTORY', 100),
     MAX_CONFIDENCE_HISTORY: getEnvVarNumber('MAX_CONFIDENCE_HISTORY', 100),
+
+    // =====================================
+    // NEW: Dynamic Kelly Sizing Settings
+    // =====================================
+    KELLY_FRACTION_HIGH: getEnvVarNumber('KELLY_FRACTION_HIGH', 0.50),
+    KELLY_FRACTION_MEDIUM: getEnvVarNumber('KELLY_FRACTION_MEDIUM', 0.25),
+    KELLY_FRACTION_LOW: getEnvVarNumber('KELLY_FRACTION_LOW', 0.125),
+    KELLY_FRACTION_GUARANTEED: getEnvVarNumber('KELLY_FRACTION_GUARANTEED', 0.75),
+
+    // =====================================
+    // NEW: Edge Decay Settings
+    // =====================================
+    EDGE_DECAY_HALF_LIFE_MS: getEnvVarNumber('EDGE_DECAY_HALF_LIFE_MS', 60000),
+    EDGE_DECAY_MAX_AGE_MS: getEnvVarNumber('EDGE_DECAY_MAX_AGE_MS', 180000),
+    URGENCY_SIZE_MULTIPLIER: getEnvVarNumber('URGENCY_SIZE_MULTIPLIER', 1.5),
+
+    // =====================================
+    // NEW: Regime-Based Exit Settings
+    // =====================================
+    ENABLE_REGIME_BASED_EXITS: getEnvVarBool('ENABLE_REGIME_BASED_EXITS', true),
+    REGIME_TAKE_PROFIT_TRENDING: getEnvVarNumber('REGIME_TAKE_PROFIT_TRENDING', 0.15),
+    REGIME_STOP_LOSS_TRENDING: getEnvVarNumber('REGIME_STOP_LOSS_TRENDING', -0.20),
+    REGIME_TAKE_PROFIT_RANGING: getEnvVarNumber('REGIME_TAKE_PROFIT_RANGING', 0.08),
+    REGIME_STOP_LOSS_RANGING: getEnvVarNumber('REGIME_STOP_LOSS_RANGING', -0.10),
+    ENABLE_PARTIAL_EXITS: getEnvVarBool('ENABLE_PARTIAL_EXITS', true),
+    PARTIAL_EXIT_THRESHOLD: getEnvVarNumber('PARTIAL_EXIT_THRESHOLD', 0.05),
+    PARTIAL_EXIT_PERCENT: getEnvVarNumber('PARTIAL_EXIT_PERCENT', 0.50),
+
+    // =====================================
+    // NEW: Kelly Portfolio Heat Management
+    // =====================================
+    MAX_PORTFOLIO_EXPOSURE: getEnvVarNumber('MAX_PORTFOLIO_EXPOSURE', 0.50),
+    MAX_KELLY_HEAT: getEnvVarNumber('MAX_KELLY_HEAT', 0.30),
+    MIN_CASH_RESERVE: getEnvVarNumber('MIN_CASH_RESERVE', 0.10),
+    CONCENTRATION_FACTOR: getEnvVarNumber('CONCENTRATION_FACTOR', 1.5),
+
+    // =====================================
+    // NEW: Strategy Orchestrator Settings
+    // =====================================
+    ENABLE_STRATEGY_ORCHESTRATOR: getEnvVarBool('ENABLE_STRATEGY_ORCHESTRATOR', true),
+    TARGET_WIN_RATE: getEnvVarNumber('TARGET_WIN_RATE', 0.80),
+    MIN_WIN_RATE_ADJUSTMENT: getEnvVarNumber('MIN_WIN_RATE_ADJUSTMENT', 0.50),
+    MAX_DAILY_TRADES: getEnvVarNumber('MAX_DAILY_TRADES', 50),
+    MAX_DAILY_LOSS_PERCENT: getEnvVarNumber('MAX_DAILY_LOSS_PERCENT', 0.05),
+    COMPOUND_RESET_DAYS: getEnvVarNumber('COMPOUND_RESET_DAYS', 30),
+    
+    // Strategy weights (can be adjusted dynamically)
+    STRATEGY_WEIGHT_CERTAINTY: getEnvVarNumber('STRATEGY_WEIGHT_CERTAINTY', 0.40),
+    STRATEGY_WEIGHT_CONFIDENCE: getEnvVarNumber('STRATEGY_WEIGHT_CONFIDENCE', 0.30),
+    STRATEGY_WEIGHT_CROSS_MARKET: getEnvVarNumber('STRATEGY_WEIGHT_CROSS_MARKET', 0.20),
+    STRATEGY_WEIGHT_TIME_DECAY: getEnvVarNumber('STRATEGY_WEIGHT_TIME_DECAY', 0.07),
+    STRATEGY_WEIGHT_DIVERGENCE: getEnvVarNumber('STRATEGY_WEIGHT_DIVERGENCE', 0.03),
+    
+    // Certainty Arbitrage Settings
+    CERTAINTY_SIGMA_THRESHOLD_BASE: getEnvVarNumber('CERTAINTY_SIGMA_THRESHOLD_BASE', 3.0),
+    CERTAINTY_DAYS_TO_EVENT_MAX: getEnvVarNumber('CERTAINTY_DAYS_TO_EVENT_MAX', 3),
+    CERTAINTY_MIN_EDGE: getEnvVarNumber('CERTAINTY_MIN_EDGE', 0.05),
+    CERTAINTY_ONLY_MODE: getEnvVarBool('CERTAINTY_ONLY_MODE', false), // Only trade guaranteed outcomes
+    
+    // Cross-Market Lag Settings
+    CROSS_MARKET_MIN_CORRELATION: getEnvVarNumber('CROSS_MARKET_MIN_CORRELATION', 0.60),
+    CROSS_MARKET_MAX_LAG_SECONDS: getEnvVarNumber('CROSS_MARKET_MAX_LAG_SECONDS', 300),
+    CROSS_MARKET_REENTRY_COOLDOWN_MINUTES: getEnvVarNumber('CROSS_MARKET_REENTRY_COOLDOWN_MINUTES', 10),
+    
+    // =====================================
+    // NEW: Early Trigger / Anticipation System
+    // =====================================
+    ENABLE_EARLY_TRIGGER: getEnvVarBool('ENABLE_EARLY_TRIGGER', true),
+    EARLY_TRIGGER_MINUTES_BEFORE: getEnvVarNumber('EARLY_TRIGGER_MINUTES_BEFORE', 2), // Start aggressive polling 2 min before expected
+    EARLY_TRIGGER_AGGRESSIVE_POLL_MS: getEnvVarNumber('EARLY_TRIGGER_AGGRESSIVE_POLL_MS', 25), // 25ms polling in early trigger mode
 };
 
 /**

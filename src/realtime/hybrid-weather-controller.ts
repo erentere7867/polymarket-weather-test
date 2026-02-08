@@ -1087,10 +1087,10 @@ export class HybridWeatherController extends EventEmitter {
             logger.info('📁 File-based ingestion started');
         }
 
-        // Start detection window checker (every 30 seconds for precise timing)
+        // Start detection window checker (every 10 seconds for faster detection)
         this.detectionWindowCheckIntervalId = setInterval(() => {
             this.checkDetectionWindows();
-        }, 30000);
+        }, 10000);
 
         // Initial check
         this.checkDetectionWindows();

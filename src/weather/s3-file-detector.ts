@@ -34,6 +34,10 @@ export interface S3DetectorConfig {
     region: string;
     /** Whether S3 buckets are public (no auth required) */
     publicBuckets: boolean;
+    /** Maximum retries on S3 errors */
+    maxRetries?: number;
+    /** Initial retry delay in milliseconds */
+    retryDelayMs?: number;
 }
 
 /**
@@ -51,11 +55,13 @@ interface DetectionContext {
  * Default configuration
  */
 const DEFAULT_CONFIG: S3DetectorConfig = {
-    pollIntervalMs: 150,           // 150ms between HeadObject checks
+    pollIntervalMs: 50,            // 50ms between HeadObject checks (20 req/s per file) - OPTIMIZED
     maxDetectionDurationMs: 45 * 60 * 1000,  // 45 minutes max
-    downloadTimeoutMs: 30 * 1000,  // 30 seconds download timeout
+    downloadTimeoutMs: 10 * 1000,  // 10 seconds download timeout - OPTIMIZED (was 30s)
     region: 'us-east-1',
     publicBuckets: true,
+    maxRetries: 2,                 // Reduced from 3
+    retryDelayMs: 50,              // Reduced from 1000ms to 50ms
 };
 
 /**
@@ -69,6 +75,15 @@ export class S3FileDetector extends EventEmitter {
     private gribParser: GRIB2Parser;
     private activeDetections: Map<string, DetectionContext> = new Map();
     private regionClients: Map<string, S3Client> = new Map();
+    
+    // Rate limiting tracking per bucket
+    private bucketRequestCounts: Map<string, { count: number; windowStart: number }> = new Map();
+    private readonly REQUESTS_PER_MINUTE = 720; // 12 req/s * 60s = 720/min (aggressive but safe for NOAA)
+    private readonly RATE_LIMIT_WINDOW_MS = 60000; // 1 minute window
+    
+    // Early trigger mode state
+    private aggressivePollingActive: boolean = false;
+    private aggressivePollIntervalMs: number = 25;
 
     constructor(config: Partial<S3DetectorConfig> = {}) {
         super();
@@ -79,6 +94,29 @@ export class S3FileDetector extends EventEmitter {
         this.s3Client = this.createClient(this.config.region);
         
         this.gribParser = new GRIB2Parser();
+        
+        // Listen for early trigger mode events
+        this.setupEventListeners();
+    }
+    
+    /**
+     * Setup event listeners for early trigger mode
+     */
+    private setupEventListeners(): void {
+        this.eventBus.on('EARLY_TRIGGER_MODE', (event) => {
+            if (event.type === 'EARLY_TRIGGER_MODE') {
+                this.activateAggressivePolling(event.payload.aggressivePollIntervalMs);
+            }
+        });
+    }
+    
+    /**
+     * Activate aggressive polling mode (called during early trigger)
+     */
+    private activateAggressivePolling(intervalMs: number): void {
+        this.aggressivePollingActive = true;
+        this.aggressivePollIntervalMs = intervalMs;
+        logger.info(`[S3FileDetector] Early trigger mode activated - aggressive polling at ${intervalMs}ms`);
     }
 
     /**
@@ -197,9 +235,44 @@ export class S3FileDetector extends EventEmitter {
     }
 
     /**
+     * Check if we should rate limit requests to a bucket
+     * Returns delay in ms if rate limited, 0 if ok to proceed
+     */
+    private checkRateLimit(bucket: string): number {
+        const now = Date.now();
+        const bucketStats = this.bucketRequestCounts.get(bucket);
+        
+        if (!bucketStats) {
+            // First request to this bucket
+            this.bucketRequestCounts.set(bucket, { count: 1, windowStart: now });
+            return 0;
+        }
+        
+        // Check if window has expired
+        if (now - bucketStats.windowStart > this.RATE_LIMIT_WINDOW_MS) {
+            // Reset window
+            bucketStats.count = 1;
+            bucketStats.windowStart = now;
+            return 0;
+        }
+        
+        // Check if we've exceeded the limit
+        if (bucketStats.count >= this.REQUESTS_PER_MINUTE) {
+            // Calculate time until window resets
+            const timeUntilReset = this.RATE_LIMIT_WINDOW_MS - (now - bucketStats.windowStart);
+            logger.warn(`[S3FileDetector] Rate limit hit for bucket ${bucket}. Pausing for ${Math.ceil(timeUntilReset / 1000)}s`);
+            return Math.max(timeUntilReset, 1000); // At least 1 second
+        }
+        
+        // Increment counter
+        bucketStats.count++;
+        return 0;
+    }
+
+    /**
      * Poll S3 for file existence using HeadObject
      */
-    private async pollForFile(key: string): Promise<void> {
+    private async pollForFile(key: string, retryCount: number = 0): Promise<void> {
         const context = this.activeDetections.get(key);
         if (!context || !context.isDetecting) {
             return;
@@ -209,6 +282,19 @@ export class S3FileDetector extends EventEmitter {
         const { bucket, key: s3Key } = expectedFile;
         
         const elapsedMs = Date.now() - windowStart.getTime();
+        
+        // Check rate limiting
+        const rateLimitDelay = this.checkRateLimit(bucket);
+        if (rateLimitDelay > 0) {
+            // Rate limited - wait before next attempt
+            if (context.isDetecting) {
+                context.pollTimer = setTimeout(() => {
+                    this.pollForFile(key, retryCount);
+                }, rateLimitDelay);
+            }
+            return;
+        }
+        
         // Throttle polling logs to every 30 seconds to reduce overhead
         if (elapsedMs % 30000 < 200) {
             logger.info(`[S3FileDetector] Polling ${expectedFile.model} ${String(expectedFile.cycleHour).padStart(2, '0')}Z: ${s3Key} (${Math.round(elapsedMs/1000)}s elapsed)`);
@@ -262,7 +348,29 @@ export class S3FileDetector extends EventEmitter {
                 
                 return;
             }
-        } catch (error) {
+        } catch (error: any) {
+            // Handle 429 (Too Many Requests) and 503 (Service Unavailable) with exponential backoff
+            const statusCode = error.$metadata?.httpStatusCode || error.statusCode;
+            
+            if ((statusCode === 429 || statusCode === 503) && retryCount < (this.config.maxRetries || 3)) {
+                const backoffMs = Math.min(
+                    (this.config.retryDelayMs || 1000) * Math.pow(2, retryCount),
+                    30000 // Max 30 seconds
+                );
+                // Add jitter to prevent thundering herd (±25%)
+                const jitter = backoffMs * 0.25 * (Math.random() * 2 - 1);
+                const delayWithJitter = Math.max(100, backoffMs + jitter);
+                
+                logger.warn(`[S3FileDetector] S3 rate limit (HTTP ${statusCode}) for ${s3Key}. Retrying in ${Math.round(delayWithJitter)}ms (attempt ${retryCount + 1}/${this.config.maxRetries || 3})`);
+                
+                if (context.isDetecting) {
+                    context.pollTimer = setTimeout(() => {
+                        this.pollForFile(key, retryCount + 1);
+                    }, delayWithJitter);
+                }
+                return;
+            }
+            
             logger.error(`[S3FileDetector] Error polling ${s3Key}:`, error);
         }
         
@@ -276,9 +384,14 @@ export class S3FileDetector extends EventEmitter {
         
         // Schedule next poll
         if (context.isDetecting) {
+            // Use aggressive polling interval in early trigger mode
+            const pollInterval = this.aggressivePollingActive 
+                ? this.aggressivePollIntervalMs 
+                : this.config.pollIntervalMs;
+                
             context.pollTimer = setTimeout(() => {
-                this.pollForFile(key);
-            }, this.config.pollIntervalMs);
+                this.pollForFile(key, 0); // Reset retry count for next poll cycle
+            }, pollInterval);
         }
     }
 
@@ -332,8 +445,8 @@ export class S3FileDetector extends EventEmitter {
             let idxResponse;
             const client = this.getClient(region);
 
-            // Retry logic for .idx file (up to 3 times, 150ms delay)
-            for (let attempt = 1; attempt <= 3; attempt++) {
+            // Retry logic for .idx file (up to 2 times, 50ms delay) - OPTIMIZED
+            for (let attempt = 1; attempt <= 2; attempt++) {
                 try {
                     const command = new GetObjectCommand({
                         Bucket: bucket,
@@ -345,9 +458,9 @@ export class S3FileDetector extends EventEmitter {
                 } catch (e: any) {
                     // If .idx doesn't exist, retry if we have attempts left
                     if (e.name === 'NoSuchKey' || e.name === 'NotFound' || e.$metadata?.httpStatusCode === 404) {
-                        if (attempt < 3) {
-                            logger.warn(`[S3FileDetector] .idx not found (attempt ${attempt}/3), retrying in 150ms...`);
-                            await new Promise(resolve => setTimeout(resolve, 150));
+                        if (attempt < 2) {
+                            logger.warn(`[S3FileDetector] .idx not found (attempt ${attempt}/2), retrying in 50ms...`);
+                            await new Promise(resolve => setTimeout(resolve, 50)); // Reduced from 150ms
                             continue;
                         }
                         logger.info(`[S3FileDetector] .idx file not found for ${key}, falling back to full download (Check took ${Date.now() - idxStart}ms)`);

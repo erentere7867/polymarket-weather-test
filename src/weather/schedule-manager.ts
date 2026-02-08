@@ -15,6 +15,7 @@ import {
 } from './types.js';
 import { EventBus } from '../realtime/event-bus.js';
 import { logger } from '../logger.js';
+import { config } from '../config.js';
 
 /**
  * Schedule Manager configuration
@@ -34,7 +35,7 @@ export interface ScheduleManagerConfig {
  * Default configuration
  */
 const DEFAULT_CONFIG: ScheduleManagerConfig = {
-    detectionWindowLeadMinutes: 5,      // Start 5 min before expected publication
+    detectionWindowLeadMinutes: 10,      // Start 10 min before expected publication (was 5)
     detectionWindowDurationMinutes: 45,  // Poll for 45 minutes max
     fallbackWindowLeadMinutes: 10,      // Start API fallback 10 min after expected
     fallbackWindowDurationMinutes: 30,   // Fallback for 30 minutes max
@@ -86,7 +87,7 @@ export class ScheduleManager extends EventEmitter {
     private eventBus: EventBus;
     private activeWindows: Map<string, DetectionWindow> = new Map();
     private checkInterval: NodeJS.Timeout | null = null;
-    private readonly CHECK_INTERVAL_MS = 60000; // Check every minute
+    private readonly CHECK_INTERVAL_MS = 10000; // Check every 10 seconds for faster detection
 
     constructor(config: Partial<ScheduleManagerConfig> = {}) {
         super();
@@ -171,13 +172,14 @@ export class ScheduleManager extends EventEmitter {
 
     /**
      * Calculate detection window for a model cycle
+     * Includes early trigger window for aggressive pre-publication polling
      */
     public calculateDetectionWindow(
         model: ModelType,
         cycleHour: number,
         runDate: Date
     ): ModelRunSchedule {
-        const config = MODEL_CONFIGS[model];
+        const modelConfig = MODEL_CONFIGS[model];
 
         // Expected publish time (using max delay as conservative estimate)
         // Ensure we're working with the correct date by using UTC methods
@@ -186,10 +188,16 @@ export class ScheduleManager extends EventEmitter {
             runDate.getUTCMonth(),
             runDate.getUTCDate(),
             cycleHour,
-            config.firstFileDelayMinutes.min, // Use min delay for window start calculation
+            modelConfig.firstFileDelayMinutes.min, // Use min delay for window start calculation
             0,
             0
         ));
+
+        // EARLY TRIGGER: Start aggressive polling 2 minutes before expected publication
+        const earlyTriggerStart = new Date(expectedPublishTime);
+        earlyTriggerStart.setMinutes(
+            earlyTriggerStart.getMinutes() - (config.EARLY_TRIGGER_MINUTES_BEFORE || 2)
+        );
 
         // Detection window starts before expected publication
         const detectionWindowStart = new Date(expectedPublishTime);
@@ -199,7 +207,7 @@ export class ScheduleManager extends EventEmitter {
 
         // Detection window ends after max expected delay
         const detectionWindowEnd = new Date(expectedPublishTime);
-        const duration = config.detectionWindowDurationMinutes || this.config.detectionWindowDurationMinutes;
+        const duration = modelConfig.detectionWindowDurationMinutes || this.config.detectionWindowDurationMinutes;
         detectionWindowEnd.setMinutes(
             detectionWindowEnd.getMinutes() + duration
         );
@@ -221,6 +229,7 @@ export class ScheduleManager extends EventEmitter {
             cycleHour,
             runDate,
             expectedPublishTime,
+            earlyTriggerStart,
             detectionWindowStart,
             detectionWindowEnd,
             fallbackWindowStart,
@@ -343,20 +352,21 @@ export class ScheduleManager extends EventEmitter {
 
             // Check if window should start within the next minute OR is already active
             const timeToStart = run.detectionWindowStart.getTime() - now.getTime();
+            const timeToEarlyTrigger = run.earlyTriggerStart.getTime() - now.getTime();
             const timeToStartSec = Math.round(timeToStart / 1000);
             const isAlreadyActive = now >= run.detectionWindowStart && now < run.detectionWindowEnd;
+            const isEarlyTrigger = config.ENABLE_EARLY_TRIGGER && now >= run.earlyTriggerStart && now < run.detectionWindowStart;
 
-            // Log details for debugging missing windows
-            if (run.model === 'RAP' || run.model === 'GFS' || run.model === 'ECMWF') {
-                const expectedFile = this.getExpectedFile(run.model, run.cycleHour, run.runDate);
-                logger.info(`[ScheduleManager] Checking ${run.model} ${String(run.cycleHour).padStart(2, '0')}Z: Path=${expectedFile.key}, Bucket=${expectedFile.bucket}`);
-            }
-
-            logger.info(`[ScheduleManager] ${run.model} ${String(run.cycleHour).padStart(2, '0')}Z: timeToStart=${timeToStartSec}s, active=${isAlreadyActive}, windowStart=${run.detectionWindowStart.toISOString()}`);
-
-            // Start if it's about to start (within 1 min) OR if it's already active and we missed the start
+            // Start if it's about to start (within 1 min), in early trigger mode, OR if it's already active and we missed the start
             // We use > -60000 (1 min late) previously, but now we allow any time as long as it's active
-            if ((timeToStart <= 60000 && timeToStart > -60000) || isAlreadyActive) {
+            if ((timeToStart <= 60000 && timeToStart > -60000) || isAlreadyActive || isEarlyTrigger) {
+                // Log details only for runs that are about to start or already active
+                if (run.model === 'RAP' || run.model === 'GFS' || run.model === 'ECMWF') {
+                    const expectedFile = this.getExpectedFile(run.model, run.cycleHour, run.runDate);
+                    logger.info(`[ScheduleManager] Checking ${run.model} ${String(run.cycleHour).padStart(2, '0')}Z: Path=${expectedFile.key}, Bucket=${expectedFile.bucket}`);
+                }
+
+                logger.info(`[ScheduleManager] ${run.model} ${String(run.cycleHour).padStart(2, '0')}Z: timeToStart=${timeToStartSec}s, active=${isAlreadyActive}, windowStart=${run.detectionWindowStart.toISOString()}`);
                 // Create the detection window
                 const expectedFile = this.getExpectedFile(run.model, run.cycleHour, run.runDate);
 
@@ -385,6 +395,7 @@ export class ScheduleManager extends EventEmitter {
                         cycleHour: run.cycleHour,
                         runDate: run.runDate,
                         windowStart: run.detectionWindowStart,
+                        isEarlyTrigger: isEarlyTrigger,
                         expectedFile: {
                             bucket: expectedFile.bucket,
                             key: expectedFile.key,
@@ -394,6 +405,20 @@ export class ScheduleManager extends EventEmitter {
                 });
 
                 this.emit('detectionWindowStart', window);
+
+                // If in early trigger mode, emit special event for aggressive polling
+                if (isEarlyTrigger) {
+                    this.eventBus.emit({
+                        type: 'EARLY_TRIGGER_MODE',
+                        payload: {
+                            model: run.model,
+                            cycleHour: run.cycleHour,
+                            minutesUntilExpected: Math.round(timeToEarlyTrigger / 60000),
+                            aggressivePollIntervalMs: config.EARLY_TRIGGER_AGGRESSIVE_POLL_MS || 25,
+                        },
+                    });
+                    logger.info(`[ScheduleManager] EARLY TRIGGER activated for ${run.model} ${String(run.cycleHour).padStart(2, '0')}Z - starting aggressive polling`);
+                }
             }
         }
 

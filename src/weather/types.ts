@@ -332,6 +332,7 @@ export interface ModelRunSchedule {
     cycleHour: number;
     runDate: Date;
     expectedPublishTime: Date;
+    earlyTriggerStart: Date;      // When to start aggressive pre-publication polling
     detectionWindowStart: Date;
     detectionWindowEnd: Date;
     fallbackWindowStart: Date;

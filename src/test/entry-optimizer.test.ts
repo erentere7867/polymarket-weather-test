@@ -479,12 +479,12 @@ describe('EntryOptimizer', () => {
             const config = entryOptimizer.getConfig();
             
             expect(config).toHaveProperty('maxPositionSize');
-            expect(config).toHaveProperty('kellyFraction');
+            expect(config).toHaveProperty('kellyFractions');
             expect(config).toHaveProperty('scaleInThreshold');
             expect(config).toHaveProperty('urgencyDecayMs');
             
             expect(config.maxPositionSize).toBe(50);
-            expect(config.kellyFraction).toBe(0.25);
+            expect(config.kellyFractions.medium).toBe(0.25);
         });
 
         it('should update max position size', () => {

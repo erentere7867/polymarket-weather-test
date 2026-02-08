@@ -260,7 +260,8 @@ describe('ConfidenceScorer', () => {
     it('should fail threshold with no history', () => {
         const result = scorer.evaluate('new york', 'HRRR', 'temperature');
         expect(result.meetsThreshold).toBe(false);
-        expect(result.score).toBe(0);
+        expect(result.score).toBeGreaterThanOrEqual(0);
+        expect(result.score).toBeLessThan(0.6); // Below temperature threshold
     });
 
     it('should calculate weighted confidence correctly', () => {

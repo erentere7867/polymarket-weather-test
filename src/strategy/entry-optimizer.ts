@@ -34,6 +34,18 @@ export interface EntrySignal {
     urgencyFactor?: number;           // 0-1 urgency multiplier
     expectedSlippage?: number;        // Estimated slippage
     marketImpact?: number;            // Estimated market impact
+    
+    // New: Dynamic Kelly and partial exit fields
+    kellyFraction?: number;           // Applied Kelly fraction for this trade
+    sigma?: number;                   // Statistical significance (sigma)
+    decayFactor?: number;             // Edge decay factor
+    partialExitTriggers?: PartialExitTrigger[]; // Partial exit levels
+}
+
+export interface PartialExitTrigger {
+    percentOfPosition: number;        // e.g., 0.5 for 50%
+    profitThreshold: number;          // e.g., 0.05 for 5% profit
+    orderType: 'MARKET' | 'LIMIT';
 }
 
 export interface ScaleInOrder {
@@ -72,8 +84,12 @@ export class EntryOptimizer {
     private marketImpactModel: MarketImpactModel;
     private maxPositionSize: number;
     
-    // Configuration
-    private readonly KELLY_FRACTION = 0.25;  // Quarter-Kelly for safety
+    // Configuration - Dynamic Kelly based on sigma/confidence
+    private readonly KELLY_FRACTION_HIGH_CONFIDENCE = 0.50;  // Half-Kelly for sigma > 2.0
+    private readonly KELLY_FRACTION_MEDIUM_CONFIDENCE = 0.25; // Quarter-Kelly for 0.5 < sigma < 2.0
+    private readonly KELLY_FRACTION_LOW_CONFIDENCE = 0.125;  // 1/8-Kelly for low confidence
+    private readonly KELLY_FRACTION_GUARANTEED = 0.75;       // 3/4-Kelly for guaranteed outcomes
+    
     private readonly VOLATILITY_WINDOW_MS = 5 * 60 * 1000;  // 5 minutes
     private readonly URGENCY_DECAY_MS = 30 * 1000;  // 30 seconds for urgency decay
     private readonly SCALE_IN_THRESHOLD = 100;  // Scale in for positions > $100
@@ -83,6 +99,10 @@ export class EntryOptimizer {
     private readonly VOLATILITY_LOW = 0.01;      // 1% price movement
     private readonly VOLATILITY_HIGH = 0.05;     // 5% price movement
     private readonly VOLATILITY_EXTREME = 0.10;  // 10% price movement
+    
+    // Edge decay configuration
+    private readonly EDGE_DECAY_HALF_LIFE_MS = 60000;  // 1 minute half-life
+    private readonly MAX_EDGE_AGE_MS = 120000;  // 2 minutes max
 
     constructor(
         marketModel: MarketModel, 
@@ -95,13 +115,61 @@ export class EntryOptimizer {
     }
 
     /**
+     * Get dynamic Kelly fraction based on sigma and confidence
+     */
+    private getDynamicKellyFraction(sigma: number, isGuaranteed: boolean): number {
+        if (isGuaranteed) {
+            return this.KELLY_FRACTION_GUARANTEED;
+        }
+        
+        if (sigma >= 2.0) {
+            // High confidence: Half-Kelly
+            return this.KELLY_FRACTION_HIGH_CONFIDENCE;
+        } else if (sigma >= 1.0) {
+            // Medium confidence: Quarter-Kelly
+            return this.KELLY_FRACTION_MEDIUM_CONFIDENCE;
+        } else if (sigma >= 0.5) {
+            // Low confidence: 1/8-Kelly
+            return this.KELLY_FRACTION_LOW_CONFIDENCE;
+        } else {
+            // Very low confidence: Don't trade or minimal sizing
+            return 0.05;  // 1/20-Kelly
+        }
+    }
+
+    /**
+     * Calculate edge decay factor based on forecast age
+     * Exponential decay with 1-minute half-life
+     */
+    private calculateEdgeDecayFactor(forecastTimestamp?: Date): number {
+        if (!forecastTimestamp) {
+            return 0.5;  // Default medium decay
+        }
+
+        const ageMs = Date.now() - forecastTimestamp.getTime();
+        
+        // If too old, no edge
+        if (ageMs > this.MAX_EDGE_AGE_MS) {
+            return 0.1;
+        }
+        
+        // Exponential decay: factor = 0.5^(age/half_life)
+        const decayFactor = Math.exp(-ageMs / this.EDGE_DECAY_HALF_LIFE_MS * Math.LN2);
+        
+        // Ensure minimum factor of 0.3
+        return Math.max(0.3, decayFactor);
+    }
+
+    /**
      * Main entry point: Optimize entry for a detected edge
+     * Now includes dynamic Kelly sizing and edge decay modeling
      */
     optimizeEntry(
         edge: CalculatedEdge, 
         orderBook?: OrderBook,
         forecastTimestamp?: Date,
-        marketVolume24h?: number
+        marketVolume24h?: number,
+        sigma?: number  // Statistical significance for dynamic Kelly
     ): EntrySignal {
         const startTime = Date.now();
         
@@ -114,45 +182,63 @@ export class EntryOptimizer {
         // 3. Calculate urgency factor based on forecast freshness
         const urgencyFactor = this.calculateUrgencyFactor(forecastTimestamp);
         
-        // 4. Calculate optimal position size using full Kelly Criterion
-        const kellyInputs = this.buildKellyInputs(edge, volatility);
-        const kellyFraction = this.calculateFullKelly(kellyInputs);
+        // 4. Calculate edge decay factor
+        const edgeDecayFactor = this.calculateEdgeDecayFactor(forecastTimestamp);
         
-        // 5. Apply volatility adjustment
+        // 5. Determine Kelly fraction based on sigma and confidence
+        const effectiveSigma = sigma ?? edge.confidence * 3;  // Approximate sigma from confidence
+        const kellyFraction = this.getDynamicKellyFraction(effectiveSigma, edge.isGuaranteed);
+        
+        // 6. Calculate optimal position size using dynamic Kelly Criterion
+        const kellyInputs = this.buildKellyInputs(edge, volatility);
+        const baseKelly = this.calculateFullKelly(kellyInputs);
+        
+        // 7. Apply volatility adjustment
         const volatilityMultiplier = this.getVolatilityMultiplier(volatility.volatilityRegime);
         
-        // 6. Apply liquidity constraints
+        // 8. Apply liquidity constraints
         const liquidityConstrainedSize = this.applyLiquidityConstraints(
-            this.maxPositionSize * kellyFraction * edge.confidence,
+            this.maxPositionSize * baseKelly * edge.confidence,
             liquidity,
             orderBook
         );
         
-        // 7. Calculate final target size
-        let targetSize = liquidityConstrainedSize * volatilityMultiplier * urgencyFactor;
+        // 9. Calculate final target size with all factors
+        let targetSize = liquidityConstrainedSize 
+            * volatilityMultiplier 
+            * urgencyFactor 
+            * edgeDecayFactor
+            * (kellyFraction / this.KELLY_FRACTION_MEDIUM_CONFIDENCE);  // Scale by dynamic Kelly ratio
         
-        // 8. Fast path for guaranteed outcomes
+        // 10. Fast path for guaranteed outcomes
         if (edge.isGuaranteed) {
-            targetSize = this.maxPositionSize * config.guaranteedPositionMultiplier * urgencyFactor;
+            targetSize = this.maxPositionSize 
+                * (config.guaranteedPositionMultiplier * 1.5)  // 3x instead of 2x
+                * urgencyFactor 
+                * edgeDecayFactor;
         }
         
-        // 9. Clamp to min/max
-        targetSize = Math.max(5, Math.min(this.maxPositionSize * config.guaranteedPositionMultiplier, targetSize));
+        // 11. Clamp to min/max
+        const absoluteMax = this.maxPositionSize * (config.guaranteedPositionMultiplier * 1.5);
+        targetSize = Math.max(5, Math.min(absoluteMax, targetSize));
         
-        // 10. Calculate market impact
+        // 12. Calculate market impact
         const marketImpact = this.marketImpactModel.estimateImpact(
             targetSize,
             marketVolume24h || 100000,  // Default $100k daily volume
             liquidity.depthScore
         );
         
-        // 11. Determine if we should scale in
+        // 13. Determine if we should scale in
         const scaleInOrders = targetSize > this.SCALE_IN_THRESHOLD 
             ? this.buildScaleInOrders(targetSize, edge, liquidity, urgencyFactor)
             : undefined;
         
-        // 12. Calculate expected slippage
+        // 14. Calculate expected slippage
         const expectedSlippage = this.marketModel.estimateSlippage(edge.marketId, targetSize);
+        
+        // 15. Build partial exit triggers for high-confidence trades
+        const partialExitTriggers = this.buildPartialExitTriggers(effectiveSigma, volatility.volatilityRegime);
         
         const signal: EntrySignal = {
             marketId: edge.marketId,
@@ -161,14 +247,17 @@ export class EntryOptimizer {
             orderType: urgencyFactor > 0.8 ? 'MARKET' : 'LIMIT',
             priceLimit: this.calculateOptimalLimitPrice(edge, liquidity, urgencyFactor),
             urgency: this.determineUrgency(urgencyFactor, edge.isGuaranteed),
-            reason: this.buildReason(edge, volatility, liquidity, kellyFraction, urgencyFactor),
+            reason: this.buildReason(edge, volatility, liquidity, baseKelly, urgencyFactor, effectiveSigma, edgeDecayFactor),
             confidence: edge.confidence * liquidity.depthScore,
             estimatedEdge: edge.adjustedEdge - marketImpact - expectedSlippage,
             isGuaranteed: edge.isGuaranteed,
             scaleInOrders,
             urgencyFactor: parseFloat(urgencyFactor.toFixed(3)),
             expectedSlippage: parseFloat(expectedSlippage.toFixed(4)),
-            marketImpact: parseFloat(marketImpact.toFixed(4))
+            marketImpact: parseFloat(marketImpact.toFixed(4)),
+            kellyFraction: parseFloat(kellyFraction.toFixed(3)),
+            sigma: effectiveSigma,
+            partialExitTriggers
         };
         
         const duration = Date.now() - startTime;
@@ -177,6 +266,34 @@ export class EntryOptimizer {
         }
         
         return signal;
+    }
+
+    /**
+     * Build partial exit triggers based on sigma and volatility regime
+     */
+    private buildPartialExitTriggers(
+        sigma: number, 
+        regime: 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME'
+    ): PartialExitTrigger[] {
+        const triggers: PartialExitTrigger[] = [];
+        
+        if (sigma >= 2.0 && regime !== 'EXTREME') {
+            // High confidence, non-extreme volatility: Take 50% at 5%, let rest run
+            triggers.push({
+                percentOfPosition: 0.5,
+                profitThreshold: 0.05,
+                orderType: 'LIMIT'
+            });
+        } else if (sigma >= 1.0) {
+            // Medium confidence: Take 30% at 4%, let rest run
+            triggers.push({
+                percentOfPosition: 0.3,
+                profitThreshold: 0.04,
+                orderType: 'LIMIT'
+            });
+        }
+        
+        return triggers;
     }
 
     /**
@@ -310,8 +427,9 @@ export class EntryOptimizer {
         // Full Kelly formula
         const kelly = (winProbability * winLossRatio - lossProbability) / winLossRatio;
         
-        // Apply fractional Kelly for safety
-        const fractionalKelly = Math.max(0, kelly * this.KELLY_FRACTION);
+        // Default to quarter-Kelly for safety if sigma not provided
+        const kellyFraction = this.KELLY_FRACTION_MEDIUM_CONFIDENCE;
+        const fractionalKelly = Math.max(0, kelly * kellyFraction);
         
         // Cap at reasonable maximum (50% of bankroll)
         return Math.min(0.5, fractionalKelly);
@@ -461,7 +579,9 @@ export class EntryOptimizer {
         volatility: VolatilityMetrics,
         liquidity: OrderBookDepth,
         kellyFraction: number,
-        urgencyFactor: number
+        urgencyFactor: number,
+        sigma?: number,
+        edgeDecay?: number
     ): string {
         const parts = [
             `${edge.reason}`,
@@ -471,6 +591,14 @@ export class EntryOptimizer {
             `Liq: ${(liquidity.depthScore * 100).toFixed(0)}%`,
             `Urgency: ${(urgencyFactor * 100).toFixed(0)}%`
         ];
+        
+        if (sigma !== undefined) {
+            parts.push(`Sigma: ${sigma.toFixed(1)}σ`);
+        }
+        
+        if (edgeDecay !== undefined) {
+            parts.push(`Decay: ${(edgeDecay * 100).toFixed(0)}%`);
+        }
         
         if (edge.isGuaranteed) {
             parts.push('(GUARANTEED)');
@@ -492,13 +620,18 @@ export class EntryOptimizer {
      */
     getConfig(): {
         maxPositionSize: number;
-        kellyFraction: number;
+        kellyFractions: { high: number; medium: number; low: number; guaranteed: number };
         scaleInThreshold: number;
         urgencyDecayMs: number;
     } {
         return {
             maxPositionSize: this.maxPositionSize,
-            kellyFraction: this.KELLY_FRACTION,
+            kellyFractions: {
+                high: this.KELLY_FRACTION_HIGH_CONFIDENCE,
+                medium: this.KELLY_FRACTION_MEDIUM_CONFIDENCE,
+                low: this.KELLY_FRACTION_LOW_CONFIDENCE,
+                guaranteed: this.KELLY_FRACTION_GUARANTEED
+            },
             scaleInThreshold: this.SCALE_IN_THRESHOLD,
             urgencyDecayMs: this.URGENCY_DECAY_MS
         };
