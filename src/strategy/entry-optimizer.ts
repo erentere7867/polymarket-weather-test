@@ -12,7 +12,7 @@
 
 import { CalculatedEdge } from '../probability/edge-calculator.js';
 import { MarketModel } from '../probability/market-model.js';
-import { config } from '../config.js';
+import { config, ENTRY_CONFIG } from '../config.js';
 import { logger } from '../logger.js';
 import { MarketImpactModel } from './market-impact.js';
 import { OrderBook } from '../polymarket/types.js';
@@ -84,10 +84,10 @@ export class EntryOptimizer {
     private marketImpactModel: MarketImpactModel;
     private maxPositionSize: number;
     
-    // Configuration - Dynamic Kelly based on sigma/confidence
-    private readonly KELLY_FRACTION_HIGH_CONFIDENCE = 0.50;  // Half-Kelly for sigma > 2.0
-    private readonly KELLY_FRACTION_MEDIUM_CONFIDENCE = 0.25; // Quarter-Kelly for 0.5 < sigma < 2.0
-    private readonly KELLY_FRACTION_LOW_CONFIDENCE = 0.125;  // 1/8-Kelly for low confidence
+    // Configuration - Dynamic Kelly based on sigma/confidence (from ENTRY_CONFIG)
+    private readonly KELLY_FRACTION_HIGH_CONFIDENCE = ENTRY_CONFIG.MAX_KELLY_FRACTION;  // Half-Kelly for sigma > 2.0
+    private readonly KELLY_FRACTION_MEDIUM_CONFIDENCE = ENTRY_CONFIG.KELLY_FRACTION;    // Quarter-Kelly for 0.5 < sigma < 2.0
+    private readonly KELLY_FRACTION_LOW_CONFIDENCE = ENTRY_CONFIG.MIN_KELLY_FRACTION;   // 1/8-Kelly for low confidence
     private readonly KELLY_FRACTION_GUARANTEED = 0.75;       // 3/4-Kelly for guaranteed outcomes
     
     private readonly VOLATILITY_WINDOW_MS = 5 * 60 * 1000;  // 5 minutes
@@ -95,9 +95,9 @@ export class EntryOptimizer {
     private readonly SCALE_IN_THRESHOLD = 100;  // Scale in for positions > $100
     private readonly MAX_SCALE_IN_TRANCHES = 3;
     
-    // Volatility thresholds
-    private readonly VOLATILITY_LOW = 0.01;      // 1% price movement
-    private readonly VOLATILITY_HIGH = 0.05;     // 5% price movement
+    // Volatility thresholds (from ENTRY_CONFIG)
+    private readonly VOLATILITY_LOW = ENTRY_CONFIG.LOW_VOLATILITY_THRESHOLD;
+    private readonly VOLATILITY_HIGH = ENTRY_CONFIG.HIGH_VOLATILITY_THRESHOLD;
     private readonly VOLATILITY_EXTREME = 0.10;  // 10% price movement
     
     // Edge decay configuration
@@ -398,7 +398,7 @@ export class EntryOptimizer {
         // Higher edge = higher potential win
         // Higher volatility = higher potential loss (wider stops)
         const baseWin = edge.adjustedEdge * 2;  // Simplified: 2x edge as win
-        const baseLoss = 1 + (volatility.priceVolatility * 10);  // Volatility-adjusted loss
+        const baseLoss = 1 + (volatility.priceVolatility * ENTRY_CONFIG.VOLATILITY_MULTIPLIER);  // Volatility-adjusted loss
         
         const avgWin = Math.max(0.1, baseWin);
         const avgLoss = Math.min(1.0, baseLoss);

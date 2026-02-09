@@ -5,6 +5,7 @@
 
 import { MarketModel } from '../probability/market-model.js';
 import { logger } from '../logger.js';
+import { EXIT_CONFIG } from '../config.js';
 
 export interface Position {
     marketId: string;
@@ -53,10 +54,10 @@ export interface PartialExitStatus {
 export class ExitOptimizer {
     private marketModel: MarketModel;
 
-    // Configuration - Regime-based thresholds
+    // Configuration - Regime-based thresholds (from EXIT_CONFIG)
     // FIXED: Minimum 2:1 Risk/Reward ratio in ALL regimes
-    private takeProfitThreshold: number = 0.16; // 16% base
-    private stopLossThreshold: number = -0.08;  // -8% base (2:1 R:R)
+    private takeProfitThreshold: number = EXIT_CONFIG.TAKE_PROFIT_THRESHOLD;
+    private stopLossThreshold: number = EXIT_CONFIG.STOP_LOSS_THRESHOLD;
     private timeLimitMs: number = 12 * 60 * 60 * 1000; // 12 hours max hold (reduced from 24)
     
     // Regime-specific thresholds - ALL with minimum 2:1 R:R
@@ -68,9 +69,9 @@ export class ExitOptimizer {
         UNKNOWN: { takeProfit: 0.16, stopLoss: -0.08, trailingStop: true, partialExit: true }        // 2:1
     };
     
-    // Trailing stop configuration - FIXED: looser to let winners run
+    // Trailing stop configuration - FIXED: looser to let winners run (from EXIT_CONFIG)
     private trailingStopEnabled: boolean = true;
-    private trailingStopActivationPercent: number = 0.10; // Activate at 10% profit (was 5%)
+    private trailingStopActivationPercent: number = EXIT_CONFIG.TRAILING_STOP_TRIGGER;
     private trailingStopOffsetPercent: number = 0.05; // Trail 5% behind (was breakeven+2%)
     
     // Track highest PnL seen for each position (for trailing stop)
@@ -84,6 +85,16 @@ export class ExitOptimizer {
 
     constructor(marketModel: MarketModel) {
         this.marketModel = marketModel;
+    }
+
+    /**
+     * Clean up position tracking when a position is fully closed
+     * Prevents unbounded Map growth
+     */
+    public cleanupPosition(marketId: string): void {
+        this.positionHighWaterMark.delete(marketId);
+        this.partialExitStatus.delete(marketId);
+        this.positionRegime.delete(marketId);
     }
 
     /**
@@ -305,8 +316,8 @@ export class ExitOptimizer {
                 remainingPosition: {
                     entryPrice: position.entryPrice,
                     remainingShares: position.size * 0.5,
-                    adjustedStopLoss: position.entryPrice * 1.03,  // Move stop to breakeven + 3% (was 2%)
-                    adjustedTakeProfit: position.entryPrice * (1 + thresholds.takeProfit * 1.2)
+                    adjustedStopLoss: position.entryPrice * EXIT_CONFIG.TRENDING_STOP_MULTIPLIER,  // Move stop to breakeven + 3%
+                    adjustedTakeProfit: position.entryPrice * (1 + thresholds.takeProfit * EXIT_CONFIG.TRENDING_TAKE_MULTIPLIER)
                 }
             };
         }

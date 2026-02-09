@@ -5,6 +5,7 @@
  */
 
 import { Coordinates, FileDetectedData, FileConfirmedData, DetectionWindow, ModelType } from '../weather/types.js';
+import { logger } from '../logger.js';
 
 // Event type definitions
 export type EventType =
@@ -21,7 +22,9 @@ export type EventType =
     | 'FORECAST_UPDATED'
     | 'FORECAST_BATCH_UPDATED'
     | 'RATE_LIMIT_HIT'
-    | 'EARLY_TRIGGER_MODE';
+    | 'EARLY_TRIGGER_MODE'
+    | 'RAP_CONFIRMED'
+    | 'RAP_HRRR_CONFIRMED';
 
 // Event payload interfaces
 export interface ForecastTriggerEvent {
@@ -218,6 +221,26 @@ export interface EarlyTriggerModeEvent {
     };
 }
 
+export interface RapConfirmedEvent {
+    type: 'RAP_CONFIRMED';
+    payload: {
+        cycleHour: number;
+        runDate: Date;
+        confirmedAt: Date;
+    };
+}
+
+export interface RapHrrrConfirmedEvent {
+    type: 'RAP_HRRR_CONFIRMED';
+    payload: {
+        cycleHour: number;
+        runDate: string; // YYYY-MM-DD
+        confirmedAt: Date;
+        confirmedCities: string[]; // cityIds that have confirmed data
+        temperatureDifferences: Map<string, number>; // cityId -> temp difference (°F)
+    };
+}
+
 // Union type of all events
 export type Event =
     | ForecastTriggerEvent
@@ -233,7 +256,9 @@ export type Event =
     | ForecastUpdatedEvent
     | ForecastBatchUpdatedEvent
     | RateLimitHitEvent
-    | EarlyTriggerModeEvent;
+    | EarlyTriggerModeEvent
+    | RapConfirmedEvent
+    | RapHrrrConfirmedEvent;
 
 // Event handler type
 export type EventHandler<T extends Event> = (event: T) => void | Promise<void>;
@@ -279,6 +304,8 @@ export class EventBus {
             'FORECAST_BATCH_UPDATED',
             'RATE_LIMIT_HIT',
             'EARLY_TRIGGER_MODE',
+            'RAP_CONFIRMED',
+            'RAP_HRRR_CONFIRMED',
         ];
         for (const type of eventTypes) {
             this.handlers.set(type, new Set());
@@ -343,13 +370,14 @@ export class EventBus {
                 if (result instanceof Promise) {
                     // Offload async handlers to next tick to prevent blocking
                     setImmediate(() => {
-                        result.catch((err) => {
-                            console.error(`Error in async event handler for ${event.type}:`, err);
+                        result.catch((err: Error) => {
+                            logger.error(`Error in async event handler for ${event.type}`, { error: err.message, stack: err.stack });
                         });
                     });
                 }
             } catch (err) {
-                console.error(`Error in event handler for ${event.type}:`, err);
+                const error = err as Error;
+                logger.error(`Error in event handler for ${event.type}`, { error: error.message, stack: error.stack });
             }
         }
     }

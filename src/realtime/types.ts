@@ -5,6 +5,15 @@
 import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { WeatherData } from '../weather/types.js';
 
+/**
+ * Threshold position for speed arbitrage threshold-crossing detection
+ */
+export interface ThresholdPosition {
+    relativeToThreshold: 'above' | 'below' | 'at';
+    distanceFromThreshold: number;  // Absolute distance in forecast units
+    timestamp: Date;
+}
+
 export interface PricePoint {
     price: number;
     timestamp: Date;
@@ -29,6 +38,10 @@ export interface ForecastSnapshot {
     valueChanged: boolean;        // Did the value change significantly?
     changeAmount: number;         // How much did it change?
     changeTimestamp: Date;        // When did the value last change?
+
+    // Threshold-crossing detection for speed arbitrage
+    thresholdPosition?: ThresholdPosition;         // Current position relative to threshold
+    previousThresholdPosition?: ThresholdPosition; // Previous position relative to threshold
 }
 
 export interface MarketState {

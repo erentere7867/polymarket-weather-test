@@ -76,10 +76,14 @@ export class S3FileDetector extends EventEmitter {
     private activeDetections: Map<string, DetectionContext> = new Map();
     private regionClients: Map<string, S3Client> = new Map();
     
-    // Rate limiting tracking per bucket
-    private bucketRequestCounts: Map<string, { count: number; windowStart: number }> = new Map();
-    private readonly REQUESTS_PER_MINUTE = 720; // 12 req/s * 60s = 720/min (aggressive but safe for NOAA)
-    private readonly RATE_LIMIT_WINDOW_MS = 60000; // 1 minute window
+    // Rate limiting tracking per bucket (token bucket algorithm)
+    private bucketRequestCounts: Map<string, { tokens: number; lastRefill: number }> = new Map();
+    private readonly REQUESTS_PER_MINUTE = 3000; // 50 req/s * 60s = 3000/min (NOAA public buckets are permissive)
+    private readonly TOKENS_PER_MS = 3000 / 60000; // Refill rate: 0.05 tokens/ms
+    private readonly MAX_TOKENS = 3000; // Max token bucket capacity
+    
+    // Time-based poll log throttling
+    private lastPollLogTime: Map<string, number> = new Map();
     
     // Early trigger mode state
     private aggressivePollingActive: boolean = false;
@@ -124,15 +128,16 @@ export class S3FileDetector extends EventEmitter {
      */
     private createClient(region: string): S3Client {
         // Configure HTTP keep-alive and connection pooling for lower latency
+        // Increased maxSockets to 50 to support multiple concurrent detection windows
         const requestHandler = new NodeHttpHandler({
             httpAgent: new http.Agent({
                 keepAlive: true,
-                maxSockets: 25,
+                maxSockets: 50,
                 keepAliveMsecs: 30000,
             }),
             httpsAgent: new https.Agent({
                 keepAlive: true,
-                maxSockets: 25,
+                maxSockets: 50,
                 keepAliveMsecs: 30000,
             }),
             connectionTimeout: 5000,
@@ -235,38 +240,40 @@ export class S3FileDetector extends EventEmitter {
     }
 
     /**
-     * Check if we should rate limit requests to a bucket
+     * Check if we should rate limit requests to a bucket using token bucket algorithm
      * Returns delay in ms if rate limited, 0 if ok to proceed
+     *
+     * Token bucket provides smoother rate limiting - if limit is hit, only wait for
+     * next token (typically ~20ms) instead of entire window reset.
      */
     private checkRateLimit(bucket: string): number {
         const now = Date.now();
         const bucketStats = this.bucketRequestCounts.get(bucket);
         
         if (!bucketStats) {
-            // First request to this bucket
-            this.bucketRequestCounts.set(bucket, { count: 1, windowStart: now });
+            // First request to this bucket - start with full token bucket
+            this.bucketRequestCounts.set(bucket, { tokens: this.MAX_TOKENS - 1, lastRefill: now });
             return 0;
         }
         
-        // Check if window has expired
-        if (now - bucketStats.windowStart > this.RATE_LIMIT_WINDOW_MS) {
-            // Reset window
-            bucketStats.count = 1;
-            bucketStats.windowStart = now;
+        // Refill tokens based on time elapsed since last refill
+        const elapsedMs = now - bucketStats.lastRefill;
+        const tokensToAdd = elapsedMs * this.TOKENS_PER_MS;
+        bucketStats.tokens = Math.min(this.MAX_TOKENS, bucketStats.tokens + tokensToAdd);
+        bucketStats.lastRefill = now;
+        
+        // Check if we have at least 1 token available
+        if (bucketStats.tokens >= 1) {
+            // Consume a token
+            bucketStats.tokens -= 1;
             return 0;
         }
         
-        // Check if we've exceeded the limit
-        if (bucketStats.count >= this.REQUESTS_PER_MINUTE) {
-            // Calculate time until window resets
-            const timeUntilReset = this.RATE_LIMIT_WINDOW_MS - (now - bucketStats.windowStart);
-            logger.warn(`[S3FileDetector] Rate limit hit for bucket ${bucket}. Pausing for ${Math.ceil(timeUntilReset / 1000)}s`);
-            return Math.max(timeUntilReset, 1000); // At least 1 second
-        }
-        
-        // Increment counter
-        bucketStats.count++;
-        return 0;
+        // No tokens available - calculate time until 1 token refills
+        // This will typically be ~20ms (1 token / 0.05 tokens/ms)
+        const waitTime = Math.ceil(1 / this.TOKENS_PER_MS);
+        logger.warn(`[S3FileDetector] Rate limit hit for bucket ${bucket}. Next token in ${waitTime}ms`);
+        return waitTime;
     }
 
     /**
@@ -283,6 +290,9 @@ export class S3FileDetector extends EventEmitter {
         
         const elapsedMs = Date.now() - windowStart.getTime();
         
+        // Diagnostic: track poll cycle start for latency measurement
+        const pollCycleStart = Date.now();
+        
         // Check rate limiting
         const rateLimitDelay = this.checkRateLimit(bucket);
         if (rateLimitDelay > 0) {
@@ -295,16 +305,55 @@ export class S3FileDetector extends EventEmitter {
             return;
         }
         
-        // Throttle polling logs to every 30 seconds to reduce overhead
-        if (elapsedMs % 30000 < 200) {
+        // Time-based log throttling - only log every 30 seconds per model
+        const logKey = `${expectedFile.model}-${expectedFile.cycleHour}`;
+        const now = Date.now();
+        const lastLog = this.lastPollLogTime.get(logKey) || 0;
+        if (now - lastLog > 30000) {
             logger.info(`[S3FileDetector] Polling ${expectedFile.model} ${String(expectedFile.cycleHour).padStart(2, '0')}Z: ${s3Key} (${Math.round(elapsedMs/1000)}s elapsed)`);
+            this.lastPollLogTime.set(logKey, now);
         }
         
+        // Check if we've exceeded max detection duration BEFORE scheduling next poll
+        if (elapsedMs > this.config.maxDetectionDurationMs) {
+            logger.warn(`[S3FileDetector] Detection timeout for ${s3Key}`);
+            this.stopDetection(key);
+            this.emit('timeout', { expectedFile });
+            return;
+        }
+        
+        // FIRE-AND-FORGET PATTERN: Schedule next poll IMMEDIATELY (before S3 request)
+        // This ensures true parallel polling at exact intervals regardless of network latency
+        // The timer will be cleared if file is detected or detection is stopped
+        if (context.isDetecting) {
+            // Use aggressive polling interval in early trigger mode
+            const pollInterval = this.aggressivePollingActive
+                ? this.aggressivePollIntervalMs
+                : this.config.pollIntervalMs;
+                
+            context.pollTimer = setTimeout(() => {
+                this.pollForFile(key, 0); // Reset retry count for next poll cycle
+            }, pollInterval);
+        }
+        
+        // Now make S3 request (don't await for scheduling - timer already set)
         try {
             // Check if file exists using HeadObject
             const headResult = await this.pollHeadObject(bucket, s3Key, expectedFile.region);
             
+            // Diagnostic: log slow S3 requests
+            const s3Latency = Date.now() - pollCycleStart;
+            if (s3Latency > 200) {
+                logger.debug(`[S3FileDetector] Slow S3 request: ${s3Latency}ms for ${s3Key}`);
+            }
+            
             if (headResult) {
+                // File detected! Clear the scheduled timer first
+                if (context.pollTimer) {
+                    clearTimeout(context.pollTimer);
+                    context.pollTimer = null;
+                }
+                
                 // File detected! (HEAD success logged below with full detection info)
                 const detectedAt = new Date();
                 const detectionLatencyMs = detectedAt.getTime() - windowStart.getTime();
@@ -322,8 +371,9 @@ export class S3FileDetector extends EventEmitter {
                     `[S3FileDetector] File detected: ${s3Key} (${detectionLatencyMs}ms latency, ${result.fileSize} bytes)`
                 );
                 
-                // Stop polling
-                this.stopDetection(key);
+                // Stop polling (marks context as inactive and clears timer)
+                context.isDetecting = false;
+                this.activeDetections.delete(key);
                 
                 // Emit FILE_DETECTED event
                 this.eventBus.emit({
@@ -353,6 +403,11 @@ export class S3FileDetector extends EventEmitter {
             const statusCode = error.$metadata?.httpStatusCode || error.statusCode;
             
             if ((statusCode === 429 || statusCode === 503) && retryCount < (this.config.maxRetries || 3)) {
+                // Clear the regularly scheduled timer before setting retry timer
+                if (context.pollTimer) {
+                    clearTimeout(context.pollTimer);
+                }
+                
                 const backoffMs = Math.min(
                     (this.config.retryDelayMs || 1000) * Math.pow(2, retryCount),
                     30000 // Max 30 seconds
@@ -374,25 +429,8 @@ export class S3FileDetector extends EventEmitter {
             logger.error(`[S3FileDetector] Error polling ${s3Key}:`, error);
         }
         
-        // Check if we've exceeded max detection duration
-        if (elapsedMs > this.config.maxDetectionDurationMs) {
-            logger.warn(`[S3FileDetector] Detection timeout for ${s3Key}`);
-            this.stopDetection(key);
-            this.emit('timeout', { expectedFile });
-            return;
-        }
-        
-        // Schedule next poll
-        if (context.isDetecting) {
-            // Use aggressive polling interval in early trigger mode
-            const pollInterval = this.aggressivePollingActive 
-                ? this.aggressivePollIntervalMs 
-                : this.config.pollIntervalMs;
-                
-            context.pollTimer = setTimeout(() => {
-                this.pollForFile(key, 0); // Reset retry count for next poll cycle
-            }, pollInterval);
-        }
+        // Timer already scheduled at the top - no need to schedule here
+        // Next poll will happen at the exact configured interval regardless of S3 latency
     }
 
     /**
@@ -400,7 +438,10 @@ export class S3FileDetector extends EventEmitter {
      */
     private async pollHeadObject(bucket: string, key: string, region?: string): Promise<HeadObjectOutput | null> {
         // Note: Per-request logging moved to debug level to reduce overhead (~400 requests/min)
-        logger.debug(`[S3FileDetector] HEAD Request - Bucket: ${bucket}, Key: ${key}`);
+        // Wrap in level check to avoid string interpolation when debug is disabled
+        if (logger.isLevelEnabled && logger.isLevelEnabled('debug')) {
+            logger.debug(`[S3FileDetector] HEAD Request - Bucket: ${bucket}, Key: ${key}`);
+        }
 
         try {
             const command = new HeadObjectCommand({

@@ -1,6 +1,11 @@
 /**
  * Speed Arbitrage Strategy
  * Fast execution on forecast changes - trades within seconds of new data
+ *
+ * Redesigned: Now requires threshold crossing for signal generation.
+ * Only trades when a forecast change crosses a market's threshold (e.g., 15°F → 17°F for a 16°F threshold).
+ *
+ * When SPEED_ARBITRAGE_MODE is OFF: Requires HRRR to confirm RAP data for US cities before trading.
  */
 
 import { DataStore } from '../realtime/data-store.js';
@@ -10,8 +15,11 @@ import { EntryOptimizer, EntrySignal } from './entry-optimizer.js';
 import { MarketImpactModel } from './market-impact.js';
 import { normalCDF } from '../probability/normal-cdf.js';
 import { ModelHierarchy } from './model-hierarchy.js';
-import { config } from '../config.js';
+import { ThresholdPosition } from '../realtime/types.js';
+import { config, SPEED_ARBITRAGE_CONFIG } from '../config.js';
 import { logger, rateLimitedLogger } from '../logger.js';
+import { ConfirmationManager } from '../weather/confirmation-manager.js';
+import { KNOWN_CITIES } from '../weather/types.js';
 
 const MAX_CHANGE_AGE_MS = 120000; // 2 minutes
 const MIN_SIGMA_FOR_ARBITRAGE = 0.5;
@@ -28,6 +36,7 @@ export class SpeedArbitrageStrategy {
     private edgeCalculator: EdgeCalculator;
     private entryOptimizer: EntryOptimizer;
     private modelHierarchy: ModelHierarchy;
+    private confirmationManager: ConfirmationManager | null = null;
 
     private capturedOpportunities: Map<string, { forecastValue: number; capturedAt: Date }> = new Map();
 
@@ -38,6 +47,14 @@ export class SpeedArbitrageStrategy {
         this.edgeCalculator = new EdgeCalculator(this.marketModel);
         this.entryOptimizer = new EntryOptimizer(this.marketModel, this.marketImpactModel);
         this.modelHierarchy = new ModelHierarchy();
+    }
+    
+    /**
+     * Set the confirmation manager for RAP-HRRR cross-model confirmation
+     * Must be called before detectOpportunity if SPEED_ARBITRAGE_MODE is OFF
+     */
+    public setConfirmationManager(manager: ConfirmationManager): void {
+        this.confirmationManager = manager;
     }
 
     /**
@@ -75,11 +92,103 @@ export class SpeedArbitrageStrategy {
         const forecast = state.lastForecast;
 
         // Must be a recent change (not first data)
-        if (forecast.previousValue === undefined) return null;
+        if (forecast.previousValue === undefined) {
+            logger.debug(`Speed arb: Skipping first data point for ${market.city}`);
+            return null;
+        }
 
         const changeAge = now - forecast.changeTimestamp.getTime();
         if (!forecast.valueChanged || changeAge > MAX_CHANGE_AGE_MS) {
             return null;
+        }
+
+        // ========================================
+        // NEW: Threshold-Crossing Detection
+        // ========================================
+        
+        // Check if threshold crossing is required
+        const requireThresholdCrossing = config.SPEED_ARB_REQUIRE_THRESHOLD_CROSSING;
+        const minCrossingDistance = config.SPEED_ARB_MIN_CROSSING_DISTANCE;
+
+        if (requireThresholdCrossing) {
+            // Get threshold in standardized units (°F)
+            let threshold = market.threshold;
+            if (threshold === undefined) {
+                logger.debug(`Speed arb: No threshold defined for ${market.city}`);
+                return null;
+            }
+            if (market.thresholdUnit === 'C') {
+                threshold = (threshold * 9 / 5) + 32;
+            }
+
+            // Calculate threshold positions
+            const prevPosition = this.calculateThresholdPosition(forecast.previousValue, threshold);
+            const currPosition = this.calculateThresholdPosition(forecast.forecastValue, threshold);
+
+            // Check for valid threshold crossing
+            const crossing = this.detectThresholdCrossing(prevPosition, currPosition, minCrossingDistance);
+            
+            if (!crossing.crossed) {
+                logger.debug(`Speed arb: Forecast change did not cross threshold for ${market.city}`, {
+                    previousValue: forecast.previousValue,
+                    currentValue: forecast.forecastValue,
+                    threshold,
+                    prevPosition: prevPosition.relativeToThreshold,
+                    currPosition: currPosition.relativeToThreshold,
+                });
+                return null;
+            }
+
+            logger.info(`Speed arb: Threshold crossed ${crossing.direction} for ${market.city}`, {
+                previousValue: forecast.previousValue,
+                currentValue: forecast.forecastValue,
+                threshold,
+            });
+        }
+        
+        // ========================================
+        // NEW: RAP-HRRR Confirmation Check (when speed arb mode is OFF)
+        // ========================================
+        
+        // When speed arb mode is OFF, require HRRR to confirm RAP data for US cities
+        if (!config.SPEED_ARBITRAGE_MODE) {
+            // Skip if no city info available
+            if (!market.city) {
+                logger.debug(`Speed arb: No city info for market, skipping RAP-HRRR check`);
+            } else {
+                const cityId = market.city.toLowerCase().replace(/\s+/g, '_');
+                
+                // Check if this is a US city (RAP/HRRR coverage)
+                if (this.isUsCity(market.city)) {
+                    if (!this.confirmationManager) {
+                        logger.warn(
+                            `Speed arb: ConfirmationManager not set, cannot verify RAP-HRRR confirmation for ${market.city}`
+                        );
+                        return null;
+                    }
+                    
+                    // Get the cycle hour from the forecast timestamp
+                    const cycleHour = forecast.changeTimestamp.getUTCHours();
+                    const runDate = forecast.changeTimestamp;
+                    
+                    const isConfirmed = this.confirmationManager.checkRapHrrrConfirmation(
+                        cityId,
+                        cycleHour,
+                        runDate
+                    );
+                    
+                    if (!isConfirmed) {
+                        logger.debug(
+                            `Speed arb: Skipping trade for ${market.city} - waiting for HRRR confirmation of RAP data`
+                        );
+                        return null;
+                    }
+                    
+                    logger.info(
+                        `Speed arb: RAP-HRRR confirmation verified for ${market.city}`
+                    );
+                }
+            }
         }
 
         // Check if already captured
@@ -234,6 +343,74 @@ export class SpeedArbitrageStrategy {
         } else {
             return 1 - normalCDF(z);
         }
+    }
+
+    /**
+     * Calculate threshold position for a forecast value.
+     * Returns the position relative to the threshold.
+     */
+    calculateThresholdPosition(forecastValue: number, threshold: number): ThresholdPosition {
+        const distance = forecastValue - threshold;
+        const now = new Date();
+
+        return {
+            relativeToThreshold: distance > 0.5 ? 'above' : distance < -0.5 ? 'below' : 'at',
+            distanceFromThreshold: Math.abs(distance),
+            timestamp: now,
+        };
+    }
+
+    /**
+     * Detect if a threshold crossing occurred between previous and current positions.
+     * Returns crossing status and direction.
+     */
+    detectThresholdCrossing(
+        previous: ThresholdPosition,
+        current: ThresholdPosition,
+        minCrossingDistance: number
+    ): { crossed: boolean; direction: 'up' | 'down' | 'none' } {
+        // Same side of threshold - no crossing
+        if (previous.relativeToThreshold === current.relativeToThreshold) {
+            return { crossed: false, direction: 'none' };
+        }
+
+        // Check if the crossing is significant enough (not just noise near threshold)
+        // At least one position should be sufficiently far from threshold
+        const hasSufficientDistance = 
+            previous.distanceFromThreshold >= minCrossingDistance ||
+            current.distanceFromThreshold >= minCrossingDistance;
+
+        if (!hasSufficientDistance) {
+            return { crossed: false, direction: 'none' };
+        }
+
+        // Determine direction
+        const crossedUp = previous.relativeToThreshold === 'below' && 
+                          current.relativeToThreshold === 'above';
+        const crossedDown = previous.relativeToThreshold === 'above' && 
+                            current.relativeToThreshold === 'below';
+
+        return {
+            crossed: crossedUp || crossedDown,
+            direction: crossedUp ? 'up' : crossedDown ? 'down' : 'none',
+        };
+    }
+    
+    /**
+     * Check if a city is in the US (RAP/HRRR coverage area)
+     * RAP and HRRR only cover North America
+     */
+    private isUsCity(cityName: string | null): boolean {
+        if (!cityName) return false;
+        
+        // Look up city in KNOWN_CITIES
+        const city = KNOWN_CITIES.find(
+            c => c.name.toLowerCase() === cityName.toLowerCase() ||
+                 c.aliases.some(a => a.toLowerCase() === cityName.toLowerCase())
+        );
+        
+        // If city is found and country is US, it's a US city
+        return city?.country === 'US';
     }
 }
 

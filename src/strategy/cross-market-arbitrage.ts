@@ -33,7 +33,7 @@ export interface CorrelatedMarketPair {
     correlatedMarket: ParsedWeatherMarket;
     correlation: CityCorrelation;
     primaryEdge: CalculatedEdge;
-    correlatedEdge: CalculatedEdge;
+    correlatedEdge?: CalculatedEdge;  // Optional - calculated by caller
     lagExploitationPotential: number;  // 0-1 score
     hedgeEfficiency: number;           // 0-1 score
 }
@@ -53,8 +53,8 @@ export interface PortfolioEdge {
  * Lag arbitrage opportunity
  */
 export interface LagArbitrageOpportunity {
-    leadingMarket: ParsedWeatherMarket;
-    laggingMarket: ParsedWeatherMarket;
+    leadingMarket?: ParsedWeatherMarket;
+    laggingMarket?: ParsedWeatherMarket;
     forecastChange: number;
     expectedLaggingChange: number;
     timeWindowMs: number;              // How long to exploit
@@ -230,8 +230,8 @@ export class CrossMarketArbitrage {
             const timeWindowMs = correlation.typicalLagMinutes * 60 * 1000;
             
             opportunities.push({
-                leadingMarket: null as any,  // Will be filled by caller
-                laggingMarket: null as any,
+                leadingMarket: undefined,
+                laggingMarket: undefined,
                 forecastChange: changeAmount,
                 expectedLaggingChange,
                 timeWindowMs,
@@ -294,7 +294,7 @@ export class CrossMarketArbitrage {
                 correlatedMarket: otherMarket,
                 correlation,
                 primaryEdge,
-                correlatedEdge: null as any,  // Would be calculated by caller
+                correlatedEdge: undefined,  // Would be calculated by caller
                 lagExploitationPotential,
                 hedgeEfficiency
             });

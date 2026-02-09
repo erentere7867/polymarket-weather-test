@@ -7,6 +7,7 @@
 import { EventEmitter } from 'events';
 import { ScheduleManager } from './schedule-manager.js';
 import { S3FileDetector } from './s3-file-detector.js';
+import { ConfirmationManager } from './confirmation-manager.js';
 import {
     ModelType,
     DetectionWindow,
@@ -54,9 +55,17 @@ export class FileBasedIngestion extends EventEmitter {
     private config: FileBasedIngestionConfig;
     private scheduleManager: ScheduleManager;
     private s3Detector: S3FileDetector;
+    private confirmationManager: ConfirmationManager;
     private eventBus: EventBus;
     private isRunning: boolean = false;
     private unsubscribers: (() => void)[] = [];
+    
+    /**
+     * Pending HRRR windows waiting for RAP confirmation
+     * Key format: "YYYY-MM-DD-HHZ" (date + cycle hour)
+     * Value: The detection window that's queued for later processing
+     */
+    private pendingHrrrWindows: Map<string, DetectionWindow> = new Map();
 
     constructor(config: Partial<FileBasedIngestionConfig> = {}) {
         super();
@@ -71,6 +80,7 @@ export class FileBasedIngestion extends EventEmitter {
             region: this.config.awsRegion,
             publicBuckets: this.config.publicBuckets,
         });
+        this.confirmationManager = new ConfirmationManager();
     }
 
     /**
@@ -97,6 +107,14 @@ export class FileBasedIngestion extends EventEmitter {
             }
         });
         this.unsubscribers.push(unsubWindowStart);
+        
+        // Subscribe to RAP_CONFIRMED events to trigger pending HRRR detection
+        const unsubRapConfirmed = this.eventBus.on('RAP_CONFIRMED', (event) => {
+            if (event.type === 'RAP_CONFIRMED') {
+                this.handleRapConfirmed(event.payload);
+            }
+        });
+        this.unsubscribers.push(unsubRapConfirmed);
         
         // Subscribe to local S3 detector events instead of global event bus
         // This prevents infinite loops and ensures we only handle our own detections
@@ -227,9 +245,18 @@ export class FileBasedIngestion extends EventEmitter {
     public getAllCityModelConfigs(): CityModelConfig[] {
         return CITY_MODEL_CONFIGS;
     }
+    
+    /**
+     * Get the confirmation manager for RAP-HRRR cross-model confirmation
+     */
+    public getConfirmationManager(): ConfirmationManager {
+        return this.confirmationManager;
+    }
 
     /**
      * Handle detection window start event
+     * For HRRR: Check if RAP is confirmed for the same cycle hour
+     * If RAP not confirmed, queue HRRR for later processing
      */
     private handleDetectionWindowStart(payload: {
         model: ModelType;
@@ -260,6 +287,48 @@ export class FileBasedIngestion extends EventEmitter {
             payload.runDate
         );
         
+        // SEQUENTIAL FETCHING LOGIC:
+        // HRRR must wait for RAP confirmation before starting detection
+        // This only applies to US models (RAP and HRRR are US-only)
+        if (payload.model === 'HRRR') {
+            const isRapConfirmed = this.scheduleManager.isRapConfirmed(payload.cycleHour, payload.runDate);
+            
+            if (!isRapConfirmed) {
+                // Queue HRRR for later - RAP not yet confirmed
+                const pendingKey = this.getPendingHrrrKey(payload.cycleHour, payload.runDate);
+                
+                logger.info(
+                    `[FileBasedIngestion] HRRR ${String(payload.cycleHour).padStart(2, '0')}Z queued - ` +
+                    `waiting for RAP confirmation (key: ${pendingKey})`
+                );
+                
+                // Store the window info for later processing
+                this.pendingHrrrWindows.set(pendingKey, {
+                    model: payload.model,
+                    cycleHour: payload.cycleHour,
+                    runDate: payload.runDate,
+                    windowStart: payload.windowStart,
+                    windowEnd: schedule.detectionWindowEnd,
+                    expectedFile,
+                    status: 'ACTIVE',
+                    createdAt: new Date(),
+                });
+                
+                this.emit('hrrrQueued', {
+                    cycleHour: payload.cycleHour,
+                    runDate: payload.runDate,
+                    reason: 'RAP_NOT_CONFIRMED',
+                });
+                
+                return; // Don't start detection yet
+            }
+            
+            logger.info(
+                `[FileBasedIngestion] HRRR ${String(payload.cycleHour).padStart(2, '0')}Z proceeding - ` +
+                `RAP already confirmed`
+            );
+        }
+        
         // Start S3 detection
         this.s3Detector.startDetection(expectedFile, schedule);
         
@@ -268,6 +337,76 @@ export class FileBasedIngestion extends EventEmitter {
             cycleHour: payload.cycleHour,
             expectedFile,
         });
+    }
+    
+    /**
+     * Handle RAP confirmed event
+     * Triggers any pending HRRR detection for the same cycle hour
+     */
+    private handleRapConfirmed(payload: {
+        cycleHour: number;
+        runDate: Date;
+        confirmedAt: Date;
+    }): void {
+        logger.info(
+            `[FileBasedIngestion] RAP confirmed for ${String(payload.cycleHour).padStart(2, '0')}Z - ` +
+            `checking for pending HRRR`
+        );
+        
+        // Update ScheduleManager's RAP confirmation status
+        this.scheduleManager.setRapConfirmed(payload.cycleHour, payload.runDate);
+        
+        // Check for pending HRRR window
+        const pendingKey = this.getPendingHrrrKey(payload.cycleHour, payload.runDate);
+        const pendingWindow = this.pendingHrrrWindows.get(pendingKey);
+        
+        if (pendingWindow) {
+            logger.info(
+                `[FileBasedIngestion] Triggering queued HRRR ${String(payload.cycleHour).padStart(2, '0')}Z ` +
+                `after RAP confirmation`
+            );
+            
+            // Remove from pending queue
+            this.pendingHrrrWindows.delete(pendingKey);
+            
+            // Get schedule for this cycle
+            const schedule = this.scheduleManager.calculateDetectionWindow(
+                pendingWindow.model,
+                pendingWindow.cycleHour,
+                pendingWindow.runDate
+            );
+            
+            // Start S3 detection for HRRR
+            this.s3Detector.startDetection(pendingWindow.expectedFile, schedule);
+            
+            this.emit('hrrrTriggered', {
+                cycleHour: pendingWindow.cycleHour,
+                runDate: pendingWindow.runDate,
+                rapConfirmedAt: payload.confirmedAt,
+            });
+            
+            this.emit('detectionStarted', {
+                model: pendingWindow.model,
+                cycleHour: pendingWindow.cycleHour,
+                expectedFile: pendingWindow.expectedFile,
+            });
+        } else {
+            logger.debug(
+                `[FileBasedIngestion] No pending HRRR for ${String(payload.cycleHour).padStart(2, '0')}Z`
+            );
+        }
+    }
+    
+    /**
+     * Generate key for pending HRRR windows
+     * Format: "YYYY-MM-DD-HHZ"
+     */
+    private getPendingHrrrKey(cycleHour: number, runDate: Date): string {
+        const year = runDate.getUTCFullYear();
+        const month = String(runDate.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(runDate.getUTCDate()).padStart(2, '0');
+        const hh = String(cycleHour).padStart(2, '0');
+        return `${year}-${month}-${day}-${hh}Z`;
     }
 
     /**
@@ -298,6 +437,7 @@ export class FileBasedIngestion extends EventEmitter {
 
     /**
      * Handle file confirmed event (downloaded and parsed)
+     * For RAP: Emit RAP_CONFIRMED event to trigger pending HRRR detection
      */
     private handleFileConfirmed(payload: {
         model: ModelType;
@@ -357,6 +497,52 @@ export class FileBasedIngestion extends EventEmitter {
         });
         
         logger.debug(`[FileBasedIngestion] Emitted FILE_CONFIRMED to EventBus`);
+        
+        // SEQUENTIAL FETCHING: Emit RAP_CONFIRMED event when RAP is confirmed
+        // This will trigger any pending HRRR detection for the same cycle hour
+        if (payload.model === 'RAP') {
+            const runDate = new Date(); // Use current date for runDate
+            logger.info(
+                `[FileBasedIngestion] RAP confirmed for ${String(payload.cycleHour).padStart(2, '0')}Z - ` +
+                `emitting RAP_CONFIRMED event`
+            );
+            
+            // Store RAP data for later HRRR confirmation
+            this.confirmationManager.storeRapData(payload.cycleHour, runDate, payload.cityData);
+            
+            this.eventBus.emit({
+                type: 'RAP_CONFIRMED',
+                payload: {
+                    cycleHour: payload.cycleHour,
+                    runDate,
+                    confirmedAt: new Date(),
+                },
+            });
+        }
+        
+        // RAP-HRRR CONFIRMATION: When HRRR is confirmed, check against RAP data
+        // This creates cross-model confirmation for trading logic
+        if (payload.model === 'HRRR') {
+            const runDate = new Date();
+            const confirmation = this.confirmationManager.createRapHrrrConfirmation(
+                payload.cycleHour,
+                runDate,
+                payload.cityData
+            );
+            
+            if (confirmation) {
+                logger.info(
+                    `[FileBasedIngestion] RAP-HRRR confirmation created for ` +
+                    `${String(payload.cycleHour).padStart(2, '0')}Z: ` +
+                    `${confirmation.confirmedCities.size}/${payload.cityData.length} cities confirmed`
+                );
+            } else {
+                logger.debug(
+                    `[FileBasedIngestion] No RAP data available for HRRR confirmation at ` +
+                    `${String(payload.cycleHour).padStart(2, '0')}Z`
+                );
+            }
+        }
     }
 
     /**

@@ -45,6 +45,22 @@ interface ConfirmationState {
 }
 
 /**
+ * Cross-model confirmation between RAP and HRRR
+ * Used when speed arb mode is OFF to require HRRR confirmation of RAP data
+ */
+export interface RapHrrrConfirmation {
+    cycleHour: number;
+    runDate: string; // YYYY-MM-DD
+    rapData: Map<string, CityGRIBData>;  // cityId -> data
+    hrrrData: Map<string, CityGRIBData>; // cityId -> data
+    confirmedAt: Date;
+    // Track which cities have confirmed data (HRRR within tolerance of RAP)
+    confirmedCities: Set<string>;
+    // Temperature differences per city for debugging
+    temperatureDifferences: Map<string, number>; // cityId -> |temp_RAP - temp_HRRR| in °F
+}
+
+/**
  * Configuration for confirmation manager
  */
 export interface ConfirmationManagerConfig {
@@ -71,6 +87,18 @@ export class ConfirmationManager extends EventEmitter {
     private eventBus: EventBus;
     private states: Map<string, ConfirmationState> = new Map(); // windowId -> state
     private unsubscribers: (() => void)[] = [];
+    
+    /**
+     * Cross-model confirmations between RAP and HRRR
+     * Key format: "YYYY-MM-DD-HHZ" (runDate-cycleHour)
+     */
+    private rapHrrrConfirmations: Map<string, RapHrrrConfirmation> = new Map();
+    
+    /**
+     * Store RAP data for later HRRR confirmation
+     * Key format: "YYYY-MM-DD-HHZ"
+     */
+    private pendingRapData: Map<string, Map<string, CityGRIBData>> = new Map();
 
     constructor(configOverride: Partial<ConfirmationManagerConfig> = {}) {
         super();
@@ -404,6 +432,192 @@ export class ConfirmationManager extends EventEmitter {
                 logger.debug(`[ConfirmationManager] Cleaned up old state ${windowId}`);
             }
         }
+        
+        // Also clean up old RAP-HRRR confirmations
+        for (const [key, confirmation] of this.rapHrrrConfirmations.entries()) {
+            const age = now.getTime() - confirmation.confirmedAt.getTime();
+            if (age > maxAgeMs) {
+                this.rapHrrrConfirmations.delete(key);
+                logger.debug(`[ConfirmationManager] Cleaned up old RAP-HRRR confirmation ${key}`);
+            }
+        }
+        
+        // Clean up pending RAP data
+        for (const [key] of this.pendingRapData.entries()) {
+            // Parse the date from the key and check age
+            const parts = key.split('-');
+            if (parts.length >= 3) {
+                const dateStr = `${parts[0]}-${parts[1]}-${parts[2]}`;
+                const keyDate = new Date(dateStr + 'T00:00:00Z');
+                const age = now.getTime() - keyDate.getTime();
+                if (age > maxAgeMs) {
+                    this.pendingRapData.delete(key);
+                    logger.debug(`[ConfirmationManager] Cleaned up pending RAP data for ${key}`);
+                }
+            }
+        }
+    }
+    
+    // ========================================
+    // RAP-HRRR Cross-Model Confirmation Methods
+    // ========================================
+    
+    /**
+     * Store RAP data for later HRRR confirmation
+     * Called when RAP file is confirmed
+     */
+    public storeRapData(cycleHour: number, runDate: Date, cityData: CityGRIBData[]): void {
+        const key = this.getRapHrrrKey(cycleHour, runDate);
+        const cityMap = new Map<string, CityGRIBData>();
+        
+        for (const city of cityData) {
+            const cityId = city.cityName.toLowerCase().replace(/\s+/g, '_');
+            cityMap.set(cityId, city);
+        }
+        
+        this.pendingRapData.set(key, cityMap);
+        logger.info(
+            `[ConfirmationManager] Stored RAP data for ${key} (${cityData.length} cities)`
+        );
+    }
+    
+    /**
+     * Create RAP-HRRR confirmation when HRRR data arrives
+     * Compares HRRR data with stored RAP data and marks cities as confirmed if within tolerance
+     */
+    public createRapHrrrConfirmation(
+        cycleHour: number,
+        runDate: Date,
+        hrrrCityData: CityGRIBData[]
+    ): RapHrrrConfirmation | null {
+        const key = this.getRapHrrrKey(cycleHour, runDate);
+        const rapData = this.pendingRapData.get(key);
+        
+        if (!rapData) {
+            logger.debug(
+                `[ConfirmationManager] No RAP data found for ${key}, cannot create confirmation`
+            );
+            return null;
+        }
+        
+        const hrrrData = new Map<string, CityGRIBData>();
+        const confirmedCities = new Set<string>();
+        const temperatureDifferences = new Map<string, number>();
+        const tolerance = config.RAP_HRRR_TEMP_TOLERANCE;
+        
+        // Store HRRR data and compare with RAP
+        for (const city of hrrrCityData) {
+            const cityId = city.cityName.toLowerCase().replace(/\s+/g, '_');
+            hrrrData.set(cityId, city);
+            
+            const rapCity = rapData.get(cityId);
+            if (rapCity) {
+                // Compare temperatures (both in Fahrenheit for consistency)
+                const tempDiff = Math.abs(rapCity.temperatureF - city.temperatureF);
+                temperatureDifferences.set(cityId, tempDiff);
+                
+                if (tempDiff <= tolerance) {
+                    confirmedCities.add(cityId);
+                    logger.debug(
+                        `[ConfirmationManager] City ${cityId} confirmed: ` +
+                        `RAP=${rapCity.temperatureF.toFixed(1)}°F, ` +
+                        `HRRR=${city.temperatureF.toFixed(1)}°F, ` +
+                        `diff=${tempDiff.toFixed(2)}°F (tolerance=${tolerance}°F)`
+                    );
+                } else {
+                    logger.info(
+                        `[ConfirmationManager] City ${cityId} NOT confirmed: ` +
+                        `RAP=${rapCity.temperatureF.toFixed(1)}°F, ` +
+                        `HRRR=${city.temperatureF.toFixed(1)}°F, ` +
+                        `diff=${tempDiff.toFixed(2)}°F > tolerance=${tolerance}°F`
+                    );
+                }
+            }
+        }
+        
+        const confirmation: RapHrrrConfirmation = {
+            cycleHour,
+            runDate: this.formatRunDate(runDate),
+            rapData,
+            hrrrData,
+            confirmedAt: new Date(),
+            confirmedCities,
+            temperatureDifferences,
+        };
+        
+        this.rapHrrrConfirmations.set(key, confirmation);
+        
+        logger.info(
+            `[ConfirmationManager] RAP-HRRR confirmation created for ${key}: ` +
+            `${confirmedCities.size}/${hrrrCityData.length} cities confirmed`
+        );
+        
+        // Emit event for system-wide notification
+        this.eventBus.emit({
+            type: 'RAP_HRRR_CONFIRMED',
+            payload: {
+                cycleHour,
+                runDate: this.formatRunDate(runDate),
+                confirmedAt: confirmation.confirmedAt,
+                confirmedCities: Array.from(confirmedCities),
+                temperatureDifferences,
+            },
+        });
+        
+        return confirmation;
+    }
+    
+    /**
+     * Check if a specific city has RAP-HRRR confirmation
+     * Used by trading logic when speed arb mode is OFF
+     */
+    public checkRapHrrrConfirmation(
+        cityId: string,
+        cycleHour: number,
+        runDate: Date | string
+    ): boolean {
+        const runDateStr = typeof runDate === 'string' ? runDate : this.formatRunDate(runDate);
+        const key = this.getRapHrrrKey(cycleHour, new Date(runDateStr + 'T00:00:00Z'));
+        const confirmation = this.rapHrrrConfirmations.get(key);
+        
+        if (!confirmation) {
+            return false;
+        }
+        
+        // Normalize cityId for lookup
+        const normalizedCityId = cityId.toLowerCase().replace(/\s+/g, '_');
+        return confirmation.confirmedCities.has(normalizedCityId);
+    }
+    
+    /**
+     * Get RAP-HRRR confirmation for a specific cycle
+     */
+    public getRapHrrrConfirmation(cycleHour: number, runDate: Date | string): RapHrrrConfirmation | null {
+        const runDateStr = typeof runDate === 'string' ? runDate : this.formatRunDate(runDate);
+        const key = this.getRapHrrrKey(cycleHour, new Date(runDateStr + 'T00:00:00Z'));
+        return this.rapHrrrConfirmations.get(key) ?? null;
+    }
+    
+    /**
+     * Get all RAP-HRRR confirmations
+     */
+    public getAllRapHrrrConfirmations(): RapHrrrConfirmation[] {
+        return Array.from(this.rapHrrrConfirmations.values());
+    }
+    
+    /**
+     * Generate key for RAP-HRRR confirmations
+     * Format: "YYYY-MM-DD-HHZ"
+     */
+    private getRapHrrrKey(cycleHour: number, runDate: Date): string {
+        return `${this.formatRunDate(runDate)}-${String(cycleHour).padStart(2, '0')}Z`;
+    }
+    
+    /**
+     * Format run date as YYYY-MM-DD string
+     */
+    private formatRunDate(date: Date): string {
+        return date.toISOString().split('T')[0];
     }
 
     /**

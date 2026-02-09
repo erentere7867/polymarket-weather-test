@@ -20,6 +20,7 @@ import {
     KNOWN_CITIES,
 } from './types.js';
 import { logger } from '../logger.js';
+import { config } from '../config.js';
 
 const execAsync = promisify(exec);
 
@@ -145,15 +146,19 @@ export class GRIB2Parser {
 
         try {
             await writePromise;
-            logger.debug(`[GRIB2Parser] tempFile ${tempFile} written, size: ${buffer.length} bytes`);
+            if (logger.levels[logger.level] >= logger.levels.debug) {
+                logger.debug(`[GRIB2Parser] tempFile ${tempFile} written, size: ${buffer.length} bytes`);
+            }
 
             // Quick validation: Show what fields are available in the file
-            try {
-                const { execSync } = await import('child_process');
-                const inventory = execSync(`${this.getWgrib2Path()} "${tempFile}" 2>/dev/null | head -5`, { encoding: 'utf8', timeout: 5000 });
-                logger.debug(`[GRIB2Parser] GRIB inventory: ${inventory.split('\n').length} messages found`);
-            } catch (e) {
-                logger.debug(`[GRIB2Parser] Could not get GRIB inventory: ${e}`);
+            if (logger.levels[logger.level] >= logger.levels.debug) {
+                try {
+                    const { execSync } = await import('child_process');
+                    const inventory = execSync(`${this.getWgrib2Path()} "${tempFile}" 2>/dev/null | head -5`, { encoding: 'utf8', timeout: 5000 });
+                    logger.debug(`[GRIB2Parser] GRIB inventory: ${inventory.split('\n').length} messages found`);
+                } catch (e) {
+                    logger.debug(`[GRIB2Parser] Could not get GRIB inventory: ${e}`);
+                }
             }
 
             let cityData: CityGRIBData[];
@@ -202,7 +207,7 @@ export class GRIB2Parser {
      * eliminates 12 process spawns (~80ms saved)
      */
     private async parseWithWgrib2Parallel(filePath: string, options: ParseOptions, citiesToProcess: typeof KNOWN_CITIES): Promise<CityGRIBData[]> {
-        return this.runWgrib2BatchAllCities(filePath, citiesToProcess);
+        return this.runWgrib2BatchAllCities(filePath, options.model, citiesToProcess);
     }
 
     /**
@@ -250,22 +255,28 @@ export class GRIB2Parser {
      * 
      * OPTIMIZATION: Uses spawn + stream processing to avoid buffering massive stdout
      */
-    private async runWgrib2BatchAllCities(filePath: string, citiesToProcess: typeof KNOWN_CITIES): Promise<CityGRIBData[]> {
+    private async runWgrib2BatchAllCities(filePath: string, model: ModelType, citiesToProcess: typeof KNOWN_CITIES): Promise<CityGRIBData[]> {
         // Use simpler matcher patterns - wgrib2 uses POSIX regex
         // Fixed: removed :.*: between variable and level (they're adjacent in inventory format)
         const matchers = 'TMP:2 m above ground|UGRD:10 m above ground|VGRD:10 m above ground|APCP:surface';
 
-        // Get grid bounds to filter cities within domain
+        // Only check bounds for regional models (HRRR, RAP)
+        // Global models (GFS, ECMWF) cover all cities by definition
+        const isGlobalModel = model === 'GFS' || model === 'ECMWF';
+
+        // Get grid bounds to filter cities within domain (only for regional models)
         let bounds: { minLat: number; maxLat: number; minLon: number; maxLon: number } | null = null;
-        try {
-            const { execSync } = await import('child_process');
-            const gridInfo = execSync(`${this.getWgrib2Path()} "${filePath}" -grid 2>/dev/null | head -5`, { encoding: 'utf8', timeout: 5000 });
-            bounds = this.parseGridBounds(gridInfo);
-            if (bounds) {
-                logger.debug(`[GRIB2Parser] Grid bounds: lat ${bounds.minLat}-${bounds.maxLat}, lon ${bounds.minLon}-${bounds.maxLon}`);
+        if (!isGlobalModel && logger.levels[logger.level] >= logger.levels.debug) {
+            try {
+                const { execSync } = await import('child_process');
+                const gridInfo = execSync(`${this.getWgrib2Path()} "${filePath}" -grid 2>/dev/null | head -5`, { encoding: 'utf8', timeout: 5000 });
+                bounds = this.parseGridBounds(gridInfo);
+                if (bounds) {
+                    logger.debug(`[GRIB2Parser] Grid bounds: lat ${bounds.minLat}-${bounds.maxLat}, lon ${bounds.minLon}-${bounds.maxLon}`);
+                }
+            } catch (e) {
+                logger.debug(`[GRIB2Parser] Could not parse grid bounds: ${e}`);
             }
-        } catch (e) {
-            logger.debug(`[GRIB2Parser] Could not parse grid bounds: ${e}`);
         }
 
         // Build multiple -lon flags for point extraction
@@ -283,8 +294,8 @@ export class GRIB2Parser {
             // Convert to 0-360 format
             const lon360 = city.coordinates.lon < 0 ? city.coordinates.lon + 360 : city.coordinates.lon;
             
-            // Check if city is within grid bounds (if we could parse them)
-            if (bounds) {
+            // Check if city is within grid bounds (only for regional models)
+            if (!isGlobalModel && bounds) {
                 // Handle longitude wrapping for bounds check
                 let inLonBounds = false;
                 if (bounds.minLon <= bounds.maxLon) {
@@ -308,7 +319,7 @@ export class GRIB2Parser {
             }
         }
         
-        if (skippedCities > 0) {
+        if (skippedCities > 0 && logger.levels[logger.level] >= logger.levels.debug) {
             logger.debug(`[GRIB2Parser] Skipped ${skippedCities} cities outside grid domain, processing ${cityLonArgs.length} cities`);
         }
         
@@ -326,7 +337,9 @@ export class GRIB2Parser {
             args.push('-lon', city.lon.toString(), city.lat.toString());
         }
 
-        logger.debug(`[GRIB2Parser] Spawning ${wgrib2Path} with ${args.length} args`);
+        if (logger.levels[logger.level] >= logger.levels.debug) {
+            logger.debug(`[GRIB2Parser] Spawning ${wgrib2Path} with ${args.length} args`);
+        }
 
         return new Promise((resolve, reject) => {
             const child = spawn(wgrib2Path, args);
@@ -399,9 +412,11 @@ export class GRIB2Parser {
                      this.processWgrib2Line(buffer.trim(), cityResults, cityCount, cityLats, cityLons);
                 }
 
-                // Count results before converting
-                const citiesWithTemp = cityResults.filter(r => r.TMP !== null).length;
-                logger.debug(`[GRIB2Parser] wgrib2 found ${citiesWithTemp}/${citiesToProcess.length} cities with temperature data`);
+                // Count results before converting (only log if debug enabled)
+                if (logger.levels[logger.level] >= logger.levels.debug) {
+                    const citiesWithTemp = cityResults.filter(r => r.TMP !== null).length;
+                    logger.debug(`[GRIB2Parser] wgrib2 found ${citiesWithTemp}/${citiesToProcess.length} cities with temperature data`);
+                }
 
                 // Convert results to CityGRIBData
                 const cityData: CityGRIBData[] = [];
@@ -638,12 +653,20 @@ export class GRIB2Parser {
      * Note: wgrib2 -version returns exit code 8, so we check if it runs at all
      */
     private checkWgrib2Available(): boolean {
-        // Try common paths first (bot may not have /usr/local/bin in PATH)
-        const commonPaths = [
+        // Build list of paths to try - config takes priority
+        const commonPaths: string[] = [];
+        
+        // First, check if a custom path is configured via environment variable
+        if (config.WGRIB2_PATH) {
+            commonPaths.push(config.WGRIB2_PATH);
+        }
+        
+        // Then try standard locations (bot may not have /usr/local/bin in PATH)
+        commonPaths.push(
             '/usr/local/bin/wgrib2',
             '/usr/bin/wgrib2',
             'wgrib2' // fallback to PATH
-        ];
+        );
 
         for (const cmd of commonPaths) {
             try {

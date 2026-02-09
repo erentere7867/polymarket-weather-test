@@ -6,7 +6,7 @@
 import { TradingClient } from '../polymarket/clob-client.js';
 import { TradingOpportunity, TradeOrder } from '../polymarket/types.js';
 import { DataStore } from '../realtime/data-store.js';
-import { config } from '../config.js';
+import { config, ORDER_CONFIG } from '../config.js';
 import { logger } from '../logger.js';
 
 interface ExecutionResult {
@@ -16,10 +16,10 @@ interface ExecutionResult {
     error?: string;
 }
 
-const TRADE_COOLDOWN_MS = 30000;
-const MAX_CONCURRENT_ORDERS = 5;
+const TRADE_COOLDOWN_MS = ORDER_CONFIG.ORDER_COOLDOWN_MS;
+const MAX_CONCURRENT_ORDERS = ORDER_CONFIG.MAX_CONCURRENT_ORDERS;
 const MAX_PRICE_DRIFT = 0.15;
-const MIN_EXECUTION_EDGE = 0.02;
+const MIN_EXECUTION_EDGE = ORDER_CONFIG.MIN_PRICE_IMPROVEMENT;
 
 export class OrderExecutor {
     private tradingClient: TradingClient;
@@ -96,7 +96,7 @@ export class OrderExecutor {
             }
 
             // Build order
-            const priceIncrement = opportunity.isGuaranteed ? 0.05 : 0.01;
+            const priceIncrement = opportunity.isGuaranteed ? ORDER_CONFIG.PRICE_IMPROVEMENT_INCREMENT : ORDER_CONFIG.MIN_PRICE_IMPROVEMENT;
             const order: TradeOrder = {
                 tokenId,
                 side: 'BUY',
@@ -140,17 +140,14 @@ export class OrderExecutor {
             return drift <= MAX_PRICE_DRIFT;
         });
 
-        // Execute in batches
+        // Execute all batches in parallel (removed artificial 50ms delay for ~50ms savings)
         for (let i = 0; i < eligible.length; i += MAX_CONCURRENT_ORDERS) {
             const batch = eligible.slice(i, i + MAX_CONCURRENT_ORDERS);
             const batchResults = await Promise.all(
                 batch.map(opp => this.executeOpportunity(opp))
             );
             results.push(...batchResults);
-            
-            if (i + MAX_CONCURRENT_ORDERS < eligible.length) {
-                await this.delay(50);
-            }
+            // Delay removed - was causing unnecessary latency between batches
         }
 
         return results;
@@ -162,8 +159,8 @@ export class OrderExecutor {
     private calculatePositionSize(opportunity: TradingOpportunity, edge: number, price: number): number {
         const maxSize = config.maxPositionSize;
         const kellyFraction = Math.abs(edge) * opportunity.confidence;
-        const halfKelly = kellyFraction * 0.5;
-        const usdcAmount = maxSize * Math.min(halfKelly * 10, 1);
+        const halfKelly = kellyFraction * ORDER_CONFIG.KELLY_MULTIPLIER;
+        const usdcAmount = maxSize * Math.min(halfKelly * ORDER_CONFIG.MAX_KELLY_SIZE, 1);
 
         if (price <= 0) return 0;
 

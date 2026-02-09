@@ -12,8 +12,8 @@ import { WeatherService } from '../weather/index.js';
 import type { WeatherData } from '../weather/types.js';
 import { DataStore } from './data-store.js';
 import { ParsedWeatherMarket } from '../polymarket/types.js';
-import { ForecastSnapshot } from './types.js';
-import { logger } from '../logger.js';
+import { ForecastSnapshot, ThresholdPosition } from './types.js';
+import { logger, rateLimitedLogger } from '../logger.js';
 import { config } from '../config.js';
 import { eventBus, ForecastTriggerEvent, FetchModeEnterEvent, FetchModeExitEvent } from './event-bus.js';
 import { ForecastStateMachine, forecastStateMachine } from './forecast-state-machine.js';
@@ -391,6 +391,7 @@ export class ForecastMonitor {
             const previousValue = currentState?.lastForecast?.forecastValue;
             const previousSource = currentState?.lastForecast?.weatherData?.source;
             const previousChangeTimestamp = currentState?.lastForecast?.changeTimestamp;
+            const previousThresholdPosition = currentState?.lastForecast?.thresholdPosition;
 
             const changeAmount = previousValue !== undefined ? Math.abs(forecastValue - previousValue) : 0;
             const significantChangeThreshold = 1;
@@ -409,11 +410,27 @@ export class ForecastMonitor {
             const realChange = valueChanged && !isNew;
 
             if (realChange) {
-                logger.info(`⚡ FORECAST CHANGED for ${city} (${market.metricType})`);
+                // Use rate-limited logger to prevent spam when many cities change
+                rateLimitedLogger.info(
+                    `forecast-change:${city}`,
+                    `⚡ FORECAST CHANGED for ${city} (${market.metricType})`,
+                    { changeAmount }
+                );
 
                 if (this.onForecastChanged) {
                     this.onForecastChanged(market.market.id, changeAmount);
                 }
+            }
+
+            // Calculate threshold position for speed arbitrage
+            let thresholdPosition: ThresholdPosition | undefined;
+            if (market.threshold !== undefined) {
+                thresholdPosition = this.calculateThresholdPosition(
+                    forecastValue,
+                    market.threshold,
+                    market.thresholdUnit,
+                    market.comparisonType
+                );
             }
 
             const snapshot: ForecastSnapshot = {
@@ -426,6 +443,9 @@ export class ForecastMonitor {
                 valueChanged: realChange,
                 changeAmount,
                 changeTimestamp,
+                // Threshold crossing detection fields
+                thresholdPosition,
+                previousThresholdPosition,
             };
 
             this.store.updateForecast(market.market.id, snapshot);
@@ -499,5 +519,72 @@ export class ForecastMonitor {
         }
 
         return null;
+    }
+
+    /**
+     * Calculate threshold position for speed arbitrage threshold-crossing detection.
+     * Returns the position relative to the market's threshold.
+     */
+    calculateThresholdPosition(
+        forecastValue: number,
+        threshold: number,
+        thresholdUnit: string | undefined,
+        comparisonType: string | undefined
+    ): ThresholdPosition {
+        // Convert threshold to Fahrenheit if needed
+        let thresholdF = threshold;
+        if (thresholdUnit === 'C') {
+            thresholdF = (threshold * 9 / 5) + 32;
+        }
+
+        const distance = forecastValue - thresholdF;
+        const now = new Date();
+
+        return {
+            relativeToThreshold: distance > 0.5 ? 'above' : distance < -0.5 ? 'below' : 'at',
+            distanceFromThreshold: Math.abs(distance),
+            timestamp: now,
+        };
+    }
+
+    /**
+     * Detect if a threshold crossing occurred between previous and current positions.
+     * Used by speed arbitrage to determine if a trade should be generated.
+     */
+    detectThresholdCrossing(
+        previous: ThresholdPosition | undefined,
+        current: ThresholdPosition,
+        minCrossingDistance: number = 0.5
+    ): { crossed: boolean; direction: 'up' | 'down' | 'none' } {
+        // No previous position - this is first data, not a crossing
+        if (!previous) {
+            return { crossed: false, direction: 'none' };
+        }
+
+        // Same side of threshold - no crossing
+        if (previous.relativeToThreshold === current.relativeToThreshold) {
+            return { crossed: false, direction: 'none' };
+        }
+
+        // Check if the crossing is significant enough (not just noise near threshold)
+        // At least one position should be sufficiently far from threshold
+        const hasSufficientDistance = 
+            previous.distanceFromThreshold >= minCrossingDistance ||
+            current.distanceFromThreshold >= minCrossingDistance;
+
+        if (!hasSufficientDistance) {
+            return { crossed: false, direction: 'none' };
+        }
+
+        // Determine direction
+        const crossedUp = previous.relativeToThreshold === 'below' && 
+                          current.relativeToThreshold === 'above';
+        const crossedDown = previous.relativeToThreshold === 'above' && 
+                            current.relativeToThreshold === 'below';
+
+        return {
+            crossed: crossedUp || crossedDown,
+            direction: crossedUp ? 'up' : crossedDown ? 'down' : 'none',
+        };
     }
 }

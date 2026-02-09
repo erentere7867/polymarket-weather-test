@@ -44,6 +44,8 @@ export interface Config {
     // Speed arbitrage settings
     skipPriceCheck: boolean;              // Skip market price reaction check on forecast changes (trade immediately)
     SPEED_ARBITRAGE_MODE: boolean;        // First-model-wins: all cities monitored via GFS+ECMWF, US cities also HRRR+RAP, trade on ANY model change
+    SPEED_ARB_REQUIRE_THRESHOLD_CROSSING: boolean;  // Require threshold crossing for speed arbitrage (default: true)
+    SPEED_ARB_MIN_CROSSING_DISTANCE: number;        // Minimum distance from threshold to consider crossing valid (default: 0.5)
 
     // Webhook-based forecast detection settings
     TOMORROW_WEBHOOK_SECRET: string;      // Secret for validating Tomorrow.io webhooks
@@ -53,6 +55,9 @@ export interface Config {
     IDLE_POLL_INTERVAL_MINUTES: number;   // Interval for IDLE mode polling (default: 5)
     USE_WEBHOOK_MODE: boolean;            // Enable webhook-based forecast detection (default: true)
 
+    // wgrib2 path configuration
+    WGRIB2_PATH: string;                  // Custom path to wgrib2 binary (default: auto-detect)
+
     // File-based ingestion settings
     S3_POLL_INTERVAL_MS: number;                  // S3 poll interval (default: 150ms)
     DETECTION_WINDOW_BUFFER_MINUTES: number;      // Buffer before expected publication (default: 5)
@@ -61,6 +66,7 @@ export interface Config {
     FORECAST_CHANGE_THRESHOLD_WIND_KPH: number;   // Wind speed change threshold (default: 2)
     FORECAST_CHANGE_THRESHOLD_PRECIP_MM: number;  // Precipitation change threshold (default: 0.1)
     ENABLE_FILE_BASED_INGESTION: boolean;         // Enable file-based ingestion (default: true)
+    RAP_HRRR_TEMP_TOLERANCE: number;              // Temperature tolerance for RAP-HRRR confirmation (°F, default: 2.0)
 
     // =====================================
     // NEW: Cross-Market Arbitrage Settings
@@ -223,6 +229,8 @@ export const config: Config = {
     // Speed arbitrage settings
     skipPriceCheck: getEnvVarBool('SKIP_PRICE_CHECK', false), // Skip market price reaction check on forecast changes
     SPEED_ARBITRAGE_MODE: getEnvVarBool('SPEED_ARBITRAGE_MODE', true), // First-model-wins mode
+    SPEED_ARB_REQUIRE_THRESHOLD_CROSSING: getEnvVarBool('SPEED_ARB_REQUIRE_THRESHOLD_CROSSING', true), // Require threshold crossing
+    SPEED_ARB_MIN_CROSSING_DISTANCE: getEnvVarNumber('SPEED_ARB_MIN_CROSSING_DISTANCE', 0.5), // Min distance from threshold
 
     // Webhook-based forecast detection settings
     TOMORROW_WEBHOOK_SECRET: getEnvVarOptional('TOMORROW_WEBHOOK_SECRET', ''),
@@ -232,6 +240,9 @@ export const config: Config = {
     IDLE_POLL_INTERVAL_MINUTES: getEnvVarNumber('IDLE_POLL_INTERVAL_MINUTES', 5),
     USE_WEBHOOK_MODE: getEnvVarBool('USE_WEBHOOK_MODE', true),
 
+    // wgrib2 path configuration
+    WGRIB2_PATH: getEnvVarOptional('WGRIB2_PATH', ''),  // Empty string means auto-detect
+
     // File-based ingestion settings
     S3_POLL_INTERVAL_MS: getEnvVarNumber('S3_POLL_INTERVAL_MS', 150),
     DETECTION_WINDOW_BUFFER_MINUTES: getEnvVarNumber('DETECTION_WINDOW_BUFFER_MINUTES', 5),
@@ -240,6 +251,7 @@ export const config: Config = {
     FORECAST_CHANGE_THRESHOLD_WIND_KPH: getEnvVarNumber('FORECAST_CHANGE_THRESHOLD_WIND_KPH', 2),
     FORECAST_CHANGE_THRESHOLD_PRECIP_MM: getEnvVarNumber('FORECAST_CHANGE_THRESHOLD_PRECIP_MM', 0.1),
     ENABLE_FILE_BASED_INGESTION: getEnvVarBool('ENABLE_FILE_BASED_INGESTION', true),
+    RAP_HRRR_TEMP_TOLERANCE: getEnvVarNumber('RAP_HRRR_TEMP_TOLERANCE', 2.0),
 
     // =====================================
     // NEW: Cross-Market Arbitrage Settings
@@ -374,3 +386,99 @@ export function validateConfig(): void {
         throw new Error('POLYMARKET_PRIVATE_KEY is required when not in simulation mode');
     }
 }
+
+// ============================================================
+// STRATEGY ORCHESTRATOR CONFIG
+// ============================================================
+export const STRATEGY_CONFIG = {
+    // Performance tracking
+    TARGET_WIN_RATE: 0.80,
+    MIN_SAMPLE_SIZE: 30,
+    PERFORMANCE_DECAY_HALF_LIFE_MS: 60000,
+    MIN_TRADES_FOR_WEIGHT_ADJUSTMENT: 50,
+    WEIGHT_ADJUSTMENT_STEP: 0.05,
+    
+    // Signal filtering
+    MIN_SIGNAL_CONFIDENCE: 0.6,
+    MAX_SIGNALS_PER_CYCLE: 5,
+};
+
+// ============================================================
+// ENTRY OPTIMIZER CONFIG  
+// ============================================================
+export const ENTRY_CONFIG = {
+    // Kelly criterion
+    KELLY_FRACTION: 0.25,
+    MAX_KELLY_FRACTION: 0.50,
+    MIN_KELLY_FRACTION: 0.10,
+    
+    // Volatility thresholds
+    LOW_VOLATILITY_THRESHOLD: 0.02,
+    HIGH_VOLATILITY_THRESHOLD: 0.05,
+    VOLATILITY_MULTIPLIER: 10,
+    
+    // Edge thresholds
+    MIN_EDGE_FOR_ENTRY: 0.05,
+    HIGH_CONFIDENCE_EDGE_BOOST: 1.2,
+};
+
+// ============================================================
+// EXIT OPTIMIZER CONFIG
+// ============================================================
+export const EXIT_CONFIG = {
+    // Take profit thresholds
+    TAKE_PROFIT_THRESHOLD: 0.16,
+    PARTIAL_TAKE_PROFIT_THRESHOLD: 0.08,
+    
+    // Stop loss thresholds
+    STOP_LOSS_THRESHOLD: -0.08,
+    TRAILING_STOP_TRIGGER: 0.10,
+    
+    // Regime-based adjustments
+    TRENDING_STOP_MULTIPLIER: 1.03,
+    TRENDING_TAKE_MULTIPLIER: 1.2,
+    RANGING_STOP_MULTIPLIER: 0.97,
+};
+
+// ============================================================
+// ORDER EXECUTION CONFIG
+// ============================================================
+export const ORDER_CONFIG = {
+    // Rate limiting
+    ORDER_COOLDOWN_MS: 30000,
+    MAX_CONCURRENT_ORDERS: 5,
+    MAX_POSITION_SIZE: 0.15,  // 15% of bankroll
+    MIN_ORDER_SIZE: 0.02,     // 2% of bankroll
+    
+    // Price improvement
+    PRICE_IMPROVEMENT_INCREMENT: 0.05,
+    MIN_PRICE_IMPROVEMENT: 0.01,
+    
+    // Kelly sizing
+    KELLY_MULTIPLIER: 0.5,
+    MAX_KELLY_SIZE: 10,
+};
+
+// ============================================================
+// SPEED ARBITRAGE CONFIG
+// ============================================================
+export const SPEED_ARBITRAGE_CONFIG = {
+    MAX_CHANGE_AGE_MS: 120000,
+    MIN_CONFIDENCE: 0.5,
+    MIN_EDGE: 0.03,
+    UNCERTAINTY_BASE: 3,
+    UNCERTAINTY_MULTIPLIER: 1.5,
+    CONFIDENCE_DIVISOR: 0.8,
+    // Threshold crossing settings
+    REQUIRE_THRESHOLD_CROSSING: true,   // Require threshold crossing for signals
+    MIN_CROSSING_DISTANCE: 0.5,         // Minimum distance from threshold (°F)
+};
+
+// ============================================================
+// CROSS MARKET CONFIG
+// ============================================================
+export const CROSS_MARKET_CONFIG = {
+    MIN_CORRELATION: 0.60,
+    MAX_LAG_MS: 300,
+    MIN_EDGE_DIFFERENTIAL: 0.03,
+};

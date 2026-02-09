@@ -87,7 +87,14 @@ export class ScheduleManager extends EventEmitter {
     private eventBus: EventBus;
     private activeWindows: Map<string, DetectionWindow> = new Map();
     private checkInterval: NodeJS.Timeout | null = null;
-    private readonly CHECK_INTERVAL_MS = 10000; // Check every 10 seconds for faster detection
+    private readonly CHECK_INTERVAL_MS = 1000; // Check every 1 second for faster detection
+    
+    /**
+     * RAP confirmation status per cycle hour
+     * Key format: "YYYY-MM-DD-HHZ" (date + cycle hour)
+     * HRRR must wait for RAP confirmation before starting detection
+     */
+    private rapConfirmationStatus: Map<string, boolean> = new Map();
 
     constructor(config: Partial<ScheduleManagerConfig> = {}) {
         super();
@@ -331,6 +338,62 @@ export class ScheduleManager extends EventEmitter {
         return CITY_MODEL_CONFIGS
             .filter(c => c.primaryModel === model)
             .map(c => c.cityName);
+    }
+
+    /**
+     * Set RAP confirmation status for a cycle hour
+     * This should be called when RAP file is confirmed (downloaded and parsed)
+     * @param cycleHour The cycle hour (0-23)
+     * @param runDate The run date
+     */
+    public setRapConfirmed(cycleHour: number, runDate: Date): void {
+        const key = this.getRapConfirmationKey(cycleHour, runDate);
+        this.rapConfirmationStatus.set(key, true);
+        logger.info(
+            `[ScheduleManager] RAP confirmed for ${String(cycleHour).padStart(2, '0')}Z ` +
+            `(key: ${key})`
+        );
+        
+        // Emit event for system-wide notification
+        this.eventBus.emit({
+            type: 'RAP_CONFIRMED',
+            payload: {
+                cycleHour,
+                runDate,
+                confirmedAt: new Date(),
+            },
+        });
+    }
+
+    /**
+     * Check if RAP is confirmed for a given cycle hour
+     * @param cycleHour The cycle hour (0-23)
+     * @param runDate The run date
+     * @returns true if RAP is confirmed, false otherwise
+     */
+    public isRapConfirmed(cycleHour: number, runDate: Date): boolean {
+        const key = this.getRapConfirmationKey(cycleHour, runDate);
+        return this.rapConfirmationStatus.get(key) === true;
+    }
+
+    /**
+     * Generate key for RAP confirmation status
+     * Format: "YYYY-MM-DD-HHZ"
+     */
+    private getRapConfirmationKey(cycleHour: number, runDate: Date): string {
+        const year = runDate.getUTCFullYear();
+        const month = String(runDate.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(runDate.getUTCDate()).padStart(2, '0');
+        const hh = String(cycleHour).padStart(2, '0');
+        return `${year}-${month}-${day}-${hh}Z`;
+    }
+
+    /**
+     * Clear RAP confirmation status (for cleanup or testing)
+     */
+    public clearRapConfirmation(cycleHour: number, runDate: Date): void {
+        const key = this.getRapConfirmationKey(cycleHour, runDate);
+        this.rapConfirmationStatus.delete(key);
     }
 
     /**

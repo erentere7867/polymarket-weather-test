@@ -539,13 +539,14 @@ export class HybridWeatherController extends EventEmitter {
         parseTimeMs: number;
         fileSize: number;
     }): void {
-        // Log all cities in payload for debugging
+        // Log all cities in payload for debugging (consolidated single log)
         const cityNames = payload.cityData.map(c => c.cityName);
-        logger.info(
-            `📁 FILE_CONFIRMED: ${payload.model} ${String(payload.cycleHour).padStart(2, '0')}Z ` +
-            `(${payload.cityData.length} cities, ${payload.detectionLatencyMs}ms latency)`
-        );
-        logger.info(`📁 FILE_CONFIRMED cities: ${cityNames.join(', ')}`);
+        logger.info(`📁 FILE_CONFIRMED: ${payload.model}`, {
+            cycleHour: payload.cycleHour,
+            cityCount: payload.cityData.length,
+            cities: cityNames.slice(0, 5), // Limit to first 5 to avoid huge logs
+            latencyMs: payload.detectionLatencyMs
+        });
         
         // Update historical learning data
         this.updateHistoricalData(payload.model, payload.cycleHour, payload.detectionLatencyMs);
@@ -746,7 +747,7 @@ export class HybridWeatherController extends EventEmitter {
                 });
             }
 
-            logger.info(`[HybridWeatherController] Emitted FORECAST_CHANGE for ${cityId} from ${payload.model} file (tempC=${cityData.temperatureC.toFixed(1)})`);
+            logger.debug(`[HybridWeatherController] Emitted FORECAST_CHANGE for ${cityId} from ${payload.model} file (tempC=${cityData.temperatureC.toFixed(1)})`);
         }
 
         // Only trigger runCycle (speed arb scan) when at least one city had a REAL forecast change
