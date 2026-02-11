@@ -6,7 +6,7 @@ import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { SimulationRunner } from '../simulation/runner.js';
 import { logger } from '../logger.js';
-import { config } from '../config.js';
+import { config, DASHBOARD_THRESHOLDS } from '../config.js';
 import { createWebhookRouter } from './tomorrow-webhook.js';
 import { webhookValidator } from './middleware/webhook-validator.js';
 import { forecastStateMachine, StateContext } from '../realtime/forecast-state-machine.js';
@@ -521,6 +521,13 @@ dashboardApp.get('/api/confidence', (req, res) => {
     const perf = runner.getComponentPerformance();
     const markets = runner.getStore().getAllMarkets();
     const strategyStats = runner.getStrategy().getStats();
+    const sim = runner.getSimulator();
+    
+    // Calculate average confidence from open positions
+    const openPositions = sim.getOpenPositions();
+    const avgConfidenceScore = openPositions.length > 0 
+        ? openPositions.reduce((sum, p) => sum + ((p as any).confidence || 0), 0) / openPositions.length 
+        : 0;
     
     res.json({
         totalMarketsAnalyzed: markets.length,
@@ -529,7 +536,7 @@ dashboardApp.get('/api/confidence', (req, res) => {
         confidenceBlocks: strategyStats.blockReasons.CONFIDENCE_BELOW_THRESHOLD,
         signalsGenerated: perf.confidenceCompression.signalsGenerated,
         tradesExecuted: perf.confidenceCompression.tradesExecuted,
-        avgConfidenceScore: 0, // TODO: Calculate from strategy
+        avgConfidenceScore,
         avgExecutionTimeMs: perf.confidenceCompression.avgExecutionTimeMs,
         totalPnl: perf.confidenceCompression.totalPnl,
         crossMarketOpportunities: perf.crossMarketArbitrage.opportunitiesDetected,
@@ -541,10 +548,7 @@ dashboardApp.get('/api/confidence', (req, res) => {
             us: { primary: 'HRRR', secondary: 'RAP', regime: 'GFS' },
             eu: { primary: 'ECMWF', secondary: 'GFS' },
         },
-        thresholds: {
-            temperature: 0.60,
-            precipitation: 0.75,
-        },
+        thresholds: DASHBOARD_THRESHOLDS,
     });
 });
 
@@ -590,6 +594,13 @@ dashboardApp.get('/api/poll', (req, res) => {
         };
     }).reverse();
 
+    // Calculate win/lose ratio from closed positions
+    const allClosedPositions = sim.getClosedPositions();
+    const wins = allClosedPositions.filter(p => (p.realizedPnL || 0) > 0).length;
+    const losses = allClosedPositions.filter(p => (p.realizedPnL || 0) < 0).length;
+    const draws = allClosedPositions.length - wins - losses;
+    const winRate = allClosedPositions.length > 0 ? (wins / allClosedPositions.length) * 100 : 0;
+
     res.json({
         status: {
             online: runner.isSimulationRunning(),
@@ -615,7 +626,7 @@ dashboardApp.get('/api/poll', (req, res) => {
             confidenceBlocks: strategyStats.blockReasons.CONFIDENCE_BELOW_THRESHOLD,
             signalsGenerated: perf.confidenceCompression.signalsGenerated,
             tradesExecuted: perf.confidenceCompression.tradesExecuted,
-            thresholds: { temperature: 0.60, precipitation: 0.75 },
+            thresholds: DASHBOARD_THRESHOLDS,
         },
         weather: {
             status: dashboardController.getSystemStatus(),
@@ -626,6 +637,14 @@ dashboardApp.get('/api/poll', (req, res) => {
             events: dashboardController.getRecentEvents(20),
             windows: dashboardController.getActiveWindows(),
             upcoming: dashboardController.getUpcomingRuns(5),
+        },
+        marketAnalysis: runner.getMarketAnalysis(),
+        winLossStats: {
+            wins,
+            losses,
+            draws,
+            winRate: winRate.toFixed(1),
+            totalTrades: allClosedPositions.length
         },
     });
 });

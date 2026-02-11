@@ -15,6 +15,26 @@ const MARKET_CAUGHT_UP_THRESHOLD = 0.02; // If price within 2% of probability, m
 // Default significant change (fallback)
 const DEFAULT_SIGNIFICANT_CHANGE = 1.0;
 
+/**
+ * Price velocity metrics for late-trade detection
+ */
+interface PriceVelocity {
+    change5m: number;        // Price change in last 5 minutes (as decimal, e.g., 0.02 = 2%)
+    change1m: number;        // Price change in last 1 minute
+    direction: 'for' | 'against' | 'neutral';  // Relative to our edge
+    isLate: boolean;         // True if price moving against us rapidly
+}
+
+/**
+ * Result of late-trade detection check
+ */
+interface LateTradeCheck {
+    isLate: boolean;
+    reason: string;
+    adjustedEdge: number;    // Edge reduced if partially late
+    priceVelocity: PriceVelocity;
+}
+
 interface CapturedOpportunity {
     forecastValue: number;
     capturedAt: Date;
@@ -57,9 +77,139 @@ export class OpportunityDetector {
     }> = new Map();
     private readonly PREFETCH_TTL_MS = 60000; // 1 minute TTL for prefetched data
 
+    // Price history for late-trade detection (marketId -> price history)
+    private priceHistory: Map<string, Array<{ price: number; timestamp: number }>> = new Map();
+    private readonly PRICE_HISTORY_MAX_AGE_MS = 10 * 60 * 1000; // Keep 10 minutes of price history
+
     constructor(store?: DataStore) {
         this.weatherService = new WeatherService();
         this.store = store ?? null;
+    }
+
+    /**
+     * Record market price for velocity calculation
+     * Call this whenever we get a market price update
+     */
+    recordPrice(marketId: string, price: number): void {
+        const now = Date.now();
+        
+        if (!this.priceHistory.has(marketId)) {
+            this.priceHistory.set(marketId, []);
+        }
+        
+        const history = this.priceHistory.get(marketId)!;
+        history.push({ price, timestamp: now });
+        
+        // Clean up old entries
+        while (history.length > 0 && now - history[0].timestamp > this.PRICE_HISTORY_MAX_AGE_MS) {
+            history.shift();
+        }
+    }
+
+    /**
+     * Calculate price velocity from price history
+     * Returns metrics about how fast and in what direction price is moving
+     */
+    calculatePriceVelocity(marketId: string, currentPrice: number, edge: number): PriceVelocity {
+        const history = this.priceHistory.get(marketId) || [];
+        const now = Date.now();
+        
+        // Get prices from 5 minutes ago
+        const price5mAgo = history.find(h => now - h.timestamp >= 4.5 * 60 * 1000 && now - h.timestamp <= 5.5 * 60 * 1000);
+        const change5m = price5mAgo ? currentPrice - price5mAgo.price : 0;
+        
+        // Get prices from 1 minute ago
+        const price1mAgo = history.find(h => now - h.timestamp >= 0.9 * 60 * 1000 && now - h.timestamp <= 1.1 * 60 * 1000);
+        const change1m = price1mAgo ? currentPrice - price1mAgo.price : 0;
+        
+        // Determine direction relative to our edge
+        // If edge > 0 (we want to buy YES), price going UP is against us
+        // If edge < 0 (we want to buy NO), price going DOWN is against us
+        let direction: 'for' | 'against' | 'neutral';
+        const absChange = Math.abs(change5m);
+        
+        if (absChange < 0.005) {
+            direction = 'neutral';
+        } else if (edge > 0) {
+            // We want to buy YES, so price increasing is bad
+            direction = change5m > 0 ? 'against' : 'for';
+        } else {
+            // We want to buy NO, so price decreasing is bad
+            direction = change5m < 0 ? 'against' : 'for';
+        }
+        
+        // Check if this is a "late" trade (price moving against us rapidly)
+        const isLate = direction === 'against' && absChange >= config.LATE_TRADE_PRICE_VELOCITY_THRESHOLD;
+        
+        return {
+            change5m,
+            change1m,
+            direction,
+            isLate
+        };
+    }
+
+    /**
+     * Check if trade is "late" (information already priced in)
+     * Returns adjusted edge and reason if late
+     */
+    isLateTrade(
+        market: ParsedWeatherMarket,
+        edge: number,
+        forecastTimestamp: Date | undefined
+    ): LateTradeCheck {
+        const marketId = market.market.id;
+        const currentPrice = market.yesPrice;
+        
+        // Calculate price velocity
+        const priceVelocity = this.calculatePriceVelocity(marketId, currentPrice, edge);
+        
+        // Check 1: Time since forecast
+        const timeSinceForecast = forecastTimestamp ? Date.now() - forecastTimestamp.getTime() : Infinity;
+        const forecastTooOld = timeSinceForecast > config.LATE_TRADE_MIN_TIME_SINCE_FORECAST;
+        
+        // Check 2: Price velocity
+        const priceMovingAgainst = priceVelocity.direction === 'against';
+        const rapidMove = Math.abs(priceVelocity.change5m) >= config.LATE_TRADE_PRICE_VELOCITY_THRESHOLD;
+        
+        // Determine if late
+        let isLate = false;
+        let reason = '';
+        let adjustedEdge = edge;
+        
+        if (forecastTooOld) {
+            isLate = true;
+            reason = `Forecast too old: ${(timeSinceForecast / 1000).toFixed(0)}s (max: ${config.LATE_TRADE_MIN_TIME_SINCE_FORECAST / 1000}s)`;
+        } else if (priceVelocity.isLate) {
+            isLate = true;
+            reason = `Late trade detected: Price moved ${(Math.abs(priceVelocity.change5m) * 100).toFixed(1)}% in 5 min (threshold: ${(config.LATE_TRADE_PRICE_VELOCITY_THRESHOLD * 100).toFixed(0)}%)`;
+            
+            // Reduce edge based on how much price has moved against us
+            const edgeReduction = Math.abs(priceVelocity.change5m) * config.LATE_TRADE_EDGE_DECAY_FACTOR;
+            adjustedEdge = edge > 0
+                ? Math.max(0, edge - edgeReduction)
+                : Math.min(0, edge + edgeReduction);
+            
+            if (Math.abs(adjustedEdge) < Math.abs(edge)) {
+                logger.info(`Adjusting edge from ${(edge * 100).toFixed(1)}% to ${(adjustedEdge * 100).toFixed(1)}% due to price velocity`);
+            }
+        } else if (priceMovingAgainst && rapidMove) {
+            // Price moving against us but not quite at threshold - still reduce edge
+            const edgeReduction = Math.abs(priceVelocity.change5m) * config.LATE_TRADE_EDGE_DECAY_FACTOR * 0.5;
+            adjustedEdge = edge > 0
+                ? Math.max(0, edge - edgeReduction)
+                : Math.min(0, edge + edgeReduction);
+            
+            reason = `Price moving against position: ${(priceVelocity.change5m * 100).toFixed(1)}% in 5 min`;
+            logger.warn(`⚠️ ${reason} - reducing edge`);
+        }
+        
+        return {
+            isLate,
+            reason,
+            adjustedEdge,
+            priceVelocity
+        };
     }
     
     /**
@@ -479,8 +629,44 @@ export class OpportunityDetector {
                 };
             }
 
+            // Record current price for velocity tracking
+            this.recordPrice(market.market.id, market.yesPrice);
+
             // Edge calculation: positive = market underprices YES, negative = market overprices YES
-            const edge = finalProbability - marketProbability;
+            let edge = finalProbability - marketProbability;
+            
+            // Check for late trade (information already priced in)
+            const lateTradeCheck = this.isLateTrade(market, edge, snapshotTimestamp);
+            
+            if (lateTradeCheck.isLate) {
+                logger.warn(`⚠️ ${lateTradeCheck.reason}`);
+                
+                // Use adjusted edge from late trade check
+                edge = lateTradeCheck.adjustedEdge;
+                
+                // If edge was reduced to near zero, don't trade
+                if (Math.abs(edge) < 0.02) {
+                    logger.info(`Trade blocked due to late detection: adjusted edge ${(edge * 100).toFixed(1)}% too small`);
+                    return {
+                        market,
+                        forecastProbability: finalProbability,
+                        marketProbability,
+                        edge,
+                        action: 'none',
+                        confidence: confidence * 0.5, // Reduced confidence for late trades
+                        reason: `Late trade blocked: ${lateTradeCheck.reason}`,
+                        weatherDataSource,
+                        forecastValue,
+                        forecastValueUnit,
+                        isGuaranteed,
+                        certaintySigma,
+                        snapshotYesPrice,
+                        snapshotNoPrice,
+                        snapshotTimestamp,
+                    };
+                }
+            }
+            
             const absEdge = Math.abs(edge);
 
             // Determine action based on edge

@@ -30,6 +30,11 @@ interface OpportunityAnalysis {
     blocked: boolean;
     blockReason?: BlockReason;
     signal?: EntrySignal;
+    marketProbability?: number;
+    modelProbability?: number;
+    rawEdge?: number;
+    confidenceScore?: number;
+    targetDate?: string;
 }
 
 interface CapturedOpportunity {
@@ -171,8 +176,37 @@ export class ConfidenceCompressionStrategy {
             });
         }
 
+        // Add confidence score to analysis
+        analysis.confidenceScore = confidenceResult.score;
+        if (market.targetDate) {
+            analysis.targetDate = market.targetDate.toISOString();
+        }
+
         if (blockReason) {
             analysis.blockReason = blockReason;
+            // Try to calculate probabilities for dashboard visibility even if blocked
+            try {
+                const state = this.store.getMarketState(market.market.id);
+                if (state?.lastForecast) {
+                    const forecastValue = state.lastForecast.forecastValue;
+                    const threshold = market.threshold || 0;
+                    const comparisonType = market.comparisonType || 'above';
+                    
+                    const modelProbability = this.confidenceToProbability(
+                        confidenceResult.score,
+                        forecastValue,
+                        threshold,
+                        comparisonType as 'above' | 'below'
+                    );
+                    const marketProbability = market.yesPrice;
+                    
+                    analysis.modelProbability = modelProbability;
+                    analysis.marketProbability = marketProbability;
+                    analysis.rawEdge = Math.abs(modelProbability - marketProbability);
+                }
+            } catch (e) {
+                // Ignore errors during speculative calculation
+            }
             return analysis;
         }
 
@@ -215,6 +249,11 @@ export class ConfidenceCompressionStrategy {
         const rawEdge = Math.abs(modelProbability - marketProbability);
         const buffer = this.UNCERTAINTY_BUFFER[marketType];
         const adjustedEdge = rawEdge - this.TRANSACTION_COST - buffer;
+
+        // Populate analysis with probability data
+        analysis.modelProbability = modelProbability;
+        analysis.marketProbability = marketProbability;
+        analysis.rawEdge = rawEdge;
 
         if (adjustedEdge < config.minEdgeThreshold) {
             analysis.blockReason = 'EDGE_TOO_SMALL';
@@ -267,6 +306,14 @@ export class ConfidenceCompressionStrategy {
         }
 
         return signals;
+    }
+
+    /**
+     * Get analysis for all markets (for dashboard)
+     */
+    getAllMarketAnalysis(): OpportunityAnalysis[] {
+        const markets = this.store.getAllMarkets();
+        return markets.map(market => this.analyzeMarket(market));
     }
 
     /**

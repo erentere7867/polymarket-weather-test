@@ -10,6 +10,7 @@
 
 import { ModelType } from '../weather/types.js';
 import { logger } from '../logger.js';
+import { ModelBiasCorrector, WeatherVariable, WeightedForecast } from './model-bias-profiles.js';
 
 /**
  * Role a model plays in the trading decision
@@ -122,8 +123,10 @@ const CITY_REGIONS: Record<string, 'US' | 'EUROPE' | 'GLOBAL'> = {
  */
 export class ModelHierarchy {
     private hierarchies: Map<string, ModelHierarchyConfig> = new Map();
+    private biasCorrector: ModelBiasCorrector;
 
     constructor() {
+        this.biasCorrector = new ModelBiasCorrector();
         // Pre-populate city hierarchies
         for (const [city, region] of Object.entries(CITY_REGIONS)) {
             const hierarchy = this.getHierarchyForRegion(region);
@@ -246,6 +249,152 @@ export class ModelHierarchy {
         CITY_REGIONS[normalized] = region;
         this.hierarchies.set(normalized, this.getHierarchyForRegion(region));
         logger.info(`[ModelHierarchy] Set ${cityId} to region ${region}`);
+    }
+
+    /**
+     * Get dynamic weight for a model based on horizon and variable
+     * Combines role-based weighting with bias corrector's horizon/skill weights
+     * 
+     * @param cityId - City identifier
+     * @param model - Model type
+     * @param horizonHours - Hours until forecast time
+     * @param variable - Weather variable type
+     * @returns Combined dynamic weight
+     */
+    getDynamicWeight(
+        cityId: string,
+        model: ModelType,
+        horizonHours: number,
+        variable: WeatherVariable = 'temperature'
+    ): number {
+        const role = this.getModelRole(cityId, model);
+        
+        // Base role weights: primary=1.0, secondary=0.6, regime=0.3
+        let roleWeight = 0.3;
+        if (role === 'primary') roleWeight = 1.0;
+        else if (role === 'secondary') roleWeight = 0.6;
+        
+        // Get horizon and skill weights from bias corrector
+        const combinedWeight = this.biasCorrector.getCombinedWeight(model, horizonHours, variable);
+        
+        // Final weight is product of role weight and combined bias weight
+        const dynamicWeight = roleWeight * combinedWeight;
+        
+        logger.debug(
+            `[ModelHierarchy] Dynamic weight for ${model} in ${cityId}: ` +
+            `role=${roleWeight.toFixed(2)}, combined=${combinedWeight.toFixed(3)}, ` +
+            `final=${dynamicWeight.toFixed(3)}`
+        );
+        
+        return dynamicWeight;
+    }
+
+    /**
+     * Get weighted ensemble forecast for a city
+     * Combines forecasts from all available models with dynamic weights
+     * 
+     * @param cityId - City identifier
+     * @param forecasts - Array of model forecasts
+     * @param variable - Weather variable type
+     * @param horizonHours - Hours until forecast time
+     * @returns Weighted ensemble result
+     */
+    getWeightedEnsembleForecast(
+        cityId: string,
+        forecasts: { model: ModelType; value: number }[],
+        variable: WeatherVariable,
+        horizonHours: number
+    ): {
+        mean: number;
+        variance: number;
+        spread: number;
+        weights: WeightedForecast[];
+        primaryModel: ModelType;
+    } {
+        const hierarchy = this.getHierarchy(cityId);
+        
+        // Apply bias corrections and get weights
+        const weightedForecasts: WeightedForecast[] = forecasts.map(f => {
+            const correctedValue = this.biasCorrector.applyBiasCorrection(
+                f.model,
+                f.value,
+                variable,
+                horizonHours
+            );
+            
+            const dynamicWeight = this.getDynamicWeight(
+                cityId,
+                f.model,
+                horizonHours,
+                variable
+            );
+            
+            const horizonWeight = this.biasCorrector.getHorizonWeight(f.model, horizonHours);
+            const skillWeight = this.biasCorrector.getSkillWeight(f.model, variable);
+            
+            return {
+                model: f.model,
+                value: f.value,
+                correctedValue,
+                weight: dynamicWeight,
+                horizonWeight,
+                skillWeight
+            };
+        });
+        
+        // Calculate weighted mean
+        let weightedSum = 0;
+        let totalWeight = 0;
+        
+        for (const wf of weightedForecasts) {
+            weightedSum += wf.correctedValue * wf.weight;
+            totalWeight += wf.weight;
+        }
+        
+        const mean = totalWeight > 0 ? weightedSum / totalWeight : 0;
+        
+        // Calculate ensemble spread
+        const spread = this.biasCorrector.getEnsembleSpread(
+            weightedForecasts.map(wf => ({ model: wf.model, value: wf.correctedValue }))
+        );
+        
+        // Variance includes inverse of total weight plus spread contribution
+        const baseVariance = totalWeight > 0 ? 1 / totalWeight : 1;
+        const variance = baseVariance + spread * spread * 0.5;
+        
+        logger.info(
+            `[ModelHierarchy] Ensemble forecast for ${cityId}: ` +
+            `mean=${mean.toFixed(2)}, variance=${variance.toFixed(4)}, ` +
+            `spread=${spread.toFixed(2)}, models=${forecasts.length}`
+        );
+        
+        return {
+            mean,
+            variance,
+            spread,
+            weights: weightedForecasts,
+            primaryModel: hierarchy.primary
+        };
+    }
+
+    /**
+     * Apply bias correction to a single forecast value
+     * Convenience method that delegates to ModelBiasCorrector
+     */
+    applyBiasCorrection(
+        model: ModelType,
+        value: number,
+        variable: WeatherVariable,
+        horizonHours: number
+    ): number {
+        return this.biasCorrector.applyBiasCorrection(model, value, variable, horizonHours);
+    }
+
+    /**
+     * Get the bias corrector instance for direct access
+     */
+    getBiasCorrector(): ModelBiasCorrector {
+        return this.biasCorrector;
     }
 }
 

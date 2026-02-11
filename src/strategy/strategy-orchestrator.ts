@@ -15,6 +15,7 @@ import { AdaptivePositionSizer } from './adaptive-position-sizer.js';
 import { PortfolioHeatManager } from './portfolio-heat-manager.js';
 import { MarketModel } from '../probability/market-model.js';
 import { OpportunityDetector } from '../bot/opportunity-detector.js';
+import { LatencyTracker } from '../realtime/latency-tracker.js';
 
 export interface StrategySignal {
   strategy: StrategyType;
@@ -23,6 +24,7 @@ export interface StrategySignal {
   confidence: number;
   expectedReturn: number;
   winProbability: number;
+  traceId?: string;  // Unique ID for end-to-end latency tracking
 }
 
 export type StrategyType = 
@@ -171,8 +173,14 @@ export class StrategyOrchestrator {
   /**
    * Main entry point: Analyze all markets and generate signals
    */
-  async analyzeAllMarkets(markets: ParsedWeatherMarket[]): Promise<StrategySignal[]> {
+  async analyzeAllMarkets(markets: ParsedWeatherMarket[], traceId?: string): Promise<StrategySignal[]> {
     const allSignals: StrategySignal[] = [];
+
+    // Record strategy start time for latency tracking
+    if (traceId) {
+      const latencyTracker = LatencyTracker.getInstance();
+      latencyTracker.recordTime(traceId, 'strategyStartTime', Date.now());
+    }
 
     // Check daily limits
     if (this.compoundState.dailyTrades >= this.MAX_DAILY_TRADES) {
@@ -206,9 +214,18 @@ export class StrategyOrchestrator {
     // Apply portfolio constraints
     const filteredSignals = this.applyPortfolioConstraints(allSignals);
 
-    logger.debug(`[StrategyOrchestrator] Analyzed ${markets.length} markets, ${filteredSignals.length} signals passed constraints`);
+    // Record strategy end time for latency tracking
+    if (traceId) {
+      const latencyTracker = LatencyTracker.getInstance();
+      latencyTracker.recordTime(traceId, 'strategyEndTime', Date.now());
+    }
 
-    return filteredSignals;
+    // Attach traceId to all signals for downstream tracking
+    const signalsWithTrace = filteredSignals.map(s => ({ ...s, traceId }));
+
+    logger.debug(`[StrategyOrchestrator] Analyzed ${markets.length} markets, ${signalsWithTrace.length} signals passed constraints`);
+
+    return signalsWithTrace;
   }
 
   /**

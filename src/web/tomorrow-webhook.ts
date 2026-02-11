@@ -6,7 +6,7 @@
 import { Router, Request, Response } from 'express';
 import { webhookValidator, getWebhookPayload, TomorrowWebhookPayload } from './middleware/webhook-validator.js';
 import { eventBus } from '../realtime/event-bus.js';
-import { findCity, Coordinates } from '../weather/types.js';
+import { findCity, Coordinates, KNOWN_CITIES } from '../weather/types.js';
 import { logger } from '../logger.js';
 import { config } from '../config.js';
 
@@ -100,8 +100,7 @@ function normalizeLocation(location: TomorrowWebhookPayload['location']): { city
     // spatial index or reverse geocoding
     const KNOWN_CITY_RADIUS_KM = 25; // Consider cities within 25km
 
-    // Import known cities and check distance
-    const { KNOWN_CITIES } = require('../weather/types.js');
+    // Check distance to known cities
     for (const city of KNOWN_CITIES) {
         const distance = calculateDistance(coordinates, city.coordinates);
         if (distance <= KNOWN_CITY_RADIUS_KM) {

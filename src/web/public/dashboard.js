@@ -204,9 +204,132 @@ async function fetchAllDashboardData() {
         
         // Update weather dashboard sections
         if (data.weather) updateDashboard(data.weather);
+
+        // Update market edge analysis (pass active positions for context)
+        if (data.marketAnalysis) updateMarketEdge(data.marketAnalysis, data.activePositions || []);
+        
+        // Update win/lose ratio
+        if (data.winLossStats) updateWinLossDisplay(data.winLossStats);
     } catch (err) {
         console.error('[Dashboard] Poll error:', err.message);
     }
+}
+
+/**
+ * Update Market Edge Overview
+ */
+function updateMarketEdge(analysis, activePositions = []) {
+    const list = document.getElementById('market-edge-list');
+    if (!list) return;
+
+    if (!Array.isArray(analysis) || analysis.length === 0) {
+        list.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-slate-500 italic">No active markets analyzed</td></tr>';
+        return;
+    }
+
+    // Sort by edge magnitude descending
+    const sorted = [...analysis].sort((a, b) => (b.rawEdge || 0) - (a.rawEdge || 0));
+
+    list.innerHTML = sorted.map(item => {
+        const mktProb = (item.marketProbability || 0) * 100;
+        const modelProb = (item.modelProbability || 0) * 100;
+        const edge = (item.rawEdge || 0) * 100;
+        const conf = (item.confidenceScore || 0) * 100;
+        
+        // Find position
+        const position = activePositions.find(p => p.marketId === item.marketId);
+        const posText = position ? `${position.shares} ${position.side.toUpperCase()}` : '--';
+        const posClass = position ? (position.side === 'yes' ? 'text-emerald-400' : 'text-rose-400') : 'text-slate-600';
+
+        // Target Date
+        let targetText = '--';
+        if (item.targetDate) {
+            const d = new Date(item.targetDate);
+            targetText = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        }
+
+        let statusClass = 'text-slate-500';
+        let statusText = 'Tracking';
+        
+        if (!item.blocked) {
+            statusClass = 'text-emerald-400 font-bold animate-pulse';
+            statusText = 'TRADING';
+        } else if (item.blockReason === 'EDGE_TOO_SMALL') {
+            statusClass = 'text-slate-500';
+            statusText = 'No Edge';
+        } else if (item.blockReason === 'CONFIDENCE_BELOW_THRESHOLD') {
+            statusClass = 'text-amber-500';
+            statusText = 'Low Conf';
+        } else {
+            statusClass = 'text-rose-400';
+            statusText = item.blockReason?.replace(/_/g, ' ') || 'Blocked';
+        }
+
+        // Highlight edge
+        const edgeClass = edge > 5 ? 'text-emerald-400 font-bold' : (edge > 2 ? 'text-emerald-300' : 'text-slate-400');
+
+        return `
+            <tr class="border-b border-slate-700/50 hover:bg-slate-800/30 transition-colors">
+                <td class="p-3">
+                    <div class="font-mono text-xs text-slate-400">${item.marketId.substring(0, 8)}...</div>
+                    <div class="text-xs text-slate-500">${item.blockReason ? '' : (item.signal?.side?.toUpperCase() || '')}</div>
+                </td>
+                <td class="p-3 text-right font-mono text-xs ${posClass}">${posText}</td>
+                <td class="p-3 text-right font-mono text-xs text-slate-400">${targetText}</td>
+                <td class="p-3 text-right font-mono text-slate-300">${mktProb.toFixed(1)}%</td>
+                <td class="p-3 text-right font-mono text-blue-300">${modelProb.toFixed(1)}%</td>
+                <td class="p-3 text-right font-mono ${edgeClass}">${edge.toFixed(1)}%</td>
+                <td class="p-3 text-right font-mono text-violet-300">${conf.toFixed(0)}%</td>
+                <td class="p-3 text-center text-xs ${statusClass}">${statusText}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+/**
+ * Update Model Intelligence Panel (part of dashboard update)
+ */
+function updateModelIntelligence(models) {
+    const grid = document.getElementById('model-intelligence-grid');
+    if (!grid) return;
+    
+    // We reuse the data from 'models' passed to updateDashboard
+    // But we render it differently here (more compact/intelligence focused)
+    
+    if (!Array.isArray(models)) return;
+
+    grid.innerHTML = models.map(m => {
+        const lastRunTime = m.lastRun ? new Date(m.lastRun) : null;
+        const nextRunTime = m.nextExpected ? new Date(m.nextExpected) : null;
+        
+        // Calculate delay/freshness
+        let status = 'Unknown';
+        let statusColor = 'text-slate-500';
+        
+        if (m.status === 'CONFIRMED') {
+            status = 'Fresh';
+            statusColor = 'text-emerald-400';
+        } else if (m.status === 'DETECTING') {
+            status = 'Ingesting...';
+            statusColor = 'text-amber-400 animate-pulse';
+        } else if (m.status === 'WAITING') {
+            status = 'Waiting';
+            statusColor = 'text-blue-400';
+        }
+        
+        return `
+            <div class="flex items-center justify-between p-2 bg-slate-800/30 rounded border border-slate-700/30">
+                <div class="flex items-center space-x-3">
+                    <div class="w-2 h-2 rounded-full ${m.status === 'CONFIRMED' ? 'bg-emerald-500' : (m.status === 'DETECTING' ? 'bg-amber-500' : 'bg-slate-600')}"></div>
+                    <span class="font-bold text-slate-200">${m.model}</span>
+                </div>
+                <div class="text-right">
+                    <div class="text-xs ${statusColor}">${status}</div>
+                    <div class="text-[10px] text-slate-500 font-mono">${m.lastRun ? formatTimeAgo(lastRunTime) : 'No data'}</div>
+                </div>
+            </div>
+        `;
+    }).join('');
 }
 
 /**
@@ -216,12 +339,13 @@ function showError(message) {
     const elements = [
         'fi-system-status',
         'city-coverage-container',
-        'event-log-container'
+        'event-log-container',
+        'market-edge-list'
     ];
     elements.forEach(id => {
         const el = document.getElementById(id);
         if (el) {
-            el.innerHTML = `<div class="text-rose-400 text-sm">Error: ${message}</div>`;
+            el.innerHTML = `<div class="text-rose-400 text-sm p-2">Error: ${message}</div>`;
         }
     });
 }
@@ -262,6 +386,19 @@ function updateWebhookDisplay(webhook) {
 }
 
 /**
+ * Update win/lose ratio display from batched poll data
+ */
+function updateWinLossDisplay(stats) {
+    const winsEl = document.getElementById('wins-count');
+    const lossesEl = document.getElementById('losses-count');
+    const winRateEl = document.getElementById('win-rate');
+    
+    if (winsEl) winsEl.textContent = stats.wins || 0;
+    if (lossesEl) lossesEl.textContent = stats.losses || 0;
+    if (winRateEl) winRateEl.textContent = stats.winRate || '0.0';
+}
+
+/**
  * Update confidence compression strategy panel
  */
 function updateConfidencePanel(data) {
@@ -292,7 +429,10 @@ function updateConfidencePanel(data) {
  */
 function updateDashboard(data) {
     if (data.status) updateSystemStatus(data.status);
-    if (data.models) updateModelStatus(data.models);
+    if (data.models) {
+        updateModelStatus(data.models);
+        updateModelIntelligence(data.models);
+    }
     if (data.cities) updateCityCoverage(data.cities);
     if (data.latency) updateLatencyMetrics(data.latency);
     if (data.apiFallback) updateApiFallbackStatus(data.apiFallback);
@@ -1000,8 +1140,8 @@ function updatePositionsDisplay(activePositions, closedPositions) {
         if (!Array.isArray(closedPositions) || closedPositions.length === 0) {
             closedPositionsEl.innerHTML = '<div class="text-slate-500 text-sm italic">No closed positions</div>';
         } else {
-            // Show only the 5 most recent closed positions
-            closedPositionsEl.innerHTML = closedPositions.slice(0, 5).map(pos => {
+            // Show the 25 most recent closed positions
+            closedPositionsEl.innerHTML = closedPositions.slice(0, 25).map(pos => {
                 const pnl = pos.realizedPnL || 0;
                 const pnlPercent = pos.pnlPercent || 0;
                 const pnlClass = pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
@@ -1054,6 +1194,24 @@ function updatePortfolioDisplay(data) {
         // Fallback from portfolio data
         if (!openPositionsEl.textContent || openPositionsEl.textContent === '--') {
             openPositionsEl.textContent = data.openPositions || '0';
+        }
+    }
+
+    // Update Risk Panel
+    const riskCashEl = document.getElementById('risk-cash');
+    const riskAllocatedEl = document.getElementById('risk-allocated');
+    const riskBarEl = document.getElementById('risk-bar');
+    const riskTextEl = document.getElementById('risk-text');
+
+    if (riskCashEl) riskCashEl.textContent = `$${(data.currentCash || 0).toLocaleString()}`;
+    if (riskAllocatedEl) {
+        const allocated = (data.totalValue || 0) - (data.currentCash || 0);
+        riskAllocatedEl.textContent = `$${allocated.toLocaleString()}`;
+        
+        if (riskBarEl && riskTextEl && data.totalValue > 0) {
+            const percent = (allocated / data.totalValue) * 100;
+            riskBarEl.style.width = `${percent}%`;
+            riskTextEl.textContent = `${percent.toFixed(1)}% utilized`;
         }
     }
 }

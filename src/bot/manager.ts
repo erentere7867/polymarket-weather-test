@@ -3,6 +3,8 @@
  * Clean dual-mode implementation:
  * - SPEED MODE: Fast execution on forecast changes (speed arbitrage)
  * - SAFE MODE: Conservative execution with high confidence requirements
+ *
+ * Integrates DrawdownKillSwitch for risk control
  */
 
 import { WeatherScanner } from '../polymarket/weather-scanner.js';
@@ -22,6 +24,7 @@ import { forecastStateMachine } from '../realtime/forecast-state-machine.js';
 import { EntrySignal } from '../strategy/entry-optimizer.js';
 import { OpportunityDetector } from './opportunity-detector.js';
 import { MarketModel } from '../probability/market-model.js';
+import { DrawdownKillSwitch } from '../strategy/drawdown-kill-switch.js';
 
 export type TradingMode = 'speed' | 'safe' | 'orchestrated';
 
@@ -47,6 +50,9 @@ export class BotManager {
     private dataStore: DataStore;
     private priceTracker: PriceTracker;
     private forecastMonitor: ForecastMonitor;
+    
+    // Kill switch for risk control
+    private killSwitch: DrawdownKillSwitch;
 
     private isRunning: boolean = false;
     private stats: BotStats;
@@ -68,6 +74,9 @@ export class BotManager {
     constructor(mode?: TradingMode, initialCapital: number = 1000) {
         this.tradingMode = mode || (config.ENABLE_STRATEGY_ORCHESTRATOR ? 'orchestrated' : (config.SPEED_ARBITRAGE_MODE ? 'speed' : 'safe'));
         this.initialCapital = initialCapital;
+        
+        // Initialize kill switch singleton
+        this.killSwitch = DrawdownKillSwitch.getInstance(initialCapital);
         
         this.weatherScanner = new WeatherScanner();
         this.tradingClient = new TradingClient();
@@ -233,6 +242,22 @@ export class BotManager {
         const cycleStart = Date.now();
 
         try {
+            // CRITICAL: Check kill switch before any trading
+            if (this.killSwitch.shouldHaltTrading()) {
+                logger.warn('[BotManager] Trading halted by kill switch', {
+                    killSwitchState: this.killSwitch.getState()
+                });
+                return;
+            }
+            
+            // Log warning if approaching thresholds
+            const warningStatus = this.killSwitch.getWarningStatus();
+            if (warningStatus.isWarning) {
+                logger.warn('[BotManager] Approaching kill switch thresholds', {
+                    warnings: warningStatus.warnings
+                });
+            }
+
             const allMarkets = this.dataStore.getAllMarkets();
             this.stats.marketsScanned += allMarkets.length;
 
@@ -485,6 +510,35 @@ export class BotManager {
      */
     getMode(): TradingMode {
         return this.tradingMode;
+    }
+    
+    /**
+     * Get the kill switch instance
+     */
+    getKillSwitch(): DrawdownKillSwitch {
+        return this.killSwitch;
+    }
+    
+    /**
+     * Record a trade result for kill switch monitoring
+     * Call this after each trade completes with its P&L
+     */
+    recordTradeResult(pnl: number, capitalAfter?: number): void {
+        this.killSwitch.recordTradeResult(pnl, capitalAfter);
+    }
+    
+    /**
+     * Get kill switch status summary for logging
+     */
+    getKillSwitchStatus(): string {
+        return this.killSwitch.getStatusSummary();
+    }
+    
+    /**
+     * Manually reset the kill switch (use with caution)
+     */
+    resetKillSwitch(): { success: boolean; message: string } {
+        return this.killSwitch.manualReset();
     }
 
     /**

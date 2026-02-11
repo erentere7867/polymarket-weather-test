@@ -2,11 +2,14 @@
  * Portfolio Heat Manager
  * Tracks exposure and enforces risk limits
  * In-memory only - no database
+ *
+ * Integrates with DrawdownKillSwitch for risk control
  */
 
 import { StrategyType } from './strategy-orchestrator.js';
 import { logger } from '../logger.js';
 import { config } from '../config.js';
+import { DrawdownKillSwitch } from './drawdown-kill-switch.js';
 
 interface Position {
   marketId: string;
@@ -29,6 +32,9 @@ export class PortfolioHeatManager {
   private currentCapital: number;
   private positions: Map<string, Position> = new Map();
   private correlationMatrix: Map<string, Set<string>> = new Map();
+  
+  // Kill switch integration
+  private killSwitch: DrawdownKillSwitch;
 
   // Limits
   private readonly MAX_HEAT = config.MAX_KELLY_HEAT || 0.30;
@@ -39,6 +45,9 @@ export class PortfolioHeatManager {
   constructor(initialCapital: number) {
     this.initialCapital = initialCapital;
     this.currentCapital = initialCapital;
+    
+    // Initialize kill switch with the same capital
+    this.killSwitch = DrawdownKillSwitch.getInstance(initialCapital);
   }
 
   /**
@@ -46,6 +55,9 @@ export class PortfolioHeatManager {
    */
   updateCapital(newCapital: number): void {
     this.currentCapital = newCapital;
+    
+    // Also update kill switch capital
+    this.killSwitch.setCapital(newCapital);
   }
 
   /**
@@ -91,8 +103,25 @@ export class PortfolioHeatManager {
 
   /**
    * Check if we can add a position
+   * Now includes kill switch check as first line of defense
    */
   canAddPosition(marketId: string, size: number): boolean {
+    // CRITICAL: Check kill switch first
+    if (this.killSwitch.shouldHaltTrading()) {
+      logger.warn(`[PortfolioHeat] Rejected: Kill switch is active`, {
+        killSwitchState: this.killSwitch.getState()
+      });
+      return false;
+    }
+    
+    // Log warning if approaching thresholds
+    const warningStatus = this.killSwitch.getWarningStatus();
+    if (warningStatus.isWarning) {
+      logger.warn(`[PortfolioHeat] Warning: Approaching kill switch thresholds`, {
+        warnings: warningStatus.warnings
+      });
+    }
+
     // Check if already have position
     if (this.positions.has(marketId)) {
       return false;
@@ -341,6 +370,32 @@ export class PortfolioHeatManager {
     this.positions.clear();
     this.correlationMatrix.clear();
     this.currentCapital = this.initialCapital;
+  }
+  
+  /**
+   * Get the kill switch instance for direct access
+   */
+  getKillSwitch(): DrawdownKillSwitch {
+    return this.killSwitch;
+  }
+  
+  /**
+   * Record a trade result for kill switch monitoring
+   */
+  recordTradeResult(pnl: number, capitalAfter?: number): void {
+    this.killSwitch.recordTradeResult(pnl, capitalAfter);
+    
+    // Update our capital tracking
+    if (capitalAfter !== undefined) {
+      this.currentCapital = capitalAfter;
+    }
+  }
+  
+  /**
+   * Get kill switch status summary
+   */
+  getKillSwitchStatus(): string {
+    return this.killSwitch.getStatusSummary();
   }
 }
 

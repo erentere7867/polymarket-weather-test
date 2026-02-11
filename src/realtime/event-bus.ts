@@ -6,6 +6,7 @@
 
 import { Coordinates, FileDetectedData, FileConfirmedData, DetectionWindow, ModelType } from '../weather/types.js';
 import { logger } from '../logger.js';
+import { LatencyTracker } from './latency-tracker.js';
 
 // Event type definitions
 export type EventType =
@@ -93,6 +94,7 @@ export interface FileDetectedEvent {
         detectionLatencyMs: number;
         fileSize: number;
         lastModified: Date;
+        traceId?: string;  // Unique ID for end-to-end latency tracking
     };
 }
 
@@ -109,6 +111,7 @@ export interface FileConfirmedEvent {
         downloadTimeMs: number;
         parseTimeMs: number;
         fileSize: number;
+        traceId?: string;  // Unique ID for end-to-end latency tracking
     };
 }
 
@@ -359,6 +362,9 @@ export class EventBus {
         // Track event for dashboard (fast path)
         this.trackEventForDashboard(event);
 
+        // Track latency for events with traceId
+        this.trackEventLatency(event);
+
         // Convert handlers to array for faster iteration
         const handlerArray = Array.from(handlers);
         
@@ -379,6 +385,20 @@ export class EventBus {
                 const error = err as Error;
                 logger.error(`Error in event handler for ${event.type}`, { error: error.message, stack: error.stack });
             }
+        }
+    }
+
+    /**
+     * Track latency for events with traceId
+     */
+    private trackEventLatency<T extends Event>(event: T): void {
+        const latencyTracker = LatencyTracker.getInstance();
+        
+        // Record eventEmitTime for events with traceId
+        if (event.type === 'FILE_DETECTED' && (event.payload as any).traceId) {
+            latencyTracker.recordTime((event.payload as any).traceId, 'eventEmitTime', Date.now());
+        } else if (event.type === 'FILE_CONFIRMED' && (event.payload as any).traceId) {
+            latencyTracker.recordTime((event.payload as any).traceId, 'eventEmitTime', Date.now());
         }
     }
 

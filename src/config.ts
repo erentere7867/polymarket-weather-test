@@ -173,6 +173,54 @@ export interface Config {
     ENABLE_EARLY_TRIGGER: boolean;                // Enable early trigger mode (default: true)
     EARLY_TRIGGER_MINUTES_BEFORE: number;         // Minutes before expected publication (default: 2)
     EARLY_TRIGGER_AGGRESSIVE_POLL_MS: number;     // Poll interval in early trigger (default: 25)
+
+    // =====================================
+    // NEW: Transaction Costs & Safety Margins
+    // =====================================
+    POLYMARKET_FEE_RATE: number;                  // 1% typical Polymarket fee (default: 0.01)
+    SAFETY_MARGIN_HIGH_CONFIDENCE: number;        // 1% for 3σ+ trades (default: 0.01)
+    SAFETY_MARGIN_MEDIUM_CONFIDENCE: number;      // 1.5% for 2σ+ trades (default: 0.015)
+    SAFETY_MARGIN_LOW_CONFIDENCE: number;         // 2% for lower confidence trades (default: 0.02)
+    BID_ASK_SPREAD_ESTIMATE: number;              // 1% typical spread cost (default: 0.01)
+    MIN_ADJUSTED_EDGE_THRESHOLD: number;          // Minimum adjusted edge to trade (default: 0.02 = 2%)
+
+    // =====================================
+    // NEW: Drawdown Kill Switch Settings
+    // =====================================
+    DRAWDOWN_DAILY_LOSS_LIMIT: number;            // 5% daily loss limit (default: 0.05)
+    DRAWDOWN_MAX_DRAWDOWN_LIMIT: number;          // 15% max drawdown from peak (default: 0.15)
+    DRAWDOWN_CONSECUTIVE_LOSSES: number;          // Halt after N consecutive losses (default: 5)
+    DRAWDOWN_COOLDOWN_HOURS: number;              // Cooldown hours after trigger (default: 24)
+    DRAWDOWN_MIN_TRADES_BEFORE_KILL: number;      // Min trades before kill switch activates (default: 3)
+
+    // =====================================
+    // NEW: Model Bias Correction Settings
+    // =====================================
+    MODEL_BIAS_CORRECTION_ENABLED: boolean;       // Enable bias correction for model forecasts (default: true)
+    MODEL_HORIZON_WEIGHTING_ENABLED: boolean;     // Enable horizon-aware model weighting (default: true)
+    MODEL_ENSEMBLE_SPREAD_MULTIPLIER: number;     // How much spread affects variance (default: 0.5)
+
+    // =====================================
+    // NEW: Late-Trade Detection Settings
+    // =====================================
+    LATE_TRADE_PRICE_VELOCITY_THRESHOLD: number;  // 2% price move in 5 min = late
+    LATE_TRADE_EDGE_DECAY_FACTOR: number;         // Reduce edge when price moving against us
+    LATE_TRADE_MIN_TIME_SINCE_FORECAST: number;   // 30 seconds max freshness
+
+    // =====================================
+    // NEW: Liquidity Filtering Settings
+    // =====================================
+    MIN_ORDER_BOOK_DEPTH_USD: number;             // Minimum $1000 liquidity
+    MAX_BID_ASK_SPREAD: number;                   // 3% max spread
+    MIN_AVAILABLE_LIQUIDITY_SHARES: number;       // Minimum shares available
+
+    // =====================================
+    // NEW: Latency Tracking Settings
+    // =====================================
+    LATENCY_TRACKING_ENABLED: boolean;            // Enable latency tracking (default: true)
+    LATENCY_LOG_ALL_TRACES: boolean;              // Log all traces or just slow ones (default: false)
+    LATENCY_SLOW_TRACE_THRESHOLD_MS: number;      // Threshold for slow trace warning (default: 5000)
+    LATENCY_STATS_WINDOW_SIZE: number;            // Number of traces to keep for stats (default: 100)
 }
 
 function getEnvVarOptional(name: string, defaultValue: string): string {
@@ -360,6 +408,54 @@ export const config: Config = {
     ENABLE_EARLY_TRIGGER: getEnvVarBool('ENABLE_EARLY_TRIGGER', true),
     EARLY_TRIGGER_MINUTES_BEFORE: getEnvVarNumber('EARLY_TRIGGER_MINUTES_BEFORE', 2), // Start aggressive polling 2 min before expected
     EARLY_TRIGGER_AGGRESSIVE_POLL_MS: getEnvVarNumber('EARLY_TRIGGER_AGGRESSIVE_POLL_MS', 25), // 25ms polling in early trigger mode
+
+    // =====================================
+    // NEW: Transaction Costs & Safety Margins
+    // =====================================
+    POLYMARKET_FEE_RATE: 0,                                                          // Polymarket has NO transaction fees
+    SAFETY_MARGIN_HIGH_CONFIDENCE: getEnvVarNumber('SAFETY_MARGIN_HIGH_CONFIDENCE', 0.01),     // 1% for 3σ+ trades
+    SAFETY_MARGIN_MEDIUM_CONFIDENCE: getEnvVarNumber('SAFETY_MARGIN_MEDIUM_CONFIDENCE', 0.015), // 1.5% for 2σ+ trades
+    SAFETY_MARGIN_LOW_CONFIDENCE: getEnvVarNumber('SAFETY_MARGIN_LOW_CONFIDENCE', 0.02),       // 2% for lower confidence trades
+    BID_ASK_SPREAD_ESTIMATE: getEnvVarNumber('BID_ASK_SPREAD_ESTIMATE', 0.01),                 // 1% typical spread cost
+    MIN_ADJUSTED_EDGE_THRESHOLD: getEnvVarNumber('MIN_ADJUSTED_EDGE_THRESHOLD', 0.02),         // 2% minimum adjusted edge
+
+    // =====================================
+    // NEW: Drawdown Kill Switch Settings
+    // =====================================
+    DRAWDOWN_DAILY_LOSS_LIMIT: getEnvVarNumber('DRAWDOWN_DAILY_LOSS_LIMIT', 0.05),             // 5% daily loss limit
+    DRAWDOWN_MAX_DRAWDOWN_LIMIT: getEnvVarNumber('DRAWDOWN_MAX_DRAWDOWN_LIMIT', 0.15),         // 15% max drawdown from peak
+    DRAWDOWN_CONSECUTIVE_LOSSES: getEnvVarNumber('DRAWDOWN_CONSECUTIVE_LOSSES', 5),            // Halt after 5 consecutive losses
+    DRAWDOWN_COOLDOWN_HOURS: getEnvVarNumber('DRAWDOWN_COOLDOWN_HOURS', 24),                   // 24 hour cooldown after trigger
+    DRAWDOWN_MIN_TRADES_BEFORE_KILL: getEnvVarNumber('DRAWDOWN_MIN_TRADES_BEFORE_KILL', 3),   // Min trades before kill switch activates
+
+    // =====================================
+    // NEW: Model Bias Correction Settings
+    // =====================================
+    MODEL_BIAS_CORRECTION_ENABLED: getEnvVarBool('MODEL_BIAS_CORRECTION_ENABLED', true),       // Enable bias correction
+    MODEL_HORIZON_WEIGHTING_ENABLED: getEnvVarBool('MODEL_HORIZON_WEIGHTING_ENABLED', true),   // Enable horizon-aware weighting
+    MODEL_ENSEMBLE_SPREAD_MULTIPLIER: getEnvVarNumber('MODEL_ENSEMBLE_SPREAD_MULTIPLIER', 0.5), // How much spread affects variance
+
+    // =====================================
+    // NEW: Late-Trade Detection Settings
+    // =====================================
+    LATE_TRADE_PRICE_VELOCITY_THRESHOLD: getEnvVarNumber('LATE_TRADE_PRICE_VELOCITY_THRESHOLD', 0.02),  // 2% price move in 5 min = late
+    LATE_TRADE_EDGE_DECAY_FACTOR: getEnvVarNumber('LATE_TRADE_EDGE_DECAY_FACTOR', 0.5),                // Reduce edge when price moving against us
+    LATE_TRADE_MIN_TIME_SINCE_FORECAST: getEnvVarNumber('LATE_TRADE_MIN_TIME_SINCE_FORECAST', 30000),   // 30 seconds max freshness
+
+    // =====================================
+    // NEW: Liquidity Filtering Settings
+    // =====================================
+    MIN_ORDER_BOOK_DEPTH_USD: getEnvVarNumber('MIN_ORDER_BOOK_DEPTH_USD', 1000),      // Minimum $1000 liquidity
+    MAX_BID_ASK_SPREAD: getEnvVarNumber('MAX_BID_ASK_SPREAD', 0.03),                  // 3% max spread
+    MIN_AVAILABLE_LIQUIDITY_SHARES: getEnvVarNumber('MIN_AVAILABLE_LIQUIDITY_SHARES', 500), // Minimum shares available
+
+    // =====================================
+    // NEW: Latency Tracking Settings
+    // =====================================
+    LATENCY_TRACKING_ENABLED: getEnvVarBool('LATENCY_TRACKING_ENABLED', true),        // Enable latency tracking
+    LATENCY_LOG_ALL_TRACES: getEnvVarBool('LATENCY_LOG_ALL_TRACES', false),           // Only log slow traces if false
+    LATENCY_SLOW_TRACE_THRESHOLD_MS: getEnvVarNumber('LATENCY_SLOW_TRACE_THRESHOLD_MS', 5000), // Log traces > 5 seconds
+    LATENCY_STATS_WINDOW_SIZE: getEnvVarNumber('LATENCY_STATS_WINDOW_SIZE', 100),     // Keep last 100 traces for stats
 };
 
 /**
@@ -426,13 +522,14 @@ export const ENTRY_CONFIG = {
 // EXIT OPTIMIZER CONFIG
 // ============================================================
 export const EXIT_CONFIG = {
-    // Take profit thresholds
-    TAKE_PROFIT_THRESHOLD: 0.16,
-    PARTIAL_TAKE_PROFIT_THRESHOLD: 0.08,
+    // Take profit thresholds - OPTIMIZED for speed arb strategy
+    // 8% TP for faster turnover (was 16% - too greedy for speed arb)
+    TAKE_PROFIT_THRESHOLD: 0.08,
+    PARTIAL_TAKE_PROFIT_THRESHOLD: 0.04,
     
     // Stop loss thresholds
-    STOP_LOSS_THRESHOLD: -0.08,
-    TRAILING_STOP_TRIGGER: 0.10,
+    STOP_LOSS_THRESHOLD: -0.10,
+    TRAILING_STOP_TRIGGER: 0.04,
     
     // Regime-based adjustments
     TRENDING_STOP_MULTIPLIER: 1.03,
@@ -481,4 +578,12 @@ export const CROSS_MARKET_CONFIG = {
     MIN_CORRELATION: 0.60,
     MAX_LAG_MS: 300,
     MIN_EDGE_DIFFERENTIAL: 0.03,
+};
+
+// ============================================================
+// DASHBOARD THRESHOLDS
+// ============================================================
+export const DASHBOARD_THRESHOLDS = {
+    temperature: 0.60,
+    precipitation: 0.75,
 };

@@ -354,15 +354,9 @@ export class ScheduleManager extends EventEmitter {
             `(key: ${key})`
         );
         
-        // Emit event for system-wide notification
-        this.eventBus.emit({
-            type: 'RAP_CONFIRMED',
-            payload: {
-                cycleHour,
-                runDate,
-                confirmedAt: new Date(),
-            },
-        });
+        // NOTE: We do NOT emit RAP_CONFIRMED event here to avoid double emission.
+        // The event is already emitted by FileBasedIngestion.handleFileConfirmed()
+        // This method only updates the internal confirmation status tracking.
     }
 
     /**
@@ -403,7 +397,9 @@ export class ScheduleManager extends EventEmitter {
         const now = new Date();
         const upcomingRuns = this.getUpcomingRuns(20); // Get next 20 runs
 
-        logger.info(`[ScheduleManager] Checking for detection windows at ${now.toISOString()}`);
+        // REDUCED LOGGING: Changed from logger.info to logger.debug to prevent excessive logging
+        // (this method is called every second via CHECK_INTERVAL_MS)
+        logger.debug(`[ScheduleManager] Checking for detection windows at ${now.toISOString()}`);
 
         for (const run of upcomingRuns) {
             const windowKey = this.getWindowKey(run.model, run.cycleHour, run.runDate);

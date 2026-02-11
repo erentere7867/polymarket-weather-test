@@ -1,11 +1,18 @@
 /**
  * Bayesian Model
  * Updates probabilities using Bayesian inference combining Forecasts + Climatology
+ * 
+ * Enhanced with:
+ * - Model bias correction
+ * - Horizon-aware weighting
+ * - Ensemble spread contribution to uncertainty
  */
 
 import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { normalCDF } from './normal-cdf.js';
 import { logger } from '../logger.js';
+import { modelBiasCorrector, WeatherVariable } from '../strategy/model-bias-profiles.js';
+import { config } from '../config.js';
 
 interface Gaussian {
     mean: number;
@@ -58,6 +65,11 @@ export class BayesianModel {
     /**
      * Update probability with multiple independent forecasts if available
      * (e.g. NOAA + OpenWeatherMap)
+     * 
+     * Enhanced with:
+     * - Bias correction for each model
+     * - Horizon-aware weighting
+     * - Ensemble spread contribution to variance
      */
     combineForecasts(
         market: ParsedWeatherMarket,
@@ -65,9 +77,99 @@ export class BayesianModel {
     ): number {
         if (forecasts.length === 0) return 0.5;
 
-        // Inverse variance weighting
-        // Better sources (NOAA) get lower variance
         const timeToEventDays = this.getDaysToEvent(market.targetDate);
+        const horizonHours = timeToEventDays * 24;
+        const variable = this.mapMetricToVariable(market.metricType);
+
+        // Use enhanced ensemble combination if bias correction is enabled
+        if (config.MODEL_BIAS_CORRECTION_ENABLED && config.MODEL_HORIZON_WEIGHTING_ENABLED) {
+            return this.combineForecastsEnhanced(market, forecasts, horizonHours, variable);
+        }
+
+        // Fallback to original inverse variance weighting
+        return this.combineForecastsLegacy(market, forecasts, timeToEventDays);
+    }
+
+    /**
+     * Enhanced forecast combination with bias correction and horizon-aware weights
+     */
+    private combineForecastsEnhanced(
+        market: ParsedWeatherMarket,
+        forecasts: { source: string, value: number }[],
+        horizonHours: number,
+        variable: WeatherVariable
+    ): number {
+        let weightedSum = 0;
+        let totalWeight = 0;
+        const correctedValues: { model: string; value: number }[] = [];
+
+        for (const f of forecasts) {
+            // Apply bias correction
+            const correctedValue = modelBiasCorrector.applyBiasCorrection(
+                f.source,
+                f.value,
+                variable,
+                horizonHours
+            );
+
+            correctedValues.push({ model: f.source, value: correctedValue });
+
+            // Get combined weight (horizon + skill)
+            const combinedWeight = modelBiasCorrector.getCombinedWeight(
+                f.source,
+                horizonHours,
+                variable
+            );
+
+            // Also factor in base variance for the time to event
+            const timeToEventDays = horizonHours / 24;
+            const baseVariance = this.getForecastVariance(market.metricType, timeToEventDays);
+            const varianceWeight = 1 / baseVariance;
+
+            // Final weight combines bias-corrector weight with variance weight
+            const finalWeight = combinedWeight * varianceWeight;
+
+            weightedSum += correctedValue * finalWeight;
+            totalWeight += finalWeight;
+
+            logger.debug(
+                `[BayesianModel] ${f.source}: raw=${f.value.toFixed(2)}, ` +
+                `corrected=${correctedValue.toFixed(2)}, weight=${finalWeight.toFixed(4)}`
+            );
+        }
+
+        const combinedMean = weightedSum / totalWeight;
+        
+        // Calculate ensemble spread
+        const spread = modelBiasCorrector.getEnsembleSpread(correctedValues);
+        
+        // Combined variance includes inverse weight and spread contribution
+        const baseVariance = 1 / totalWeight;
+        const spreadContribution = spread * spread * config.MODEL_ENSEMBLE_SPREAD_MULTIPLIER;
+        const combinedVariance = baseVariance + spreadContribution;
+
+        logger.info(
+            `[BayesianModel] Enhanced ensemble: mean=${combinedMean.toFixed(2)}, ` +
+            `variance=${combinedVariance.toFixed(4)}, spread=${spread.toFixed(2)}`
+        );
+
+        if (market.threshold === undefined) return 0.5;
+
+        return this.calculateExceedanceProbability(
+            { mean: combinedMean, variance: combinedVariance },
+            market.threshold,
+            market.comparisonType === 'above'
+        );
+    }
+
+    /**
+     * Legacy forecast combination (original inverse variance weighting)
+     */
+    private combineForecastsLegacy(
+        market: ParsedWeatherMarket,
+        forecasts: { source: string, value: number }[],
+        timeToEventDays: number
+    ): number {
         let weightedSum = 0;
         let totalWeight = 0;
 
@@ -92,6 +194,25 @@ export class BayesianModel {
             market.threshold,
             market.comparisonType === 'above'
         );
+    }
+
+    /**
+     * Map market metric type to bias corrector variable type
+     */
+    private mapMetricToVariable(metric: string): WeatherVariable {
+        if (metric?.includes('temp') || metric?.includes('temperature')) {
+            return 'temperature';
+        }
+        if (metric?.includes('snow')) {
+            return 'snow';
+        }
+        if (metric?.includes('precip') || metric?.includes('rain')) {
+            return 'precipitation';
+        }
+        if (metric?.includes('wind')) {
+            return 'wind';
+        }
+        return 'temperature'; // Default
     }
 
     private getDaysToEvent(targetDate?: Date): number {

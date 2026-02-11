@@ -70,10 +70,10 @@ export class PolymarketWebSocket extends EventEmitter {
                 // Ignore
             }
         }
-
+        
         logger.info(`Connecting to Polymarket WebSocket: ${this.WS_URL}`);
         this.ws = new WebSocket(this.WS_URL);
-
+        
         this.ws.on('open', () => {
             logger.info('Polymarket WebSocket connected');
             this.isConnectedFlag = true;
@@ -84,16 +84,16 @@ export class PolymarketWebSocket extends EventEmitter {
             this.resubscribe();
             this.flushMessageQueue();
         });
-
+        
         this.ws.on('message', (data: WebSocket.RawData) => {
             this.handleMessage(data);
         });
-
+        
         this.ws.on('pong', () => {
             this.lastPongReceived = Date.now();
             logger.debug('Received pong from server');
         });
-
+        
         this.ws.on('ping', () => {
             // Respond to server-initiated pings immediately
             if (this.ws?.readyState === WebSocket.OPEN) {
@@ -101,12 +101,12 @@ export class PolymarketWebSocket extends EventEmitter {
                 logger.debug('Responded to server ping with pong');
             }
         });
-
+        
         this.ws.on('close', (code, reason) => {
             logger.warn(`Polymarket WebSocket closed: ${code} ${reason.toString()}`);
             this.handleDisconnect();
         });
-
+        
         this.ws.on('error', (error) => {
             logger.error('Polymarket WebSocket error', error);
         });

@@ -64,6 +64,27 @@ export interface OrderBookDepth {
     depthScore: number;       // 0-1 liquidity score
 }
 
+/**
+ * Liquidity analysis result for filtering trades
+ */
+export interface LiquidityAnalysis {
+    bidAskSpread: number;              // Spread as decimal (e.g., 0.03 = 3%)
+    availableYesShares: number;        // Shares available at best ask
+    availableNoShares: number;         // Shares available at best bid
+    totalDepthUsd: number;             // Total liquidity in USD
+    isLiquidEnough: boolean;           // Passes all liquidity requirements
+    rejectionReason: string | null;    // Reason if not liquid enough
+}
+
+/**
+ * Result of liquidity requirements check
+ */
+export interface LiquidityCheckResult {
+    passes: boolean;
+    reason: string | null;
+    warnings: string[];
+}
+
 export interface VolatilityMetrics {
     priceVolatility: number;  // Standard deviation of price changes
     volumeVolatility: number; // Volume variance
@@ -162,10 +183,10 @@ export class EntryOptimizer {
 
     /**
      * Main entry point: Optimize entry for a detected edge
-     * Now includes dynamic Kelly sizing and edge decay modeling
+     * Now includes dynamic Kelly sizing, edge decay modeling, and liquidity filtering
      */
     optimizeEntry(
-        edge: CalculatedEdge, 
+        edge: CalculatedEdge,
         orderBook?: OrderBook,
         forecastTimestamp?: Date,
         marketVolume24h?: number,
@@ -173,8 +194,24 @@ export class EntryOptimizer {
     ): EntrySignal {
         const startTime = Date.now();
         
-        // 1. Analyze market liquidity
+        // 1. Analyze market liquidity (basic)
         const liquidity = this.analyzeLiquidity(orderBook);
+        
+        // 1b. Analyze order book liquidity for filtering
+        const liquidityAnalysis = this.analyzeOrderBookLiquidity(orderBook);
+        const liquidityCheck = this.checkLiquidityRequirements(liquidityAnalysis);
+        
+        // If liquidity check fails, log warning and reduce position size significantly
+        let liquidityWarningFactor = 1.0;
+        if (!liquidityCheck.passes) {
+            logger.warn(`⚠️ Trade blocked: ${liquidityCheck.reason}`);
+            logger.info(`[INFO] Trade blocked: Does not meet liquidity requirements`);
+            // Don't completely block, but reduce size to minimal
+            liquidityWarningFactor = 0.1;
+        } else if (liquidityCheck.warnings.length > 0) {
+            // Reduce size proportionally for warnings
+            liquidityWarningFactor = 0.7;
+        }
         
         // 2. Calculate volatility metrics
         const volatility = this.calculateVolatility(edge.marketId);
@@ -203,19 +240,21 @@ export class EntryOptimizer {
             orderBook
         );
         
-        // 9. Calculate final target size with all factors
-        let targetSize = liquidityConstrainedSize 
-            * volatilityMultiplier 
-            * urgencyFactor 
+        // 9. Calculate final target size with all factors (including liquidity warning factor)
+        let targetSize = liquidityConstrainedSize
+            * volatilityMultiplier
+            * urgencyFactor
             * edgeDecayFactor
-            * (kellyFraction / this.KELLY_FRACTION_MEDIUM_CONFIDENCE);  // Scale by dynamic Kelly ratio
+            * (kellyFraction / this.KELLY_FRACTION_MEDIUM_CONFIDENCE)  // Scale by dynamic Kelly ratio
+            * liquidityWarningFactor;  // Apply liquidity warning factor
         
-        // 10. Fast path for guaranteed outcomes
+        // 10. Fast path for guaranteed outcomes (still respect liquidity warnings)
         if (edge.isGuaranteed) {
-            targetSize = this.maxPositionSize 
+            targetSize = this.maxPositionSize
                 * (config.guaranteedPositionMultiplier * 1.5)  // 3x instead of 2x
-                * urgencyFactor 
-                * edgeDecayFactor;
+                * urgencyFactor
+                * edgeDecayFactor
+                * liquidityWarningFactor;  // Even guaranteed trades respect liquidity
         }
         
         // 11. Clamp to min/max
@@ -230,7 +269,7 @@ export class EntryOptimizer {
         );
         
         // 13. Determine if we should scale in
-        const scaleInOrders = targetSize > this.SCALE_IN_THRESHOLD 
+        const scaleInOrders = targetSize > this.SCALE_IN_THRESHOLD
             ? this.buildScaleInOrders(targetSize, edge, liquidity, urgencyFactor)
             : undefined;
         
@@ -240,6 +279,14 @@ export class EntryOptimizer {
         // 15. Build partial exit triggers for high-confidence trades
         const partialExitTriggers = this.buildPartialExitTriggers(effectiveSigma, volatility.volatilityRegime);
         
+        // Build reason with liquidity info
+        let reason = this.buildReason(edge, volatility, liquidity, baseKelly, urgencyFactor, effectiveSigma, edgeDecayFactor);
+        if (!liquidityCheck.passes) {
+            reason = `BLOCKED: ${liquidityCheck.reason} | ${reason}`;
+        } else if (liquidityCheck.warnings.length > 0) {
+            reason = `⚠️ ${liquidityCheck.warnings.join(', ')} | ${reason}`;
+        }
+        
         const signal: EntrySignal = {
             marketId: edge.marketId,
             side: edge.side,
@@ -247,7 +294,7 @@ export class EntryOptimizer {
             orderType: urgencyFactor > 0.8 ? 'MARKET' : 'LIMIT',
             priceLimit: this.calculateOptimalLimitPrice(edge, liquidity, urgencyFactor),
             urgency: this.determineUrgency(urgencyFactor, edge.isGuaranteed),
-            reason: this.buildReason(edge, volatility, liquidity, baseKelly, urgencyFactor, effectiveSigma, edgeDecayFactor),
+            reason,
             confidence: edge.confidence * liquidity.depthScore,
             estimatedEdge: edge.adjustedEdge - marketImpact - expectedSlippage,
             isGuaranteed: edge.isGuaranteed,
@@ -336,6 +383,110 @@ export class EntryOptimizer {
             bestBid,
             bestAsk,
             depthScore
+        };
+    }
+
+    /**
+     * Analyze order book liquidity for filtering
+     * Returns detailed liquidity analysis with pass/fail status
+     */
+    analyzeOrderBookLiquidity(orderBook?: OrderBook): LiquidityAnalysis {
+        if (!orderBook) {
+            return {
+                bidAskSpread: 1.0,  // 100% spread = no liquidity
+                availableYesShares: 0,
+                availableNoShares: 0,
+                totalDepthUsd: 0,
+                isLiquidEnough: false,
+                rejectionReason: 'No order book data available'
+            };
+        }
+
+        // Calculate spread
+        const bestBid = orderBook.bids.length > 0 ? parseFloat(orderBook.bids[0].price) : 0;
+        const bestAsk = orderBook.asks.length > 0 ? parseFloat(orderBook.asks[0].price) : 1;
+        const bidAskSpread = bestAsk - bestBid;
+
+        // Calculate available shares at best prices
+        const availableYesShares = orderBook.asks.length > 0
+            ? parseFloat(orderBook.asks[0].size)
+            : 0;
+        const availableNoShares = orderBook.bids.length > 0
+            ? parseFloat(orderBook.bids[0].size)
+            : 0;
+
+        // Calculate total depth in USD
+        const totalBidDepth = orderBook.bids.reduce((sum, bid) => {
+            return sum + parseFloat(bid.size) * parseFloat(bid.price);
+        }, 0);
+        const totalAskDepth = orderBook.asks.reduce((sum, ask) => {
+            return sum + parseFloat(ask.size) * parseFloat(ask.price);
+        }, 0);
+        const totalDepthUsd = totalBidDepth + totalAskDepth;
+
+        // Check liquidity requirements
+        const check = this.checkLiquidityRequirements({
+            bidAskSpread,
+            availableYesShares,
+            availableNoShares,
+            totalDepthUsd,
+            isLiquidEnough: false,  // Will be set below
+            rejectionReason: null
+        });
+
+        return {
+            bidAskSpread,
+            availableYesShares,
+            availableNoShares,
+            totalDepthUsd,
+            isLiquidEnough: check.passes,
+            rejectionReason: check.reason
+        };
+    }
+
+    /**
+     * Check if liquidity meets minimum requirements
+     * Returns pass/fail with specific reason if failed
+     */
+    checkLiquidityRequirements(liquidity: LiquidityAnalysis): LiquidityCheckResult {
+        const warnings: string[] = [];
+        let fails = false;
+        let failReason: string | null = null;
+
+        // Check 1: Order book depth
+        if (liquidity.totalDepthUsd < config.MIN_ORDER_BOOK_DEPTH_USD) {
+            fails = true;
+            failReason = `Insufficient liquidity: Order book depth $${liquidity.totalDepthUsd.toFixed(0)} (min: $${config.MIN_ORDER_BOOK_DEPTH_USD})`;
+            logger.warn(failReason);
+        } else if (liquidity.totalDepthUsd < config.MIN_ORDER_BOOK_DEPTH_USD * 2) {
+            warnings.push(`Low liquidity: $${liquidity.totalDepthUsd.toFixed(0)} depth`);
+        }
+
+        // Check 2: Bid-ask spread
+        if (liquidity.bidAskSpread > config.MAX_BID_ASK_SPREAD) {
+            fails = true;
+            failReason = `Spread too wide: ${(liquidity.bidAskSpread * 100).toFixed(1)}% (max: ${(config.MAX_BID_ASK_SPREAD * 100).toFixed(0)}%)`;
+            logger.warn(failReason);
+        } else if (liquidity.bidAskSpread > config.MAX_BID_ASK_SPREAD * 0.7) {
+            warnings.push(`Wide spread: ${(liquidity.bidAskSpread * 100).toFixed(1)}%`);
+        }
+
+        // Check 3: Available shares at best price
+        const minShares = Math.min(liquidity.availableYesShares, liquidity.availableNoShares);
+        if (minShares < config.MIN_AVAILABLE_LIQUIDITY_SHARES) {
+            // This is a warning, not a hard fail - we can still trade smaller size
+            warnings.push(`Limited shares at best price: ${minShares.toFixed(0)} (min: ${config.MIN_AVAILABLE_LIQUIDITY_SHARES})`);
+        }
+
+        // Log warnings if any
+        if (warnings.length > 0 && !fails) {
+            logger.info(`Liquidity warnings: ${warnings.join('; ')}`);
+        }
+
+        return {
+            passes: !fails,
+            reason: failReason,
+            warnings
         };
     }
 

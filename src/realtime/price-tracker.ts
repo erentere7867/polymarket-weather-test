@@ -26,12 +26,12 @@ export class PriceTracker {
      */
     async start(scanner: WeatherScanner, intervalMs: number = 60000): Promise<void> {
         this.scanner = scanner;
-        logger.info(`Starting PriceTracker with WebSocket (polling for new markets every ${intervalMs}ms)...`);
+        logger.info(`Starting PriceTracker (WebSocket + polling for new markets every ${intervalMs}ms)...`);
 
-        // Connect WS
+        // Connect WebSocket for real-time price updates
         this.ws.connect();
 
-        // Handle updates
+        // Handle updates (still wired up in case WebSocket is re-enabled later)
         this.ws.on('priceUpdate', (update: PriceUpdate) => {
             this.handlePriceUpdate(update);
         });

@@ -92,92 +92,104 @@ export class ApiFallbackPoller extends EventEmitter {
 
     /**
      * Setup event listeners
+     * DISABLED: API fallback polling disabled for file-ingestion-only mode
      */
     private setupEventListeners(): void {
-        // Listen for FILE_CONFIRMED to stop listening immediately
-        const unsubConfirmed = this.eventBus.on('FILE_CONFIRMED', (event) => {
-            if (event.type === 'FILE_CONFIRMED') {
-                const { model, cycleHour } = event.payload;
-                this.handleFileConfirmed(model, cycleHour);
-            }
-        });
-        this.unsubscribers.push(unsubConfirmed);
-
-        // Listen for DETECTION_WINDOW_START to begin listening mode
-        const unsubWindowStart = this.eventBus.on('DETECTION_WINDOW_START', (event) => {
-            if (event.type === 'DETECTION_WINDOW_START') {
-                const { model, cycleHour, windowStart } = event.payload;
-                this.startListening(model, cycleHour, windowStart);
-            }
-        });
-        this.unsubscribers.push(unsubWindowStart);
-
-        // Listen for FORECAST_BATCH_UPDATED events from HybridWeatherController
-        const unsubBatchUpdate = this.eventBus.on('FORECAST_BATCH_UPDATED', (event) => {
-            if (event.type === 'FORECAST_BATCH_UPDATED') {
-                this.handleForecastBatchUpdate(event.payload);
-            }
-        });
-        this.unsubscribers.push(unsubBatchUpdate);
-
-        // Listen for RATE_LIMIT_HIT events
-        const unsubRateLimit = this.eventBus.on('RATE_LIMIT_HIT', (event) => {
-            if (event.type === 'RATE_LIMIT_HIT') {
-                logger.warn(`[ApiFallbackPoller] Rate limit hit for ${event.payload.provider}: ${event.payload.message}`);
-            }
-        });
-        this.unsubscribers.push(unsubRateLimit);
+        // DISABLED: API fallback polling disabled for file-ingestion-only mode
+        // All event listeners commented out - file-based ingestion is the primary data source
+        logger.info('[ApiFallbackPoller] API fallback polling disabled - file-ingestion-only mode');
+        
+        // DISABLED: Event listeners commented out
+        // // Listen for FILE_CONFIRMED to stop listening immediately
+        // const unsubConfirmed = this.eventBus.on('FILE_CONFIRMED', (event) => {
+        //     if (event.type === 'FILE_CONFIRMED') {
+        //         const { model, cycleHour } = event.payload;
+        //         this.handleFileConfirmed(model, cycleHour);
+        //     }
+        // });
+        // this.unsubscribers.push(unsubConfirmed);
+        // 
+        // // Listen for DETECTION_WINDOW_START to begin listening mode
+        // const unsubWindowStart = this.eventBus.on('DETECTION_WINDOW_START', (event) => {
+        //     if (event.type === 'DETECTION_WINDOW_START') {
+        //         const { model, cycleHour, windowStart } = event.payload;
+        //         this.startListening(model, cycleHour, windowStart);
+        //     }
+        // });
+        // this.unsubscribers.push(unsubWindowStart);
+        // 
+        // // Listen for FORECAST_BATCH_UPDATED events from HybridWeatherController
+        // const unsubBatchUpdate = this.eventBus.on('FORECAST_BATCH_UPDATED', (event) => {
+        //     if (event.type === 'FORECAST_BATCH_UPDATED') {
+        //         this.handleForecastBatchUpdate(event.payload);
+        //     }
+        // });
+        // this.unsubscribers.push(unsubBatchUpdate);
+        // 
+        // // Listen for RATE_LIMIT_HIT events
+        // const unsubRateLimit = this.eventBus.on('RATE_LIMIT_HIT', (event) => {
+        //     if (event.type === 'RATE_LIMIT_HIT') {
+        //         logger.warn(`[ApiFallbackPoller] Rate limit hit for ${event.payload.provider}: ${event.payload.message}`);
+        //     }
+        // });
+        // this.unsubscribers.push(unsubRateLimit);
     }
 
     /**
      * Start listening for a detection window (replaces polling)
+     * DISABLED: API fallback polling disabled for file-ingestion-only mode
      */
     public startListening(
         model: ModelType,
         cycleHour: number,
         windowStart: Date
     ): void {
-        const windowId = this.getWindowId(model, cycleHour);
-
-        // Don't start if already listening for this window
-        if (this.sessions.has(windowId)) {
-            logger.debug(`[ApiFallbackPoller] Already listening for ${windowId}`);
-            return;
-        }
-
-        logger.info(
-            `[ApiFallbackPoller] Starting API listening for ${model} ${String(cycleHour).padStart(2, '0')}Z (via EventBus)`
-        );
-
-        // Create session
-        const session: ListeningSession = {
-            model,
-            cycleHour,
-            windowId,
-            startTime: new Date(),
-            timeoutId: null as unknown as NodeJS.Timeout,
-            isActive: true,
-            citiesReceived: new Set(),
-            maxDurationMinutes: this.config.maxDurationMinutes,
-        };
-
-        // Set timeout to stop after max duration
-        const maxDurationMs = this.config.maxDurationMinutes * 60 * 1000;
-        session.timeoutId = setTimeout(() => {
-            logger.info(
-                `[ApiFallbackPoller] Max duration reached for ${windowId}, stopping`
-            );
-            this.stopListening(windowId);
-        }, maxDurationMs);
-
-        this.sessions.set(windowId, session);
-
-        this.emit('listeningStarted', {
-            model,
-            cycleHour,
-            windowId,
-            maxDurationMinutes: this.config.maxDurationMinutes,
-        });
+        // DISABLED: API fallback polling disabled for file-ingestion-only mode
+        logger.debug(`[ApiFallbackPoller] startListening disabled for file-ingestion-only mode (${model} ${String(cycleHour).padStart(2, '0')}Z)`);
+        return;
+        
+        // DISABLED: Listening logic commented out
+        // const windowId = this.getWindowId(model, cycleHour);
+        // 
+        // // Don't start if already listening for this window
+        // if (this.sessions.has(windowId)) {
+        //     logger.debug(`[ApiFallbackPoller] Already listening for ${windowId}`);
+        //     return;
+        // }
+        // 
+        // logger.info(
+        //     `[ApiFallbackPoller] Starting API listening for ${model} ${String(cycleHour).padStart(2, '0')}Z (via EventBus)`
+        // );
+        // 
+        // // Create session
+        // const session: ListeningSession = {
+        //     model,
+        //     cycleHour,
+        //     windowId,
+        //     startTime: new Date(),
+        //     timeoutId: null as unknown as NodeJS.Timeout,
+        //     isActive: true,
+        //     citiesReceived: new Set(),
+        //     maxDurationMinutes: this.config.maxDurationMinutes,
+        // };
+        // 
+        // // Set timeout to stop after max duration
+        // const maxDurationMs = this.config.maxDurationMinutes * 60 * 1000;
+        // session.timeoutId = setTimeout(() => {
+        //     logger.info(
+        //         `[ApiFallbackPoller] Max duration reached for ${windowId}, stopping`
+        //     );
+        //     this.stopListening(windowId);
+        // }, maxDurationMs);
+        // 
+        // this.sessions.set(windowId, session);
+        // 
+        // this.emit('listeningStarted', {
+        //     model,
+        //     cycleHour,
+        //     windowId,
+        //     maxDurationMinutes: this.config.maxDurationMinutes,
+        // });
     }
 
     /**

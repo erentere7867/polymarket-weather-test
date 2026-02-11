@@ -22,7 +22,7 @@ import { ConfirmationManager } from '../weather/confirmation-manager.js';
 import { KNOWN_CITIES } from '../weather/types.js';
 
 const MAX_CHANGE_AGE_MS = 120000; // 2 minutes
-const MIN_SIGMA_FOR_ARBITRAGE = 0.5;
+const MIN_SIGMA_FOR_ARBITRAGE = 0.3; // Reduced from 0.5 to capture more marginal edge
 
 // Edge decay configuration
 const EDGE_DECAY_HALF_LIFE_MS = 60000;  // 1 minute half-life

@@ -8,6 +8,7 @@ import http from 'http';
 import https from 'https';
 import { S3Client, HeadObjectCommand, GetObjectCommand, HeadObjectOutput } from '@aws-sdk/client-s3';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
+import { StandardRetryStrategy } from '@smithy/middleware-retry';
 import {
     ModelType,
     ExpectedFileInfo,
@@ -19,6 +20,7 @@ import {
 import { EventBus } from '../realtime/event-bus.js';
 import { GRIB2Parser } from './grib2-parser.js';
 import { logger } from '../logger.js';
+import { LatencyTracker, latencyTracker } from '../realtime/latency-tracker.js';
 
 /**
  * S3 File Detector Configuration
@@ -73,6 +75,7 @@ export class S3FileDetector extends EventEmitter {
     private config: S3DetectorConfig;
     private eventBus: EventBus;
     private gribParser: GRIB2Parser;
+    private latencyTracker: LatencyTracker;
     private activeDetections: Map<string, DetectionContext> = new Map();
     private regionClients: Map<string, S3Client> = new Map();
     
@@ -93,6 +96,7 @@ export class S3FileDetector extends EventEmitter {
         super();
         this.config = { ...DEFAULT_CONFIG, ...config };
         this.eventBus = EventBus.getInstance();
+        this.latencyTracker = LatencyTracker.getInstance();
         
         // Initialize default S3 client
         this.s3Client = this.createClient(this.config.region);
@@ -141,12 +145,18 @@ export class S3FileDetector extends EventEmitter {
                 keepAliveMsecs: 30000,
             }),
             connectionTimeout: 5000,
-            socketTimeout: 30000,
+            socketTimeout: 5000,  // 5 seconds max per request (reduced from 30s)
         });
+
+        // Disable SDK retries - we handle retries in our code
+        // StandardRetryStrategy takes a Provider function for maxAttempts
+        const retryStrategy = new StandardRetryStrategy(() => Promise.resolve(1));
 
         return new S3Client({
             region: region,
             requestHandler,
+            retryStrategy,  // Add this to disable SDK internal retries
+            maxAttempts: 0,  // Legacy setting for additional safety
             // For public buckets, we use no credentials and a void signer
             // to prevent the SDK from trying to sign requests or look for creds
             ...(this.config.publicBuckets && {
@@ -358,6 +368,18 @@ export class S3FileDetector extends EventEmitter {
                 const detectedAt = new Date();
                 const detectionLatencyMs = detectedAt.getTime() - windowStart.getTime();
                 
+                // Start latency trace for this detection
+                const traceId = LatencyTracker.generateTraceId(
+                    expectedFile.model,
+                    expectedFile.cycleHour,
+                    expectedFile.forecastHour
+                );
+                this.latencyTracker.startTrace(traceId, {
+                    model: expectedFile.model,
+                    cycleHour: expectedFile.cycleHour,
+                });
+                this.latencyTracker.recordTime(traceId, 'fileDetectedTime', detectedAt.getTime());
+                
                 const result: FileDetectionResult = {
                     expectedFile,
                     detectedAt,
@@ -365,17 +387,18 @@ export class S3FileDetector extends EventEmitter {
                     downloadUrl: expectedFile.fullUrl,
                     fileSize: headResult.ContentLength || 0,
                     lastModified: headResult.LastModified || detectedAt,
+                    traceId,  // Include trace ID for downstream tracking
                 };
                 
                 logger.info(
-                    `[S3FileDetector] File detected: ${s3Key} (${detectionLatencyMs}ms latency, ${result.fileSize} bytes)`
+                    `[S3FileDetector] File detected: ${s3Key} (${detectionLatencyMs}ms latency, ${result.fileSize} bytes, trace: ${traceId})`
                 );
                 
                 // Stop polling (marks context as inactive and clears timer)
                 context.isDetecting = false;
                 this.activeDetections.delete(key);
                 
-                // Emit FILE_DETECTED event
+                // Emit FILE_DETECTED event with trace ID
                 this.eventBus.emit({
                     type: 'FILE_DETECTED',
                     payload: {
@@ -388,6 +411,7 @@ export class S3FileDetector extends EventEmitter {
                         detectionLatencyMs,
                         fileSize: result.fileSize,
                         lastModified: result.lastModified,
+                        traceId,  // Pass trace ID through event
                     },
                 });
                 
@@ -443,6 +467,16 @@ export class S3FileDetector extends EventEmitter {
             logger.debug(`[S3FileDetector] HEAD Request - Bucket: ${bucket}, Key: ${key}`);
         }
 
+        // Track request latency for diagnostics
+        const requestStart = Date.now();
+
+        // Create abort controller for 3-second timeout
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => {
+            abortController.abort();
+            logger.debug(`[S3FileDetector] HeadObject timeout after 3000ms for ${key}`);
+        }, 3000);
+
         try {
             const command = new HeadObjectCommand({
                 Bucket: bucket,
@@ -450,18 +484,48 @@ export class S3FileDetector extends EventEmitter {
             });
             
             const client = this.getClient(region);
-            const response = await client.send(command);
+            const response = await client.send(command, {
+                abortSignal: abortController.signal
+            });
+            
+            // Log slow requests (>500ms)
+            const requestLatency = Date.now() - requestStart;
+            if (requestLatency > 500) {
+                logger.warn(`[S3FileDetector] SLOW HeadObject: ${requestLatency}ms for ${key} (bucket: ${bucket})`);
+            }
+            
             return response;
         } catch (error: any) {
-            // 404 or NoSuchKey means file doesn't exist yet
-            if (error.name === 'NotFound' || error.name === 'NoSuchKey') {
+            const requestLatency = Date.now() - requestStart;
+            
+            // Don't log NotFound as error - it's expected during polling
+            if (error.name === 'NotFound' || error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
+                // Only log if unusually slow
+                if (requestLatency > 500) {
+                    logger.debug(`[S3FileDetector] SLOW NotFound: ${requestLatency}ms for ${key}`);
+                }
+                return null;  // File doesn't exist yet, will retry next poll
+            }
+            
+            // For public buckets, we might get 403 instead of 404 - also expected
+            if (error.$metadata?.httpStatusCode === 403) {
+                if (requestLatency > 500) {
+                    logger.debug(`[S3FileDetector] SLOW Forbidden (403): ${requestLatency}ms for ${key}`);
+                }
                 return null;
             }
-            // For public buckets, we might get 403 instead of 404
-            if (error.$metadata?.httpStatusCode === 404 || error.$metadata?.httpStatusCode === 403) {
+            
+            // Log aborts as debug (timeout)
+            if (error.name === 'AbortError') {
+                logger.debug(`[S3FileDetector] HeadObject timeout after ${requestLatency}ms for ${key}`);
                 return null;
             }
+            
+            // Only log actual errors (network, 5xx, etc.)
+            logger.error(`[S3FileDetector] HeadObject FAILED after ${requestLatency}ms: ${error.name} - ${error.message}`);
             throw error;
+        } finally {
+            clearTimeout(timeoutId);
         }
     }
 
@@ -614,7 +678,7 @@ export class S3FileDetector extends EventEmitter {
      * Download and parse a detected file
      */
     private async downloadAndParse(result: FileDetectionResult): Promise<void> {
-        const { expectedFile, detectedAt } = result;
+        const { expectedFile, detectedAt, traceId } = result;
         const downloadStart = Date.now();
         
         logger.info(`[S3FileDetector] Downloading ${expectedFile.key}...`);
@@ -673,8 +737,12 @@ export class S3FileDetector extends EventEmitter {
                 `[S3FileDetector] ${downloadMethod} completed for ${expectedFile.key} (${buffer.length} bytes in ${downloadTimeMs}ms)`
             );
             
-            // Parse the GRIB2 file
+            // Parse the GRIB2 file - record parse timing
             const parseStart = Date.now();
+            if (traceId) {
+                this.latencyTracker.recordTime(traceId, 'parseStartTime', parseStart);
+            }
+            
             const parsedData = await this.gribParser.parse(buffer, {
                 model: expectedFile.model,
                 cycleHour: expectedFile.cycleHour,
@@ -682,6 +750,10 @@ export class S3FileDetector extends EventEmitter {
             });
             
             const parseTimeMs = Date.now() - parseStart;
+            if (traceId) {
+                this.latencyTracker.recordTime(traceId, 'parseEndTime', Date.now());
+            }
+            
             const totalLatencyMs = Date.now() - detectedAt.getTime();
             
             logger.info(

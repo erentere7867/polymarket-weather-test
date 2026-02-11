@@ -938,6 +938,13 @@ export class SimulationRunner {
     }
 
     /**
+     * Get market analysis for dashboard
+     */
+    getMarketAnalysis(): any[] {
+        return this.strategy.getAllMarketAnalysis();
+    }
+
+    /**
      * Get component performance metrics
      */
     getComponentPerformance(): ComponentPerformance {

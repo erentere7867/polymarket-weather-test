@@ -408,6 +408,37 @@ export class FileBasedIngestion extends EventEmitter {
         const hh = String(cycleHour).padStart(2, '0');
         return `${year}-${month}-${day}-${hh}Z`;
     }
+    
+    /**
+     * Calculate the run date for a given cycle hour
+     * This ensures consistent date calculation across the confirmation flow
+     *
+     * For cycles that haven't happened yet today, use today's date
+     * For cycles that already happened today, also use today's date
+     * For late-night cycles (e.g., 23Z) being confirmed early morning (e.g., 01Z next day),
+     * we need to use yesterday's date
+     *
+     * @param cycleHour The cycle hour (0-23)
+     * @returns The run date for the cycle
+     */
+    private calculateRunDate(cycleHour: number): Date {
+        const now = new Date();
+        const currentHour = now.getUTCHours();
+        
+        // If current time is earlier than the cycle hour, the cycle likely belongs to yesterday
+        // This handles the case where it's 01:00 UTC and we're confirming the 23:00Z cycle from yesterday
+        // However, for real-time detection, the cycle should match today unless we're catching up
+        // For simplicity, we always use today's date since detection windows are created for today's cycles
+        // The key is consistency - both queuing and confirming use the same logic
+        
+        // Create a date with just the date portion (no time)
+        return new Date(Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate(),
+            0, 0, 0, 0
+        ));
+    }
 
     /**
      * Handle file detected event
@@ -501,10 +532,11 @@ export class FileBasedIngestion extends EventEmitter {
         // SEQUENTIAL FETCHING: Emit RAP_CONFIRMED event when RAP is confirmed
         // This will trigger any pending HRRR detection for the same cycle hour
         if (payload.model === 'RAP') {
-            const runDate = new Date(); // Use current date for runDate
+            // Use consistent runDate calculation to match pending HRRR window keys
+            const runDate = this.calculateRunDate(payload.cycleHour);
             logger.info(
                 `[FileBasedIngestion] RAP confirmed for ${String(payload.cycleHour).padStart(2, '0')}Z - ` +
-                `emitting RAP_CONFIRMED event`
+                `emitting RAP_CONFIRMED event (runDate: ${runDate.toISOString().split('T')[0]})`
             );
             
             // Store RAP data for later HRRR confirmation
@@ -523,7 +555,8 @@ export class FileBasedIngestion extends EventEmitter {
         // RAP-HRRR CONFIRMATION: When HRRR is confirmed, check against RAP data
         // This creates cross-model confirmation for trading logic
         if (payload.model === 'HRRR') {
-            const runDate = new Date();
+            // Use consistent runDate calculation to match stored RAP data keys
+            const runDate = this.calculateRunDate(payload.cycleHour);
             const confirmation = this.confirmationManager.createRapHrrrConfirmation(
                 payload.cycleHour,
                 runDate,

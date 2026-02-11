@@ -34,6 +34,7 @@ import { WeatherProviderManager } from '../weather/provider-manager.js';
 import { WeatherService, FileBasedIngestion, ConfirmationManager } from '../weather/index.js';
 import { findCity, CityLocation, Coordinates, ModelType, type WeatherData } from '../weather/types.js';
 import { config } from '../config.js';
+import { LatencyTracker } from './latency-tracker.js';
 
 /**
  * Data source priority ranking (higher = more trusted)
@@ -288,7 +289,7 @@ const MODE_CONFIGS: Record<HybridWeatherMode, ModeConfig> = {
         durationMs: null, // Runs indefinitely until detection window or burst trigger
         pollIntervalMs: null, // NO polling
         providers: ['tomorrow'],  // WebSocket only
-        description: 'Idle mode - NO polling, WebSocket listening only',
+        description: 'Idle mode - NO polling, WebSocket listening only (DISABLED - using file ingestion)',
     },
     BURST_MODE: {
         mode: 'BURST_MODE',
@@ -538,14 +539,22 @@ export class HybridWeatherController extends EventEmitter {
         downloadTimeMs: number;
         parseTimeMs: number;
         fileSize: number;
+        traceId?: string;  // Unique ID for end-to-end latency tracking
     }): void {
+        // Record forecast processed time for latency tracking
+        if (payload.traceId) {
+            const latencyTracker = LatencyTracker.getInstance();
+            latencyTracker.recordTime(payload.traceId, 'forecastProcessedTime', Date.now());
+        }
+        
         // Log all cities in payload for debugging (consolidated single log)
         const cityNames = payload.cityData.map(c => c.cityName);
         logger.info(`📁 FILE_CONFIRMED: ${payload.model}`, {
             cycleHour: payload.cycleHour,
             cityCount: payload.cityData.length,
             cities: cityNames.slice(0, 5), // Limit to first 5 to avoid huge logs
-            latencyMs: payload.detectionLatencyMs
+            latencyMs: payload.detectionLatencyMs,
+            traceId: payload.traceId,
         });
         
         // Update historical learning data
@@ -870,6 +879,12 @@ export class HybridWeatherController extends EventEmitter {
         const priority = DATA_SOURCE_PRIORITIES[source];
         const timestamp = new Date();
         
+        // Defensive check for unknown source types
+        if (!priority) {
+            logger.warn(`[storeDataWithConfidence] Unknown source type: ${source}, using default confidence weight of 0.5`);
+        }
+        const confidenceWeight = priority?.confidenceWeight ?? 0.5;
+        
         // Calculate freshness multiplier
         const stalenessMs = 0;  // Fresh data
         const freshnessMultiplier = 1.0;
@@ -878,7 +893,7 @@ export class HybridWeatherController extends EventEmitter {
         const reconciliationBonus = this.calculateReconciliationBonus(cityId, source, value);
         
         // Calculate final confidence score
-        const finalScore = baseConfidence * priority.confidenceWeight * freshnessMultiplier + reconciliationBonus;
+        const finalScore = baseConfidence * confidenceWeight * freshnessMultiplier + reconciliationBonus;
         
         // Store in cache
         if (!this.sourceDataCache.has(cityId)) {
@@ -918,7 +933,12 @@ export class HybridWeatherController extends EventEmitter {
                 const diff = Math.abs(data.value - value);
                 if (diff < threshold) {
                     // Sources agree - add bonus based on other source's priority
-                    bonus += DATA_SOURCE_PRIORITIES[otherSource].priority * 0.01;
+                    const otherPriority = DATA_SOURCE_PRIORITIES[otherSource];
+                    if (!otherPriority) {
+                        logger.warn(`[calculateReconciliationBonus] Unknown source type: ${otherSource}, skipping bonus`);
+                        continue;
+                    }
+                    bonus += otherPriority.priority * 0.01;
                 }
             }
         }
@@ -944,7 +964,15 @@ export class HybridWeatherController extends EventEmitter {
         for (const [source, data] of cityData.entries()) {
             // Check staleness
             const stalenessMs = Date.now() - data.timestamp.getTime();
-            const maxStaleness = DATA_SOURCE_PRIORITIES[source].maxStalenessMs;
+            const priority = DATA_SOURCE_PRIORITIES[source];
+            
+            // Defensive check for unknown source types
+            if (!priority) {
+                logger.warn(`[reconcileSources] Unknown source type: ${source}, skipping`);
+                continue;
+            }
+            
+            const maxStaleness = priority.maxStalenessMs;
             
             if (stalenessMs <= maxStaleness) {
                 // Apply freshness penalty
@@ -1367,8 +1395,11 @@ export class HybridWeatherController extends EventEmitter {
                 this.startPolling();
                 break;
             case 'WEBSOCKET_IDLE':
-                // No polling, just WebSocket listening
-                logger.info('🔌 Entering WEBSOCKET_IDLE mode (NO polling)');
+                // DISABLED: WEBSOCKET_IDLE mode disabled for file-ingestion-only mode
+                // File ingestion polling is used instead of WebSocket alerts
+                logger.info('🔌 WEBSOCKET_IDLE mode disabled - file ingestion polling is active');
+                // Start file ingestion polling instead of idle WebSocket listening
+                // this.startFileIngestionPolling(); // Optional: if you want to start file polling here
                 break;
             case 'BURST_MODE':
                 this.startBurstMode(cityId);
@@ -1709,6 +1740,12 @@ export class HybridWeatherController extends EventEmitter {
     private calculateDataConfidence(source: DataSourceType, timestamp: Date): number {
         const priority = DATA_SOURCE_PRIORITIES[source];
         const stalenessMs = Date.now() - timestamp.getTime();
+        
+        // Defensive check for unknown source types
+        if (!priority) {
+            logger.warn(`[calculateDataConfidence] Unknown source type: ${source}, using default values`);
+            return 0.5 * Math.max(0, 1 - (stalenessMs / (10 * 60 * 1000))); // Default 10 min max staleness
+        }
         
         // Calculate freshness multiplier
         const freshnessMultiplier = Math.max(0, 1 - (stalenessMs / priority.maxStalenessMs));

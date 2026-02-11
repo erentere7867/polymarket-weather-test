@@ -142,6 +142,79 @@
             </div>
         </header>
 
+        <!-- Market Edge Overview (Top Priority) -->
+        <div class="glass p-6 rounded-xl border-l-4 border-l-emerald-500">
+            <h3 class="text-xl font-bold mb-4 flex items-center">
+                <svg class="w-6 h-6 mr-2 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path>
+                </svg>
+                Market Edge Overview
+            </h3>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="text-slate-400 text-xs uppercase tracking-wider border-b border-slate-700">
+                            <th class="p-3">Market</th>
+                            <th class="p-3 text-right">Pos</th>
+                            <th class="p-3 text-right">Target</th>
+                            <th class="p-3 text-right">Mkt Prob</th>
+                            <th class="p-3 text-right">Model Prob</th>
+                            <th class="p-3 text-right">Edge</th>
+                            <th class="p-3 text-right">Conf</th>
+                            <th class="p-3 text-center">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="market-edge-list" class="text-sm">
+                        <tr>
+                            <td colspan="8" class="p-4 text-center text-slate-500 italic">Loading market analysis...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Model Intelligence Panel -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="glass p-6 rounded-xl border-l-4 border-l-blue-500">
+                <h3 class="text-xl font-bold mb-4 flex items-center">
+                    <svg class="w-6 h-6 mr-2 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
+                    </svg>
+                    Model Intelligence
+                </h3>
+                <div id="model-intelligence-grid" class="space-y-3">
+                    <div class="text-slate-500 italic">Loading model data...</div>
+                </div>
+            </div>
+
+            <!-- Risk Snapshot (Capital & Liquidity) -->
+            <div class="glass p-6 rounded-xl border-l-4 border-l-violet-500">
+                <h3 class="text-xl font-bold mb-4 flex items-center">
+                    <svg class="w-6 h-6 mr-2 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    Capital & Risk
+                </h3>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="bg-slate-800/50 p-3 rounded-lg">
+                        <p class="text-xs text-slate-400 uppercase">Available Cash</p>
+                        <p id="risk-cash" class="text-xl font-bold text-emerald-400">--</p>
+                    </div>
+                    <div class="bg-slate-800/50 p-3 rounded-lg">
+                        <p class="text-xs text-slate-400 uppercase">Allocated</p>
+                        <p id="risk-allocated" class="text-xl font-bold text-blue-400">--</p>
+                    </div>
+                    <div class="bg-slate-800/50 p-3 rounded-lg col-span-2">
+                        <p class="text-xs text-slate-400 uppercase">Risk Exposure</p>
+                        <div class="w-full bg-slate-700 h-2 rounded-full mt-2">
+                            <div id="risk-bar" class="bg-rose-500 h-2 rounded-full" style="width: 0%"></div>
+                        </div>
+                        <p id="risk-text" class="text-xs text-right mt-1 text-slate-400">0% utilized</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Stats Grid -->
         <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
             <!-- PnL Card -->
@@ -168,6 +241,17 @@
             <div class="glass p-6 rounded-xl">
                 <p class="text-slate-500 text-xs uppercase tracking-wider">Open Positions</p>
                 <h2 id="open-positions-count" class="text-2xl font-bold mt-1">--</h2>
+            </div>
+
+            <!-- Win/Lose Ratio Card -->
+            <div class="glass p-6 rounded-xl">
+                <p class="text-slate-500 text-xs uppercase tracking-wider">Win/Lose Ratio</p>
+                <div class="flex items-center gap-3 mt-1">
+                    <span class="text-emerald-400 text-2xl font-bold" id="wins-count">0</span>
+                    <span class="text-slate-500 text-xl">/</span>
+                    <span class="text-rose-400 text-2xl font-bold" id="losses-count">0</span>
+                </div>
+                <p class="text-sm mt-2 text-slate-400">Win Rate: <span id="win-rate" class="text-blue-400 font-semibold">0</span>%</p>
             </div>
         </div>
 

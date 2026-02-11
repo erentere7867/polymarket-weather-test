@@ -8,12 +8,14 @@ import { TradingOpportunity, TradeOrder } from '../polymarket/types.js';
 import { DataStore } from '../realtime/data-store.js';
 import { config, ORDER_CONFIG } from '../config.js';
 import { logger } from '../logger.js';
+import { LatencyTracker } from '../realtime/latency-tracker.js';
 
 interface ExecutionResult {
     opportunity: TradingOpportunity;
     executed: boolean;
     orderId?: string;
     error?: string;
+    traceId?: string;  // Unique ID for end-to-end latency tracking
 }
 
 const TRADE_COOLDOWN_MS = ORDER_CONFIG.ORDER_COOLDOWN_MS;
@@ -25,18 +27,20 @@ export class OrderExecutor {
     private tradingClient: TradingClient;
     private dataStore: DataStore | null;
     private recentlyTradedMarkets: Map<string, Date> = new Map();
+    private latencyTracker: LatencyTracker;
 
     constructor(tradingClient: TradingClient, dataStore?: DataStore) {
         this.tradingClient = tradingClient;
         this.dataStore = dataStore ?? null;
+        this.latencyTracker = LatencyTracker.getInstance();
     }
 
     /**
      * Execute a single opportunity
      */
-    async executeOpportunity(opportunity: TradingOpportunity): Promise<ExecutionResult> {
+    async executeOpportunity(opportunity: TradingOpportunity, traceId?: string): Promise<ExecutionResult> {
         if (opportunity.action === 'none') {
-            return { opportunity, executed: false, error: 'No action' };
+            return { opportunity, executed: false, error: 'No action', traceId };
         }
 
         try {
@@ -65,7 +69,7 @@ export class OrderExecutor {
             // Price drift protection
             if (priceDrift > MAX_PRICE_DRIFT) {
                 logger.warn(`Price drift too high: ${priceDrift.toFixed(3)} > ${MAX_PRICE_DRIFT}`);
-                return { opportunity, executed: false, error: `Price drift: ${priceDrift.toFixed(3)}` };
+                return { opportunity, executed: false, error: `Price drift: ${priceDrift.toFixed(3)}`, traceId };
             }
 
             // Recalculate edge with live prices
@@ -86,13 +90,13 @@ export class OrderExecutor {
 
             if (!shouldExecute) {
                 logger.debug(`Edge too small: ${(liveEdgeForAction * 100).toFixed(1)}%`);
-                return { opportunity, executed: false, error: 'Edge too small' };
+                return { opportunity, executed: false, error: 'Edge too small', traceId };
             }
 
             // Calculate position size
             const positionSize = this.calculatePositionSize(opportunity, liveEdgeForAction, livePrice);
             if (positionSize <= 0) {
-                return { opportunity, executed: false, error: 'Position size too small' };
+                return { opportunity, executed: false, error: 'Position size too small', traceId };
             }
 
             // Build order
@@ -107,25 +111,42 @@ export class OrderExecutor {
 
             logger.info(`Executing: ${opportunity.market.market.question.substring(0, 40)}... | ${opportunity.action} ${positionSize} @ ${livePrice.toFixed(3)}`);
 
+            // Record order submit time for latency tracking
+            if (traceId) {
+                this.latencyTracker.recordTime(traceId, 'orderSubmitTime', Date.now());
+            }
+
             // Place order
             const result = await this.tradingClient.placeOrder(order);
 
-            if (result) {
-                this.recentlyTradedMarkets.set(opportunity.market.market.id, new Date());
-                return { opportunity, executed: true, orderId: result.orderId };
+            // Record order confirm time and complete trace
+            if (traceId) {
+                this.latencyTracker.recordTime(traceId, 'orderConfirmTime', Date.now());
+                const measurement = this.latencyTracker.completeTrace(traceId);
+                if (measurement) {
+                    logger.info(`[OrderExecutor] Trace ${traceId} completed`, {
+                        totalLatencyMs: measurement.totalLatencyMs,
+                        executionLatencyMs: measurement.executionLatencyMs,
+                    });
+                }
             }
 
-            return { opportunity, executed: false, error: 'Order failed' };
+            if (result) {
+                this.recentlyTradedMarkets.set(opportunity.market.market.id, new Date());
+                return { opportunity, executed: true, orderId: result.orderId, traceId };
+            }
+
+            return { opportunity, executed: false, error: 'Order failed', traceId };
         } catch (error) {
             logger.error('Execution error', { error: (error as Error).message });
-            return { opportunity, executed: false, error: (error as Error).message };
+            return { opportunity, executed: false, error: (error as Error).message, traceId };
         }
     }
 
     /**
      * Execute multiple opportunities
      */
-    async executeOpportunities(opportunities: TradingOpportunity[]): Promise<ExecutionResult[]> {
+    async executeOpportunities(opportunities: Array<TradingOpportunity & { traceId?: string }>): Promise<ExecutionResult[]> {
         const results: ExecutionResult[] = [];
 
         // Filter eligible opportunities
@@ -144,7 +165,7 @@ export class OrderExecutor {
         for (let i = 0; i < eligible.length; i += MAX_CONCURRENT_ORDERS) {
             const batch = eligible.slice(i, i + MAX_CONCURRENT_ORDERS);
             const batchResults = await Promise.all(
-                batch.map(opp => this.executeOpportunity(opp))
+                batch.map(opp => this.executeOpportunity(opp, opp.traceId))
             );
             results.push(...batchResults);
             // Delay removed - was causing unnecessary latency between batches

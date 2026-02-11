@@ -349,6 +349,7 @@ export interface FileDetectionResult {
     downloadUrl: string;
     fileSize: number;
     lastModified: Date;
+    traceId?: string;  // Unique ID for end-to-end latency tracking
 }
 
 /**
