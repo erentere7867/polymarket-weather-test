@@ -139,7 +139,7 @@ export class SpeedArbitrageStrategy {
                 return null;
             }
 
-            logger.info(`Speed arb: Threshold crossed ${crossing.direction} for ${market.city}`, {
+            logger.debug(`Speed arb: Threshold crossed ${crossing.direction} for ${market.city}`, {
                 previousValue: forecast.previousValue,
                 currentValue: forecast.forecastValue,
                 threshold,
@@ -147,46 +147,50 @@ export class SpeedArbitrageStrategy {
         }
         
         // ========================================
-        // NEW: RAP-HRRR Confirmation Check (when speed arb mode is OFF)
+        // NEW: RAP-HRRR Confirmation Check (when enabled)
         // ========================================
         
-        // When speed arb mode is OFF, require HRRR to confirm RAP data for US cities
-        if (!config.SPEED_ARBITRAGE_MODE) {
-            // Skip if no city info available
-            if (!market.city) {
-                logger.debug(`Speed arb: No city info for market, skipping RAP-HRRR check`);
-            } else {
-                const cityId = market.city.toLowerCase().replace(/\s+/g, '_');
-                
-                // Check if this is a US city (RAP/HRRR coverage)
-                if (this.isUsCity(market.city)) {
-                    if (!this.confirmationManager) {
-                        logger.warn(
-                            `Speed arb: ConfirmationManager not set, cannot verify RAP-HRRR confirmation for ${market.city}`
+        // Only perform RAP-HRRR confirmation check if explicitly enabled
+        // Default is DISABLED for maximum speed - trade on any model change
+        if (config.SPEED_ARB_REQUIRE_RAP_HRRR_CONFIRMATION) {
+            // When speed arb mode is OFF, require HRRR to confirm RAP data for US cities
+            if (!config.SPEED_ARBITRAGE_MODE) {
+                // Skip if no city info available
+                if (!market.city) {
+                    logger.debug(`Speed arb: No city info for market, skipping RAP-HRRR check`);
+                } else {
+                    const cityId = market.city.toLowerCase().replace(/\s+/g, '_');
+                    
+                    // Check if this is a US city (RAP/HRRR coverage)
+                    if (this.isUsCity(market.city)) {
+                        if (!this.confirmationManager) {
+                            logger.warn(
+                                `Speed arb: ConfirmationManager not set, cannot verify RAP-HRRR confirmation for ${market.city}`
+                            );
+                            return null;
+                        }
+                        
+                        // Get the cycle hour from the forecast timestamp
+                        const cycleHour = forecast.changeTimestamp.getUTCHours();
+                        const runDate = forecast.changeTimestamp;
+                        
+                        const isConfirmed = this.confirmationManager.checkRapHrrrConfirmation(
+                            cityId,
+                            cycleHour,
+                            runDate
                         );
-                        return null;
-                    }
-                    
-                    // Get the cycle hour from the forecast timestamp
-                    const cycleHour = forecast.changeTimestamp.getUTCHours();
-                    const runDate = forecast.changeTimestamp;
-                    
-                    const isConfirmed = this.confirmationManager.checkRapHrrrConfirmation(
-                        cityId,
-                        cycleHour,
-                        runDate
-                    );
-                    
-                    if (!isConfirmed) {
+                        
+                        if (!isConfirmed) {
+                            logger.debug(
+                                `Speed arb: Skipping trade for ${market.city} - waiting for HRRR confirmation of RAP data`
+                            );
+                            return null;
+                        }
+                        
                         logger.debug(
-                            `Speed arb: Skipping trade for ${market.city} - waiting for HRRR confirmation of RAP data`
+                            `Speed arb: RAP-HRRR confirmation verified for ${market.city}`
                         );
-                        return null;
                     }
-                    
-                    logger.info(
-                        `Speed arb: RAP-HRRR confirmation verified for ${market.city}`
-                    );
                 }
             }
         }

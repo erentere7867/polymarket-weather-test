@@ -1,5 +1,19 @@
 import winston from 'winston';
 import { config } from './config.js';
+import DailyRotateFile from 'winston-daily-rotate-file';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Determine log level based on environment
+// Default to 'warn' in production, 'info' if SIMULATION_MODE=true
+function getLogLevel(): string {
+    const envLevel = config.logLevel;
+    if (envLevel) return envLevel;
+    return config.simulationMode ? 'info' : 'warn';
+}
 
 const { combine, timestamp, printf, colorize } = winston.format;
 
@@ -12,7 +26,7 @@ const logFormat = printf(({ level, message, timestamp, ...metadata }) => {
 });
 
 export const logger = winston.createLogger({
-    level: config.logLevel,
+    level: getLogLevel(),
     format: combine(
         timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
         logFormat
@@ -24,6 +38,24 @@ export const logger = winston.createLogger({
                 timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
                 logFormat
             ),
+        }),
+        // File rotation: 10MB per file, keep 5 files max
+        new DailyRotateFile({
+            filename: path.join(__dirname, '../logs/combined-YYYY-MM-DD.log'),
+            datePattern: 'YYYY-MM-DD',
+            zippedArchive: true,
+            maxSize: '10m',
+            maxFiles: '5',
+            level: getLogLevel(),
+        }),
+        // Separate error log
+        new DailyRotateFile({
+            filename: path.join(__dirname, '../logs/error-YYYY-MM-DD.log'),
+            datePattern: 'YYYY-MM-DD',
+            zippedArchive: true,
+            maxSize: '10m',
+            maxFiles: '5',
+            level: 'error',
         }),
     ],
 });

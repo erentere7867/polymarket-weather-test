@@ -1,866 +1,216 @@
 /**
- * Entry Optimizer - Advanced Position Sizing and Entry Optimization
+ * Entry Optimizer - Simplified for Low Latency
  * 
- * Features:
- * - Market liquidity awareness (order book depth analysis)
- * - Volatility-adjusted position sizing
- * - Full Kelly Criterion calculation with win/loss ratio
- * - Position scaling (gradual entry)
- * - Urgency factor based on forecast freshness
- * - Integration with Market Impact Model
+ * Key simplifications:
+ * - Fixed position sizes based on sigma confidence bands
+ * - No Kelly criterion (removed for speed)
+ * - No market impact model (not needed for small positions)
+ * - Simplified edge: (probability - price) - 2% for costs
  */
 
 import { CalculatedEdge } from '../probability/edge-calculator.js';
-import { MarketModel } from '../probability/market-model.js';
-import { config, ENTRY_CONFIG } from '../config.js';
+import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { MarketImpactModel } from './market-impact.js';
 import { OrderBook } from '../polymarket/types.js';
 
 export interface EntrySignal {
     marketId: string;
     side: 'yes' | 'no';
-    size: number;        // Amount in USDC
-    priceLimit?: number; // Limit price (optional, if undefined use Market)
+    size: number;            // Amount in USDC
+    priceLimit?: number;     // Limit price (optional)
     orderType: 'MARKET' | 'LIMIT';
     urgency: 'LOW' | 'MEDIUM' | 'HIGH';
     reason: string;
     confidence: number;
     estimatedEdge: number;
-    isGuaranteed: boolean; // Whether this is a guaranteed outcome trade
-    
-    // Advanced fields
-    scaleInOrders?: ScaleInOrder[];  // For position scaling
-    urgencyFactor?: number;           // 0-1 urgency multiplier
-    expectedSlippage?: number;        // Estimated slippage
-    marketImpact?: number;            // Estimated market impact
-    
-    // New: Dynamic Kelly and partial exit fields
-    kellyFraction?: number;           // Applied Kelly fraction for this trade
-    sigma?: number;                   // Statistical significance (sigma)
-    decayFactor?: number;             // Edge decay factor
-    partialExitTriggers?: PartialExitTrigger[]; // Partial exit levels
+    isGuaranteed: boolean;
+    sigma: number;           // Statistical significance
 }
 
-export interface PartialExitTrigger {
-    percentOfPosition: number;        // e.g., 0.5 for 50%
-    profitThreshold: number;          // e.g., 0.05 for 5% profit
-    orderType: 'MARKET' | 'LIMIT';
-}
-
-export interface ScaleInOrder {
-    size: number;
-    price: number;
-    delayMs: number;  // Delay before this tranche
-    orderType: 'MARKET' | 'LIMIT';
-}
-
-export interface OrderBookDepth {
-    totalBidDepth: number;    // Total USDC on bid side
-    totalAskDepth: number;    // Total USDC on ask side
-    spread: number;           // Current spread
-    bestBid: number;
-    bestAsk: number;
-    depthScore: number;       // 0-1 liquidity score
-}
-
-/**
- * Liquidity analysis result for filtering trades
- */
-export interface LiquidityAnalysis {
-    bidAskSpread: number;              // Spread as decimal (e.g., 0.03 = 3%)
-    availableYesShares: number;        // Shares available at best ask
-    availableNoShares: number;         // Shares available at best bid
-    totalDepthUsd: number;             // Total liquidity in USD
-    isLiquidEnough: boolean;           // Passes all liquidity requirements
-    rejectionReason: string | null;    // Reason if not liquid enough
-}
-
-/**
- * Result of liquidity requirements check
- */
-export interface LiquidityCheckResult {
-    passes: boolean;
-    reason: string | null;
-    warnings: string[];
-}
-
-export interface VolatilityMetrics {
-    priceVolatility: number;  // Standard deviation of price changes
-    volumeVolatility: number; // Volume variance
-    recentVolatility: number; // Recent price movement speed
-    volatilityRegime: 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
-}
-
-export interface KellyInputs {
-    winProbability: number;
-    lossProbability: number;
-    avgWin: number;           // Average win amount (as multiple of stake)
-    avgLoss: number;          // Average loss amount (as multiple of stake)
-    winLossRatio: number;     // avgWin / avgLoss
-}
+// Confidence bands for position sizing
+const POSITION_SIZE_BANDS = {
+    HIGH: 1.0,      // σ ≥ 2.0: full position
+    MEDIUM: 0.75,   // σ ≥ 1.5: 75% of max
+    LOW: 0.50,      // σ ≥ 1.0: 50% of max
+    SKIP: 0         // σ < 1.0: skip (too uncertain)
+};
 
 export class EntryOptimizer {
-    private marketModel: MarketModel;
-    private marketImpactModel: MarketImpactModel;
     private maxPositionSize: number;
     
-    // Configuration - Dynamic Kelly based on sigma/confidence (from ENTRY_CONFIG)
-    private readonly KELLY_FRACTION_HIGH_CONFIDENCE = ENTRY_CONFIG.MAX_KELLY_FRACTION;  // Half-Kelly for sigma > 2.0
-    private readonly KELLY_FRACTION_MEDIUM_CONFIDENCE = ENTRY_CONFIG.KELLY_FRACTION;    // Quarter-Kelly for 0.5 < sigma < 2.0
-    private readonly KELLY_FRACTION_LOW_CONFIDENCE = ENTRY_CONFIG.MIN_KELLY_FRACTION;   // 1/8-Kelly for low confidence
-    private readonly KELLY_FRACTION_GUARANTEED = 0.75;       // 3/4-Kelly for guaranteed outcomes
-    
-    private readonly VOLATILITY_WINDOW_MS = 5 * 60 * 1000;  // 5 minutes
-    private readonly URGENCY_DECAY_MS = 30 * 1000;  // 30 seconds for urgency decay
-    private readonly SCALE_IN_THRESHOLD = 100;  // Scale in for positions > $100
-    private readonly MAX_SCALE_IN_TRANCHES = 3;
-    
-    // Volatility thresholds (from ENTRY_CONFIG)
-    private readonly VOLATILITY_LOW = ENTRY_CONFIG.LOW_VOLATILITY_THRESHOLD;
-    private readonly VOLATILITY_HIGH = ENTRY_CONFIG.HIGH_VOLATILITY_THRESHOLD;
-    private readonly VOLATILITY_EXTREME = 0.10;  // 10% price movement
-    
-    // Edge decay configuration - USE CONFIG VALUES
-    private readonly EDGE_DECAY_HALF_LIFE_MS = config.EDGE_DECAY_HALF_LIFE_MS;  // 90s from env
-    private readonly MAX_EDGE_AGE_MS = config.EDGE_DECAY_MAX_AGE_MS;  // 4min from env
-
-    constructor(
-        marketModel: MarketModel, 
-        marketImpactModel: MarketImpactModel,
-        maxPositionSize: number = 50
-    ) {
-        this.marketModel = marketModel;
-        this.marketImpactModel = marketImpactModel;
+    constructor(maxPositionSize: number = 50) {
         this.maxPositionSize = maxPositionSize;
     }
 
     /**
-     * Get dynamic Kelly fraction based on sigma and confidence
+     * Determine position size multiplier based on sigma
      */
-    private getDynamicKellyFraction(sigma: number, isGuaranteed: boolean): number {
-        if (isGuaranteed) {
-            return this.KELLY_FRACTION_GUARANTEED;
-        }
-        
+    private getPositionSizeMultiplier(sigma: number): number {
         if (sigma >= 2.0) {
-            // High confidence: Half-Kelly
-            return this.KELLY_FRACTION_HIGH_CONFIDENCE;
+            return POSITION_SIZE_BANDS.HIGH;
+        } else if (sigma >= 1.5) {
+            return POSITION_SIZE_BANDS.MEDIUM;
         } else if (sigma >= 1.0) {
-            // Medium confidence: Quarter-Kelly
-            return this.KELLY_FRACTION_MEDIUM_CONFIDENCE;
-        } else if (sigma >= 0.5) {
-            // Low confidence: 1/8-Kelly
-            return this.KELLY_FRACTION_LOW_CONFIDENCE;
+            return POSITION_SIZE_BANDS.LOW;
         } else {
-            // Very low confidence: Don't trade or minimal sizing
-            return 0.05;  // 1/20-Kelly
+            return POSITION_SIZE_BANDS.SKIP;
         }
     }
 
     /**
-     * Calculate edge decay factor based on forecast age
-     * Exponential decay with 1-minute half-life
+     * Get confidence band label for logging
      */
-    private calculateEdgeDecayFactor(forecastTimestamp?: Date): number {
-        if (!forecastTimestamp) {
-            return 0.5;  // Default medium decay
-        }
-
-        const ageMs = Date.now() - forecastTimestamp.getTime();
-        
-        // If too old, no edge
-        if (ageMs > this.MAX_EDGE_AGE_MS) {
-            return 0.1;
-        }
-        
-        // Exponential decay: factor = 0.5^(age/half_life)
-        const decayFactor = Math.exp(-ageMs / this.EDGE_DECAY_HALF_LIFE_MS * Math.LN2);
-        
-        // Ensure minimum factor of 0.3
-        return Math.max(0.3, decayFactor);
+    private getConfidenceBand(sigma: number): string {
+        if (sigma >= 2.0) return 'HIGH (σ≥2.0)';
+        if (sigma >= 1.5) return 'MEDIUM (σ≥1.5)';
+        if (sigma >= 1.0) return 'LOW (σ≥1.0)';
+        return 'SKIP (σ<1.0)';
     }
 
     /**
-     * Check if forecast is fresh enough to trade
-     * Don't trade on forecasts older than 30 minutes
+     * Analyze basic liquidity (simplified)
      */
-    private isForecastFresh(forecastTimestamp?: Date): boolean {
-        if (!forecastTimestamp) {
-            return false;
+    private analyzeLiquidity(orderBook?: OrderBook): { spread: number; bestBid: number; bestAsk: number } {
+        if (!orderBook) {
+            return { spread: 0.02, bestBid: 0.49, bestAsk: 0.51 };
         }
-        
-        const ageMs = Date.now() - forecastTimestamp.getTime();
-        const maxAgeMs = 30 * 60 * 1000; // 30 minutes
-        
-        return ageMs <= maxAgeMs;
+
+        const bestBid = orderBook.bids.length > 0 ? parseFloat(orderBook.bids[0].price) : 0;
+        const bestAsk = orderBook.asks.length > 0 ? parseFloat(orderBook.asks[0].price) : 1;
+
+        return {
+            spread: bestAsk - bestBid,
+            bestBid,
+            bestAsk
+        };
     }
 
     /**
-     * Check for late trade conditions
-     * Returns decayed edge if price is moving against position
-     * 
-     * @param edge - The calculated edge
-     * @param marketId - Market identifier
-     * @returns Object with decayed edge and whether trade should be rejected
+     * Calculate simplified edge: (probability - price) - 2% for costs
      */
-    private checkLateTrade(
-        edge: CalculatedEdge, 
-        marketId: string
-    ): { decayedEdge: number; rejectTrade: boolean } {
-        // Get price velocity from market model
-        const velocity = this.marketModel.getPriceVelocity(marketId, edge.side);
-        const threshold = config.LATE_TRADE_PRICE_VELOCITY_THRESHOLD; // 2%
+    private calculateSimplifiedEdge(edge: CalculatedEdge): number {
+        // Simplified edge: (probability - price) - 2% for costs
+        const rawEdge = edge.confidence - edge.price;
+        const netEdge = rawEdge - 0.02; // 2% for costs
         
-        // Check if price is moving against the position
-        const isMovingAgainst = (edge.side === 'yes' && velocity > 0) || 
-                                (edge.side === 'no' && velocity < 0);
-        
-        // If velocity exceeds threshold and moving against us, decay the edge
-        if (Math.abs(velocity) > threshold && isMovingAgainst) {
-            const decayFactor = config.LATE_TRADE_EDGE_DECAY_FACTOR; // 0.5
-            const decayedEdge = edge.adjustedEdge * decayFactor;
-            
-            // Reject trade if edge below threshold after decay
-            const shouldReject = decayedEdge < ENTRY_CONFIG.MIN_EDGE_FOR_ENTRY;
-            
-            if (shouldReject) {
-                logger.warn(`[EntryOptimizer] Late trade rejected: price velocity ${(velocity * 100).toFixed(2)}% against ${edge.side} position, edge decayed from ${(edge.adjustedEdge * 100).toFixed(2)}% to ${(decayedEdge * 100).toFixed(2)}%`);
-            } else {
-                logger.info(`[EntryOptimizer] Late trade warning: price velocity ${(velocity * 100).toFixed(2)}%, edge decayed to ${(decayedEdge * 100).toFixed(2)}%`);
-            }
-            
-            return { decayedEdge, rejectTrade: shouldReject };
-        }
-        
-        return { decayedEdge: edge.adjustedEdge, rejectTrade: false };
+        return netEdge;
     }
 
     /**
-     * Main entry point: Optimize entry for a detected edge
-     * Now includes dynamic Kelly sizing, edge decay modeling, liquidity filtering,
-     * late trade detection, and forecast freshness checks
+     * Main entry point - optimized for speed
      */
     optimizeEntry(
         edge: CalculatedEdge,
         orderBook?: OrderBook,
         forecastTimestamp?: Date,
         marketVolume24h?: number,
-        sigma?: number  // Statistical significance for dynamic Kelly
+        sigma?: number
     ): EntrySignal | null {
         const startTime = Date.now();
         
-        // 0. Check forecast freshness - don't trade on old forecasts
-        if (!this.isForecastFresh(forecastTimestamp)) {
-            logger.warn(`[EntryOptimizer] Trade rejected: forecast too old (${forecastTimestamp ? ((Date.now() - forecastTimestamp.getTime()) / 60000).toFixed(1) : 'unknown'} min)`);
+        // Use provided sigma or derive from confidence
+        const effectiveSigma = sigma ?? (edge.confidence * 3);
+        
+        // Skip if sigma too low
+        if (effectiveSigma < 1.0) {
+            logger.info(`[EntryOptimizer] Skipped: sigma ${effectiveSigma.toFixed(2)} < 1.0 (too uncertain)`);
             return null;
         }
+
+        // Get position size multiplier from sigma
+        const sizeMultiplier = this.getPositionSizeMultiplier(effectiveSigma);
         
-        // 0b. Check for late trade conditions
-        const lateTradeCheck = this.checkLateTrade(edge, edge.marketId);
-        if (lateTradeCheck.rejectTrade) {
-            // Trade rejected due to late entry conditions
+        // Skip if below threshold
+        if (sizeMultiplier === 0) {
             return null;
         }
+
+        // Calculate simplified edge
+        const simplifiedEdge = this.calculateSimplifiedEdge(edge);
         
-        // Use decayed edge for calculations
-        const workingEdge: CalculatedEdge = {
-            ...edge,
-            adjustedEdge: lateTradeCheck.decayedEdge
-        };
-        
-        // 1. Analyze market liquidity (basic)
+        // Skip if no positive edge after costs
+        if (simplifiedEdge <= 0) {
+            logger.info(`[EntryOptimizer] Skipped: edge ${(simplifiedEdge * 100).toFixed(2)}% <= 0 after costs`);
+            return null;
+        }
+
+        // Analyze liquidity
         const liquidity = this.analyzeLiquidity(orderBook);
         
-        // 1b. Analyze order book liquidity for filtering
-        const liquidityAnalysis = this.analyzeOrderBookLiquidity(orderBook);
-        const liquidityCheck = this.checkLiquidityRequirements(liquidityAnalysis);
-        
-        // If liquidity check fails, log warning and reduce position size significantly
-        let liquidityWarningFactor = 1.0;
-        if (!liquidityCheck.passes) {
-            logger.warn(`⚠️ Trade blocked: ${liquidityCheck.reason}`);
-            logger.info(`[INFO] Trade blocked: Does not meet liquidity requirements`);
-            // Don't completely block, but reduce size to minimal
-            liquidityWarningFactor = 0.1;
-        } else if (liquidityCheck.warnings.length > 0) {
-            // Reduce size proportionally for warnings
-            liquidityWarningFactor = 0.7;
+        // Skip if spread too wide (>10%)
+        if (liquidity.spread > 0.10) {
+            logger.info(`[EntryOptimizer] Skipped: spread ${(liquidity.spread * 100).toFixed(1)}% too wide`);
+            return null;
         }
+
+        // Calculate target size
+        let targetSize = this.maxPositionSize * sizeMultiplier;
         
-        // 2. Calculate volatility metrics
-        const volatility = this.calculateVolatility(workingEdge.marketId);
-        
-        // 3. Calculate urgency factor based on forecast freshness
-        const urgencyFactor = this.calculateUrgencyFactor(forecastTimestamp);
-        
-        // 4. Calculate edge decay factor
-        const edgeDecayFactor = this.calculateEdgeDecayFactor(forecastTimestamp);
-        
-        // 5. Determine Kelly fraction based on sigma and confidence
-        const effectiveSigma = sigma ?? workingEdge.confidence * 3;  // Approximate sigma from confidence
-        const kellyFraction = this.getDynamicKellyFraction(effectiveSigma, workingEdge.isGuaranteed);
-        
-        // 6. Calculate optimal position size using dynamic Kelly Criterion
-        const kellyInputs = this.buildKellyInputs(workingEdge, volatility);
-        const baseKelly = this.calculateFullKelly(kellyInputs);
-        
-        // 7. Apply volatility adjustment
-        const volatilityMultiplier = this.getVolatilityMultiplier(volatility.volatilityRegime);
-        
-        // 8. Apply liquidity constraints
-        const liquidityConstrainedSize = this.applyLiquidityConstraints(
-            this.maxPositionSize * baseKelly * workingEdge.confidence,
-            liquidity,
-            orderBook
-        );
-        
-        // 9. Calculate final target size with all factors (including liquidity warning factor)
-        let targetSize = liquidityConstrainedSize
-            * volatilityMultiplier
-            * urgencyFactor
-            * edgeDecayFactor
-            * (kellyFraction / this.KELLY_FRACTION_MEDIUM_CONFIDENCE)  // Scale by dynamic Kelly ratio
-            * liquidityWarningFactor;  // Apply liquidity warning factor
-        
-        // 10. Fast path for guaranteed outcomes (still respect liquidity warnings)
-        if (workingEdge.isGuaranteed) {
-            targetSize = this.maxPositionSize
-                * (config.guaranteedPositionMultiplier * 1.5)  // 3x instead of 2x
-                * urgencyFactor
-                * edgeDecayFactor
-                * liquidityWarningFactor;  // Even guaranteed trades respect liquidity
+        // Reduce for wide spreads
+        if (liquidity.spread > 0.05) {
+            targetSize *= 0.7;
         }
+
+        // Guaranteed outcomes get boost
+        if (edge.isGuaranteed) {
+            targetSize = Math.min(targetSize * 1.5, this.maxPositionSize);
+        }
+
+        // Determine order type based on urgency
+        const urgency = forecastTimestamp 
+            ? this.calculateUrgency(forecastTimestamp)
+            : 'MEDIUM';
+
+        const orderType = urgency === 'HIGH' ? 'MARKET' : 'LIMIT';
         
-        // 11. Clamp to min/max
-        const absoluteMax = this.maxPositionSize * (config.guaranteedPositionMultiplier * 1.5);
-        targetSize = Math.max(5, Math.min(absoluteMax, targetSize));
-        
-        // 12. Calculate market impact
-        const marketImpact = this.marketImpactModel.estimateImpact(
-            targetSize,
-            marketVolume24h || 100000,  // Default $100k daily volume
-            liquidity.depthScore
-        );
-        
-        // 13. Determine if we should scale in
-        const scaleInOrders = targetSize > this.SCALE_IN_THRESHOLD
-            ? this.buildScaleInOrders(targetSize, workingEdge, liquidity, urgencyFactor)
+        // Calculate limit price
+        const priceLimit = orderType === 'LIMIT'
+            ? (edge.side === 'yes' ? liquidity.bestAsk : liquidity.bestBid)
             : undefined;
-        
-        // 14. Calculate expected slippage
-        const expectedSlippage = this.marketModel.estimateSlippage(workingEdge.marketId, targetSize);
-        
-        // 15. Build partial exit triggers for high-confidence trades
-        const partialExitTriggers = this.buildPartialExitTriggers(effectiveSigma, volatility.volatilityRegime);
-        
-        // Build reason with liquidity info
-        let reason = this.buildReason(workingEdge, volatility, liquidity, baseKelly, urgencyFactor, effectiveSigma, edgeDecayFactor);
-        if (!liquidityCheck.passes) {
-            reason = `BLOCKED: ${liquidityCheck.reason} | ${reason}`;
-        } else if (liquidityCheck.warnings.length > 0) {
-            reason = `⚠️ ${liquidityCheck.warnings.join(', ')} | ${reason}`;
-        }
-        
+
+        // Build reason string
+        const band = this.getConfidenceBand(effectiveSigma);
+        const reason = `${edge.reason} | Edge: ${(simplifiedEdge * 100).toFixed(1)}% | Band: ${band} | Size: $${targetSize.toFixed(2)}`;
+
         const signal: EntrySignal = {
-            marketId: workingEdge.marketId,
-            side: workingEdge.side,
+            marketId: edge.marketId,
+            side: edge.side,
             size: parseFloat(targetSize.toFixed(2)),
-            orderType: urgencyFactor > 0.8 ? 'MARKET' : 'LIMIT',
-            priceLimit: this.calculateOptimalLimitPrice(workingEdge, liquidity, urgencyFactor),
-            urgency: this.determineUrgency(urgencyFactor, workingEdge.isGuaranteed),
+            orderType,
+            priceLimit,
+            urgency,
             reason,
-            confidence: workingEdge.confidence * liquidity.depthScore,
-            estimatedEdge: workingEdge.adjustedEdge - marketImpact - expectedSlippage,
-            isGuaranteed: workingEdge.isGuaranteed,
-            scaleInOrders,
-            urgencyFactor: parseFloat(urgencyFactor.toFixed(3)),
-            expectedSlippage: parseFloat(expectedSlippage.toFixed(4)),
-            marketImpact: parseFloat(marketImpact.toFixed(4)),
-            kellyFraction: parseFloat(kellyFraction.toFixed(3)),
-            sigma: effectiveSigma,
-            partialExitTriggers
+            confidence: edge.confidence,
+            estimatedEdge: simplifiedEdge,
+            isGuaranteed: edge.isGuaranteed,
+            sigma: effectiveSigma
         };
-        
+
         const duration = Date.now() - startTime;
-        if (duration > 5) {
+        if (duration > 2) {
             logger.warn(`[EntryOptimizer] Slow optimization: ${duration}ms`);
         }
-        
+
         return signal;
     }
 
     /**
-     * Build partial exit triggers based on sigma and volatility regime
+     * Calculate urgency based on forecast age
      */
-    private buildPartialExitTriggers(
-        sigma: number, 
-        regime: 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME'
-    ): PartialExitTrigger[] {
-        const triggers: PartialExitTrigger[] = [];
-        
-        if (sigma >= 2.0 && regime !== 'EXTREME') {
-            // High confidence, non-extreme volatility: Take 50% at 5%, let rest run
-            triggers.push({
-                percentOfPosition: 0.5,
-                profitThreshold: 0.05,
-                orderType: 'LIMIT'
-            });
-        } else if (sigma >= 1.0) {
-            // Medium confidence: Take 30% at 4%, let rest run
-            triggers.push({
-                percentOfPosition: 0.3,
-                profitThreshold: 0.04,
-                orderType: 'LIMIT'
-            });
-        }
-        
-        return triggers;
-    }
-
-    /**
-     * Analyze order book depth and liquidity
-     */
-    analyzeLiquidity(orderBook?: OrderBook): OrderBookDepth {
-        if (!orderBook) {
-            return {
-                totalBidDepth: 0,
-                totalAskDepth: 0,
-                spread: 0.02,  // Assume 2% spread
-                bestBid: 0.49,
-                bestAsk: 0.51,
-                depthScore: 0.5  // Neutral
-            };
-        }
-
-        // Calculate total depth on each side
-        const totalBidDepth = orderBook.bids.reduce((sum, bid) => {
-            return sum + parseFloat(bid.size) * parseFloat(bid.price);
-        }, 0);
-
-        const totalAskDepth = orderBook.asks.reduce((sum, ask) => {
-            return sum + parseFloat(ask.size) * parseFloat(ask.price);
-        }, 0);
-
-        const bestBid = orderBook.bids.length > 0 ? parseFloat(orderBook.bids[0].price) : 0;
-        const bestAsk = orderBook.asks.length > 0 ? parseFloat(orderBook.asks[0].price) : 1;
-        const spread = bestAsk - bestBid;
-
-        // Calculate depth score (0-1)
-        // More depth = better liquidity = higher score
-        const avgDepth = (totalBidDepth + totalAskDepth) / 2;
-        const depthScore = Math.min(1, avgDepth / 10000);  // $10k = full score
-
-        return {
-            totalBidDepth,
-            totalAskDepth,
-            spread,
-            bestBid,
-            bestAsk,
-            depthScore
-        };
-    }
-
-    /**
-     * Analyze order book liquidity for filtering
-     * Returns detailed liquidity analysis with pass/fail status
-     */
-    analyzeOrderBookLiquidity(orderBook?: OrderBook): LiquidityAnalysis {
-        if (!orderBook) {
-            return {
-                bidAskSpread: 1.0,  // 100% spread = no liquidity
-                availableYesShares: 0,
-                availableNoShares: 0,
-                totalDepthUsd: 0,
-                isLiquidEnough: false,
-                rejectionReason: 'No order book data available'
-            };
-        }
-
-        // Calculate spread
-        const bestBid = orderBook.bids.length > 0 ? parseFloat(orderBook.bids[0].price) : 0;
-        const bestAsk = orderBook.asks.length > 0 ? parseFloat(orderBook.asks[0].price) : 1;
-        const bidAskSpread = bestAsk - bestBid;
-
-        // Calculate available shares at best prices
-        const availableYesShares = orderBook.asks.length > 0
-            ? parseFloat(orderBook.asks[0].size)
-            : 0;
-        const availableNoShares = orderBook.bids.length > 0
-            ? parseFloat(orderBook.bids[0].size)
-            : 0;
-
-        // Calculate total depth in USD
-        const totalBidDepth = orderBook.bids.reduce((sum, bid) => {
-            return sum + parseFloat(bid.size) * parseFloat(bid.price);
-        }, 0);
-        const totalAskDepth = orderBook.asks.reduce((sum, ask) => {
-            return sum + parseFloat(ask.size) * parseFloat(ask.price);
-        }, 0);
-        const totalDepthUsd = totalBidDepth + totalAskDepth;
-
-        // Check liquidity requirements
-        const check = this.checkLiquidityRequirements({
-            bidAskSpread,
-            availableYesShares,
-            availableNoShares,
-            totalDepthUsd,
-            isLiquidEnough: false,  // Will be set below
-            rejectionReason: null
-        });
-
-        return {
-            bidAskSpread,
-            availableYesShares,
-            availableNoShares,
-            totalDepthUsd,
-            isLiquidEnough: check.passes,
-            rejectionReason: check.reason
-        };
-    }
-
-    /**
-     * Check if liquidity meets minimum requirements
-     * Returns pass/fail with specific reason if failed
-     */
-    checkLiquidityRequirements(liquidity: LiquidityAnalysis): LiquidityCheckResult {
-        const warnings: string[] = [];
-        let fails = false;
-        let failReason: string | null = null;
-
-        // Check 1: Order book depth
-        if (liquidity.totalDepthUsd < config.MIN_ORDER_BOOK_DEPTH_USD) {
-            fails = true;
-            failReason = `Insufficient liquidity: Order book depth $${liquidity.totalDepthUsd.toFixed(0)} (min: $${config.MIN_ORDER_BOOK_DEPTH_USD})`;
-            logger.warn(failReason);
-        } else if (liquidity.totalDepthUsd < config.MIN_ORDER_BOOK_DEPTH_USD * 2) {
-            warnings.push(`Low liquidity: $${liquidity.totalDepthUsd.toFixed(0)} depth`);
-        }
-
-        // Check 2: Bid-ask spread
-        if (liquidity.bidAskSpread > config.MAX_BID_ASK_SPREAD) {
-            fails = true;
-            failReason = `Spread too wide: ${(liquidity.bidAskSpread * 100).toFixed(1)}% (max: ${(config.MAX_BID_ASK_SPREAD * 100).toFixed(0)}%)`;
-            logger.warn(failReason);
-        } else if (liquidity.bidAskSpread > config.MAX_BID_ASK_SPREAD * 0.7) {
-            warnings.push(`Wide spread: ${(liquidity.bidAskSpread * 100).toFixed(1)}%`);
-        }
-
-        // Check 3: Available shares at best price
-        const minShares = Math.min(liquidity.availableYesShares, liquidity.availableNoShares);
-        if (minShares < config.MIN_AVAILABLE_LIQUIDITY_SHARES) {
-            // This is a warning, not a hard fail - we can still trade smaller size
-            warnings.push(`Limited shares at best price: ${minShares.toFixed(0)} (min: ${config.MIN_AVAILABLE_LIQUIDITY_SHARES})`);
-        }
-
-        // Log warnings if any
-        if (warnings.length > 0 && !fails) {
-            logger.info(`Liquidity warnings: ${warnings.join('; ')}`);
-        }
-
-        return {
-            passes: !fails,
-            reason: failReason,
-            warnings
-        };
-    }
-
-    /**
-     * Calculate volatility metrics for a market
-     */
-    calculateVolatility(marketId: string): VolatilityMetrics {
-        const velocity = this.marketModel.getPriceVelocity(marketId, 'yes');
-        
-        // Calculate price volatility based on velocity
-        const priceVolatility = Math.abs(velocity);
-        
-        // Determine volatility regime
-        let volatilityRegime: 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
-        if (priceVolatility < this.VOLATILITY_LOW) {
-            volatilityRegime = 'LOW';
-        } else if (priceVolatility < this.VOLATILITY_HIGH) {
-            volatilityRegime = 'MEDIUM';
-        } else if (priceVolatility < this.VOLATILITY_EXTREME) {
-            volatilityRegime = 'HIGH';
-        } else {
-            volatilityRegime = 'EXTREME';
-        }
-
-        return {
-            priceVolatility,
-            volumeVolatility: 0,  // Would need volume data
-            recentVolatility: velocity,
-            volatilityRegime
-        };
-    }
-
-    /**
-     * Calculate urgency factor based on forecast freshness
-     * Higher urgency for fresh forecasts, decays over time
-     */
-    calculateUrgencyFactor(forecastTimestamp?: Date): number {
-        if (!forecastTimestamp) {
-            return 0.5;  // Default medium urgency
-        }
-
+    private calculateUrgency(forecastTimestamp: Date): 'LOW' | 'MEDIUM' | 'HIGH' {
         const ageMs = Date.now() - forecastTimestamp.getTime();
         
-        // Urgency decays exponentially
-        // 1.0 at t=0, 0.5 at URGENCY_DECAY_MS, approaching 0
-        const urgency = Math.exp(-ageMs / this.URGENCY_DECAY_MS);
-        
-        // Ensure minimum urgency of 0.1 to still trade older signals
-        return Math.max(0.1, urgency);
-    }
-
-    /**
-     * Build Kelly Criterion inputs from edge and market conditions
-     */
-    private buildKellyInputs(edge: CalculatedEdge, volatility: VolatilityMetrics): KellyInputs {
-        const winProbability = edge.confidence;
-        const lossProbability = 1 - winProbability;
-        
-        // Adjust win/loss based on edge size and volatility
-        // Higher edge = higher potential win
-        // Higher volatility = higher potential loss (wider stops)
-        const baseWin = edge.adjustedEdge * 2;  // Simplified: 2x edge as win
-        const baseLoss = 1 + (volatility.priceVolatility * ENTRY_CONFIG.VOLATILITY_MULTIPLIER);  // Volatility-adjusted loss
-        
-        const avgWin = Math.max(0.1, baseWin);
-        const avgLoss = Math.min(1.0, baseLoss);
-        
-        return {
-            winProbability,
-            lossProbability,
-            avgWin,
-            avgLoss,
-            winLossRatio: avgWin / avgLoss
-        };
-    }
-
-    /**
-     * Calculate full Kelly Criterion fraction
-     * f* = (p*b - q) / b
-     * where p = win probability, q = loss probability, b = win/loss ratio
-     */
-    calculateFullKelly(inputs: KellyInputs): number {
-        const { winProbability, lossProbability, winLossRatio } = inputs;
-        
-        if (winLossRatio <= 0) {
-            return 0;
-        }
-        
-        // Full Kelly formula
-        const kelly = (winProbability * winLossRatio - lossProbability) / winLossRatio;
-        
-        // Default to quarter-Kelly for safety if sigma not provided
-        const kellyFraction = this.KELLY_FRACTION_MEDIUM_CONFIDENCE;
-        const fractionalKelly = Math.max(0, kelly * kellyFraction);
-        
-        // Cap at reasonable maximum (50% of bankroll)
-        return Math.min(0.5, fractionalKelly);
-    }
-
-    /**
-     * Get position size multiplier based on volatility regime
-     */
-    private getVolatilityMultiplier(regime: 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME'): number {
-        switch (regime) {
-            case 'LOW':
-                return 1.2;  // Increase size in low volatility
-            case 'MEDIUM':
-                return 1.0;  // Normal sizing
-            case 'HIGH':
-                return 0.7;  // Reduce size in high volatility
-            case 'EXTREME':
-                return 0.4;  // Significantly reduce in extreme volatility
-            default:
-                return 1.0;
-        }
-    }
-
-    /**
-     * Apply liquidity constraints to position size
-     */
-    private applyLiquidityConstraints(
-        desiredSize: number,
-        liquidity: OrderBookDepth,
-        orderBook?: OrderBook
-    ): number {
-        // C2: If no order book data, skip depth-based constraints entirely
-        // (depth is 0 which would incorrectly constrain size to 0)
-        if (!orderBook) {
-            // Apply spread-based reduction only
-            if (liquidity.spread > 0.05) {
-                return desiredSize * 0.7;
-            }
-            return desiredSize;
-        }
-
-        // Don't exceed 10% of order book depth on either side
-        const maxSizeFromDepth = Math.min(
-            liquidity.totalBidDepth * 0.1,
-            liquidity.totalAskDepth * 0.1
-        );
-        
-        // If order book is thin, be more conservative
-        if (liquidity.depthScore < 0.3) {
-            return Math.min(desiredSize * 0.5, maxSizeFromDepth);
-        }
-        
-        // If spread is wide, reduce size
-        if (liquidity.spread > 0.05) {
-            return Math.min(desiredSize * 0.7, maxSizeFromDepth);
-        }
-        
-        return Math.min(desiredSize, maxSizeFromDepth * 2);
-    }
-
-    /**
-     * Build scale-in orders for large positions
-     */
-    private buildScaleInOrders(
-        totalSize: number,
-        edge: CalculatedEdge,
-        liquidity: OrderBookDepth,
-        urgencyFactor: number
-    ): ScaleInOrder[] {
-        const numTranches = Math.min(
-            this.MAX_SCALE_IN_TRANCHES,
-            Math.ceil(totalSize / this.SCALE_IN_THRESHOLD)
-        );
-        
-        const trancheSize = totalSize / numTranches;
-        const orders: ScaleInOrder[] = [];
-        
-        // First tranche is immediate
-        orders.push({
-            size: parseFloat(trancheSize.toFixed(2)),
-            price: edge.side === 'yes' ? liquidity.bestAsk : liquidity.bestBid,
-            delayMs: 0,
-            orderType: urgencyFactor > 0.8 ? 'MARKET' : 'LIMIT'
-        });
-        
-        // Subsequent tranches with delays
-        for (let i = 1; i < numTranches; i++) {
-            // Slightly better prices for later tranches (try to get filled on pullbacks)
-            const priceImprovement = i * 0.005;  // 0.5% better each tranche
-            
-            orders.push({
-                size: parseFloat(trancheSize.toFixed(2)),
-                price: edge.side === 'yes' 
-                    ? liquidity.bestAsk - priceImprovement
-                    : liquidity.bestBid + priceImprovement,
-                delayMs: i * 2000,  // 2 second delays between tranches
-                orderType: 'LIMIT'
-            });
-        }
-        
-        return orders;
-    }
-
-    /**
-     * Calculate optimal limit price based on urgency and liquidity
-     */
-    private calculateOptimalLimitPrice(
-        edge: CalculatedEdge,
-        liquidity: OrderBookDepth,
-        urgencyFactor: number
-    ): number | undefined {
-        // For high urgency, use market orders (no limit)
-        if (urgencyFactor > 0.9) {
-            return undefined;
-        }
-        
-        // For medium urgency, use current best price
-        if (urgencyFactor > 0.5) {
-            return edge.side === 'yes' ? liquidity.bestAsk : liquidity.bestBid;
-        }
-        
-        // For low urgency, try to get better fill
-        const improvement = 0.01 * (1 - urgencyFactor);  // Up to 1% improvement
-        return edge.side === 'yes'
-            ? liquidity.bestAsk - improvement
-            : liquidity.bestBid + improvement;
-    }
-
-    /**
-     * Determine urgency level for the signal
-     */
-    private determineUrgency(urgencyFactor: number, isGuaranteed: boolean): 'LOW' | 'MEDIUM' | 'HIGH' {
-        if (isGuaranteed || urgencyFactor > 0.8) {
-            return 'HIGH';
-        }
-        if (urgencyFactor > 0.4) {
-            return 'MEDIUM';
-        }
+        if (ageMs < 60000) return 'HIGH';      // < 1 min
+        if (ageMs < 300000) return 'MEDIUM';   // < 5 min
         return 'LOW';
     }
 
     /**
-     * Build detailed reason string
-     */
-    private buildReason(
-        edge: CalculatedEdge,
-        volatility: VolatilityMetrics,
-        liquidity: OrderBookDepth,
-        kellyFraction: number,
-        urgencyFactor: number,
-        sigma?: number,
-        edgeDecay?: number
-    ): string {
-        const parts = [
-            `${edge.reason}`,
-            `Edge: ${(edge.adjustedEdge * 100).toFixed(1)}%`,
-            `Kelly: ${(kellyFraction * 100).toFixed(1)}%`,
-            `Vol: ${volatility.volatilityRegime}`,
-            `Liq: ${(liquidity.depthScore * 100).toFixed(0)}%`,
-            `Urgency: ${(urgencyFactor * 100).toFixed(0)}%`
-        ];
-        
-        if (sigma !== undefined) {
-            parts.push(`Sigma: ${sigma.toFixed(1)}σ`);
-        }
-        
-        if (edgeDecay !== undefined) {
-            parts.push(`Decay: ${(edgeDecay * 100).toFixed(0)}%`);
-        }
-        
-        if (edge.isGuaranteed) {
-            parts.push('(GUARANTEED)');
-        }
-        
-        return parts.join(' | ');
-    }
-
-    /**
-     * Update max position size dynamically
+     * Update max position size
      */
     setMaxPositionSize(size: number): void {
         this.maxPositionSize = size;
         logger.info(`[EntryOptimizer] Max position size updated: $${size}`);
-    }
-
-    /**
-     * Get current configuration
-     */
-    getConfig(): {
-        maxPositionSize: number;
-        kellyFractions: { high: number; medium: number; low: number; guaranteed: number };
-        scaleInThreshold: number;
-        urgencyDecayMs: number;
-    } {
-        return {
-            maxPositionSize: this.maxPositionSize,
-            kellyFractions: {
-                high: this.KELLY_FRACTION_HIGH_CONFIDENCE,
-                medium: this.KELLY_FRACTION_MEDIUM_CONFIDENCE,
-                low: this.KELLY_FRACTION_LOW_CONFIDENCE,
-                guaranteed: this.KELLY_FRACTION_GUARANTEED
-            },
-            scaleInThreshold: this.SCALE_IN_THRESHOLD,
-            urgencyDecayMs: this.URGENCY_DECAY_MS
-        };
     }
 }
 

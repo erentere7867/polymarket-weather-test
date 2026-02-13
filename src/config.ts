@@ -46,6 +46,7 @@ export interface Config {
     SPEED_ARBITRAGE_MODE: boolean;        // First-model-wins: all cities monitored via GFS+ECMWF, US cities also HRRR+RAP, trade on ANY model change
     SPEED_ARB_REQUIRE_THRESHOLD_CROSSING: boolean;  // Require threshold crossing for speed arbitrage (default: false)
     SPEED_ARB_MIN_CROSSING_DISTANCE: number;        // Minimum distance from threshold to consider crossing valid (default: 0.5)
+    SPEED_ARB_REQUIRE_RAP_HRRR_CONFIRMATION: boolean; // Require RAP-HRRR confirmation for US cities (default: false for speed)
 
     // Webhook-based forecast detection settings
     TOMORROW_WEBHOOK_SECRET: string;      // Secret for validating Tomorrow.io webhooks
@@ -187,10 +188,10 @@ export interface Config {
     // =====================================
     // NEW: Drawdown Kill Switch Settings
     // =====================================
-    DRAWDOWN_DAILY_LOSS_LIMIT: number;            // 5% daily loss limit (default: 0.05)
+    DRAWDOWN_DAILY_LOSS_LIMIT: number;            // 10% daily loss limit (default: 0.10)
     DRAWDOWN_MAX_DRAWDOWN_LIMIT: number;          // 15% max drawdown from peak (default: 0.15)
     DRAWDOWN_CONSECUTIVE_LOSSES: number;          // Halt after N consecutive losses (default: 5)
-    DRAWDOWN_COOLDOWN_HOURS: number;              // Cooldown hours after trigger (default: 24)
+    DRAWDOWN_COOLDOWN_HOURS: number;              // Cooldown hours after trigger (default: 0.5 = 30 min)
     DRAWDOWN_MIN_TRADES_BEFORE_KILL: number;      // Min trades before kill switch activates (default: 3)
 
     // =====================================
@@ -279,6 +280,7 @@ export const config: Config = {
     SPEED_ARBITRAGE_MODE: getEnvVarBool('SPEED_ARBITRAGE_MODE', true), // First-model-wins mode
     SPEED_ARB_REQUIRE_THRESHOLD_CROSSING: getEnvVarBool('SPEED_ARB_REQUIRE_THRESHOLD_CROSSING', false), // DISABLED - capture more signals
     SPEED_ARB_MIN_CROSSING_DISTANCE: getEnvVarNumber('SPEED_ARB_MIN_CROSSING_DISTANCE', 0.5), // Min distance from threshold
+    SPEED_ARB_REQUIRE_RAP_HRRR_CONFIRMATION: getEnvVarBool('SPEED_ARB_REQUIRE_RAP_HRRR_CONFIRMATION', false), // DISABLED for speed - trade on any model change
 
     // Webhook-based forecast detection settings
     TOMORROW_WEBHOOK_SECRET: getEnvVarOptional('TOMORROW_WEBHOOK_SECRET', ''),
@@ -422,10 +424,10 @@ export const config: Config = {
     // =====================================
     // NEW: Drawdown Kill Switch Settings
     // =====================================
-    DRAWDOWN_DAILY_LOSS_LIMIT: getEnvVarNumber('DRAWDOWN_DAILY_LOSS_LIMIT', 0.05),             // 5% daily loss limit
+    DRAWDOWN_DAILY_LOSS_LIMIT: getEnvVarNumber('DRAWDOWN_DAILY_LOSS_LIMIT', 0.10),             // 10% daily loss limit
     DRAWDOWN_MAX_DRAWDOWN_LIMIT: getEnvVarNumber('DRAWDOWN_MAX_DRAWDOWN_LIMIT', 0.15),         // 15% max drawdown from peak
     DRAWDOWN_CONSECUTIVE_LOSSES: getEnvVarNumber('DRAWDOWN_CONSECUTIVE_LOSSES', 5),            // Halt after 5 consecutive losses
-    DRAWDOWN_COOLDOWN_HOURS: getEnvVarNumber('DRAWDOWN_COOLDOWN_HOURS', 24),                   // 24 hour cooldown after trigger
+    DRAWDOWN_COOLDOWN_HOURS: getEnvVarNumber('DRAWDOWN_COOLDOWN_HOURS', 0.5),                   // 30 minute cooldown after trigger
     DRAWDOWN_MIN_TRADES_BEFORE_KILL: getEnvVarNumber('DRAWDOWN_MIN_TRADES_BEFORE_KILL', 3),   // Min trades before kill switch activates
 
     // =====================================
