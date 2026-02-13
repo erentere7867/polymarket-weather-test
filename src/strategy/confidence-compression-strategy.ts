@@ -283,6 +283,7 @@ export class ConfidenceCompressionStrategy {
             confidence: confidenceResult.score,
             estimatedEdge: adjustedEdge,
             isGuaranteed: modelProbability > 0.95 || modelProbability < 0.05,
+            sigma: confidenceResult.score * 2,  // Approximate sigma from confidence
         };
 
         logger.info(`Safe mode: ${market.market.id.substring(0, 30)} | ${side.toUpperCase()} ${size} shares`);

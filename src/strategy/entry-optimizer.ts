@@ -86,14 +86,12 @@ export class EntryOptimizer {
     }
 
     /**
-     * Calculate simplified edge: (probability - price) - 2% for costs
+     * Calculate simplified edge: use rawEdge (already prob - price)
      */
     private calculateSimplifiedEdge(edge: CalculatedEdge): number {
-        // Simplified edge: (probability - price) - 2% for costs
-        const rawEdge = edge.confidence - edge.price;
-        const netEdge = rawEdge - 0.02; // 2% for costs
-        
-        return netEdge;
+        // rawEdge is already probability - price
+        // Use adjustedEdge which includes costs
+        return edge.adjustedEdge;
     }
 
     /**

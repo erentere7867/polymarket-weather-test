@@ -187,11 +187,7 @@ export class SimulationRunner {
         this.marketModel = new MarketModel(this.store);
         this.exitOptimizer = new ExitOptimizer(this.marketModel);
         this.marketImpactModel = new MarketImpactModel();
-        this.entryOptimizer = new EntryOptimizer(
-            this.marketModel,
-            this.marketImpactModel,
-            config.maxPositionSize
-        );
+        this.entryOptimizer = new EntryOptimizer(config.maxPositionSize);
         this.crossMarketArbitrage = new CrossMarketArbitrage();
 
         // Initialize Speed Arbitrage Strategy

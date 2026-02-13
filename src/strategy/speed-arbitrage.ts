@@ -45,7 +45,7 @@ export class SpeedArbitrageStrategy {
         this.marketModel = new MarketModel(store);
         this.marketImpactModel = new MarketImpactModel();
         this.edgeCalculator = new EdgeCalculator(this.marketModel);
-        this.entryOptimizer = new EntryOptimizer(this.marketModel, this.marketImpactModel);
+        this.entryOptimizer = new EntryOptimizer(config.maxPositionSize);
         this.modelHierarchy = new ModelHierarchy();
     }
     
@@ -277,7 +277,6 @@ export class SpeedArbitrageStrategy {
             reason: `Speed: ${sigma.toFixed(1)}σ, edge ${(edge.adjustedEdge * 100).toFixed(1)}% (decayed: ${(decayedEdge * 100).toFixed(1)}%)`,
             isGuaranteed: edge.isGuaranteed,
             sigma: sigma,
-            decayFactor: parseFloat(decayFactor.toFixed(3))
         };
     }
 
