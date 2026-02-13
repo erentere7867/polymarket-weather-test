@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main
+    container_name: litellm-proxy
+    ports:
+      - "4000:4000"
+    env_file:
+      - litellm.env
+    volumes:
+      - litellm-data:/data
+    restart: unless-stopped
+    networks:
+      - ai-network
+
+networks:
+  ai-network:
+    driver: bridge
+
+volumes:
+  litellm-data:

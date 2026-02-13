@@ -24,9 +24,9 @@ import { KNOWN_CITIES } from '../weather/types.js';
 const MAX_CHANGE_AGE_MS = 120000; // 2 minutes
 const MIN_SIGMA_FOR_ARBITRAGE = 0.3; // Reduced from 0.5 to capture more marginal edge
 
-// Edge decay configuration
-const EDGE_DECAY_HALF_LIFE_MS = 60000;  // 1 minute half-life
-const EDGE_DECAY_MAX_AGE_MS = 180000;   // 3 minutes max
+// Edge decay configuration - USE CONFIG VALUES FROM ENV
+const EDGE_DECAY_HALF_LIFE_MS = config.EDGE_DECAY_HALF_LIFE_MS;  // 90s from env
+const EDGE_DECAY_MAX_AGE_MS = config.EDGE_DECAY_MAX_AGE_MS;   // 4min from env
 const URGENCY_SIZE_MULTIPLIER = 1.5;    // Max size boost for fresh signals
 
 export class SpeedArbitrageStrategy {

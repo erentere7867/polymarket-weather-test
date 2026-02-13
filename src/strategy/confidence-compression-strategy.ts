@@ -178,6 +178,7 @@ export class ConfidenceCompressionStrategy {
 
         // Add confidence score to analysis
         analysis.confidenceScore = confidenceResult.score;
+        const horizonHours = this.getHorizonHours(market.targetDate);
         if (market.targetDate) {
             analysis.targetDate = market.targetDate.toISOString();
         }
@@ -191,15 +192,16 @@ export class ConfidenceCompressionStrategy {
                     const forecastValue = state.lastForecast.forecastValue;
                     const threshold = market.threshold || 0;
                     const comparisonType = market.comparisonType || 'above';
-                    
+
                     const modelProbability = this.confidenceToProbability(
                         confidenceResult.score,
                         forecastValue,
                         threshold,
-                        comparisonType as 'above' | 'below'
+                        comparisonType as 'above' | 'below',
+                        horizonHours
                     );
                     const marketProbability = market.yesPrice;
-                    
+
                     analysis.modelProbability = modelProbability;
                     analysis.marketProbability = marketProbability;
                     analysis.rawEdge = Math.abs(modelProbability - marketProbability);
@@ -236,12 +238,13 @@ export class ConfidenceCompressionStrategy {
         let modelProbability: number;
         const threshold = market.threshold || 0;
         const comparisonType = market.comparisonType || 'above';
-        
+
         modelProbability = this.confidenceToProbability(
             confidenceResult.score,
             forecastValue,
             threshold,
-            comparisonType as 'above' | 'below'
+            comparisonType as 'above' | 'below',
+            horizonHours
         );
 
         // Calculate edge
@@ -317,22 +320,47 @@ export class ConfidenceCompressionStrategy {
     }
 
     /**
-     * Convert confidence to probability
+     * Get horizon hours from target date
+     */
+    private getHorizonHours(targetDate: Date | undefined): number {
+        if (!targetDate) return 48; // Default to 48h if no target date
+        const now = new Date();
+        const diffMs = targetDate.getTime() - now.getTime();
+        return Math.max(0, Math.floor(diffMs / (1000 * 60 * 60)));
+    }
+
+    /**
+     * Convert confidence to probability with dynamic sigma based on horizon
      */
     private confidenceToProbability(
         confidence: number,
         forecastValue: number,
         threshold: number,
-        comparisonType: 'above' | 'below'
+        comparisonType: 'above' | 'below',
+        horizonHours: number
     ): number {
         const distance = forecastValue - threshold;
-        const sigma = 3.0;
-        const zScore = distance / sigma;
-        const baseProbability = normalCDF(zScore);
-        const rawProb = comparisonType === 'above' ? baseProbability : (1 - baseProbability);
-        const adjustedProb = 0.5 + (rawProb - 0.5) * confidence;
 
-        return Math.max(0.01, Math.min(0.99, adjustedProb));
+        // Dynamic sigma based on horizon hours
+        let sigma: number;
+        if (horizonHours <= 12) {
+            sigma = 1.5;
+        } else if (horizonHours <= 24) {
+            sigma = 2.0;
+        } else if (horizonHours <= 48) {
+            sigma = 3.0;
+        } else {
+            sigma = 4.0;
+        }
+
+        // Effective sigma scales with confidence (higher confidence = lower sigma needed)
+        const effectiveSigma = sigma * (1.2 - confidence * 0.2);
+
+        const zScore = distance / effectiveSigma;
+        const baseProbability = normalCDF(zScore);
+        const probability = comparisonType === 'above' ? baseProbability : (1 - baseProbability);
+
+        return Math.max(0.01, Math.min(0.99, probability));
     }
 
     /**

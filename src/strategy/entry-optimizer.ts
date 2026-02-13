@@ -121,9 +121,9 @@ export class EntryOptimizer {
     private readonly VOLATILITY_HIGH = ENTRY_CONFIG.HIGH_VOLATILITY_THRESHOLD;
     private readonly VOLATILITY_EXTREME = 0.10;  // 10% price movement
     
-    // Edge decay configuration
-    private readonly EDGE_DECAY_HALF_LIFE_MS = 60000;  // 1 minute half-life
-    private readonly MAX_EDGE_AGE_MS = 120000;  // 2 minutes max
+    // Edge decay configuration - USE CONFIG VALUES
+    private readonly EDGE_DECAY_HALF_LIFE_MS = config.EDGE_DECAY_HALF_LIFE_MS;  // 90s from env
+    private readonly MAX_EDGE_AGE_MS = config.EDGE_DECAY_MAX_AGE_MS;  // 4min from env
 
     constructor(
         marketModel: MarketModel, 
@@ -182,8 +182,64 @@ export class EntryOptimizer {
     }
 
     /**
+     * Check if forecast is fresh enough to trade
+     * Don't trade on forecasts older than 30 minutes
+     */
+    private isForecastFresh(forecastTimestamp?: Date): boolean {
+        if (!forecastTimestamp) {
+            return false;
+        }
+        
+        const ageMs = Date.now() - forecastTimestamp.getTime();
+        const maxAgeMs = 30 * 60 * 1000; // 30 minutes
+        
+        return ageMs <= maxAgeMs;
+    }
+
+    /**
+     * Check for late trade conditions
+     * Returns decayed edge if price is moving against position
+     * 
+     * @param edge - The calculated edge
+     * @param marketId - Market identifier
+     * @returns Object with decayed edge and whether trade should be rejected
+     */
+    private checkLateTrade(
+        edge: CalculatedEdge, 
+        marketId: string
+    ): { decayedEdge: number; rejectTrade: boolean } {
+        // Get price velocity from market model
+        const velocity = this.marketModel.getPriceVelocity(marketId, edge.side);
+        const threshold = config.LATE_TRADE_PRICE_VELOCITY_THRESHOLD; // 2%
+        
+        // Check if price is moving against the position
+        const isMovingAgainst = (edge.side === 'yes' && velocity > 0) || 
+                                (edge.side === 'no' && velocity < 0);
+        
+        // If velocity exceeds threshold and moving against us, decay the edge
+        if (Math.abs(velocity) > threshold && isMovingAgainst) {
+            const decayFactor = config.LATE_TRADE_EDGE_DECAY_FACTOR; // 0.5
+            const decayedEdge = edge.adjustedEdge * decayFactor;
+            
+            // Reject trade if edge below threshold after decay
+            const shouldReject = decayedEdge < ENTRY_CONFIG.MIN_EDGE_FOR_ENTRY;
+            
+            if (shouldReject) {
+                logger.warn(`[EntryOptimizer] Late trade rejected: price velocity ${(velocity * 100).toFixed(2)}% against ${edge.side} position, edge decayed from ${(edge.adjustedEdge * 100).toFixed(2)}% to ${(decayedEdge * 100).toFixed(2)}%`);
+            } else {
+                logger.info(`[EntryOptimizer] Late trade warning: price velocity ${(velocity * 100).toFixed(2)}%, edge decayed to ${(decayedEdge * 100).toFixed(2)}%`);
+            }
+            
+            return { decayedEdge, rejectTrade: shouldReject };
+        }
+        
+        return { decayedEdge: edge.adjustedEdge, rejectTrade: false };
+    }
+
+    /**
      * Main entry point: Optimize entry for a detected edge
-     * Now includes dynamic Kelly sizing, edge decay modeling, and liquidity filtering
+     * Now includes dynamic Kelly sizing, edge decay modeling, liquidity filtering,
+     * late trade detection, and forecast freshness checks
      */
     optimizeEntry(
         edge: CalculatedEdge,
@@ -191,8 +247,27 @@ export class EntryOptimizer {
         forecastTimestamp?: Date,
         marketVolume24h?: number,
         sigma?: number  // Statistical significance for dynamic Kelly
-    ): EntrySignal {
+    ): EntrySignal | null {
         const startTime = Date.now();
+        
+        // 0. Check forecast freshness - don't trade on old forecasts
+        if (!this.isForecastFresh(forecastTimestamp)) {
+            logger.warn(`[EntryOptimizer] Trade rejected: forecast too old (${forecastTimestamp ? ((Date.now() - forecastTimestamp.getTime()) / 60000).toFixed(1) : 'unknown'} min)`);
+            return null;
+        }
+        
+        // 0b. Check for late trade conditions
+        const lateTradeCheck = this.checkLateTrade(edge, edge.marketId);
+        if (lateTradeCheck.rejectTrade) {
+            // Trade rejected due to late entry conditions
+            return null;
+        }
+        
+        // Use decayed edge for calculations
+        const workingEdge: CalculatedEdge = {
+            ...edge,
+            adjustedEdge: lateTradeCheck.decayedEdge
+        };
         
         // 1. Analyze market liquidity (basic)
         const liquidity = this.analyzeLiquidity(orderBook);
@@ -214,7 +289,7 @@ export class EntryOptimizer {
         }
         
         // 2. Calculate volatility metrics
-        const volatility = this.calculateVolatility(edge.marketId);
+        const volatility = this.calculateVolatility(workingEdge.marketId);
         
         // 3. Calculate urgency factor based on forecast freshness
         const urgencyFactor = this.calculateUrgencyFactor(forecastTimestamp);
@@ -223,11 +298,11 @@ export class EntryOptimizer {
         const edgeDecayFactor = this.calculateEdgeDecayFactor(forecastTimestamp);
         
         // 5. Determine Kelly fraction based on sigma and confidence
-        const effectiveSigma = sigma ?? edge.confidence * 3;  // Approximate sigma from confidence
-        const kellyFraction = this.getDynamicKellyFraction(effectiveSigma, edge.isGuaranteed);
+        const effectiveSigma = sigma ?? workingEdge.confidence * 3;  // Approximate sigma from confidence
+        const kellyFraction = this.getDynamicKellyFraction(effectiveSigma, workingEdge.isGuaranteed);
         
         // 6. Calculate optimal position size using dynamic Kelly Criterion
-        const kellyInputs = this.buildKellyInputs(edge, volatility);
+        const kellyInputs = this.buildKellyInputs(workingEdge, volatility);
         const baseKelly = this.calculateFullKelly(kellyInputs);
         
         // 7. Apply volatility adjustment
@@ -235,7 +310,7 @@ export class EntryOptimizer {
         
         // 8. Apply liquidity constraints
         const liquidityConstrainedSize = this.applyLiquidityConstraints(
-            this.maxPositionSize * baseKelly * edge.confidence,
+            this.maxPositionSize * baseKelly * workingEdge.confidence,
             liquidity,
             orderBook
         );
@@ -249,7 +324,7 @@ export class EntryOptimizer {
             * liquidityWarningFactor;  // Apply liquidity warning factor
         
         // 10. Fast path for guaranteed outcomes (still respect liquidity warnings)
-        if (edge.isGuaranteed) {
+        if (workingEdge.isGuaranteed) {
             targetSize = this.maxPositionSize
                 * (config.guaranteedPositionMultiplier * 1.5)  // 3x instead of 2x
                 * urgencyFactor
@@ -270,17 +345,17 @@ export class EntryOptimizer {
         
         // 13. Determine if we should scale in
         const scaleInOrders = targetSize > this.SCALE_IN_THRESHOLD
-            ? this.buildScaleInOrders(targetSize, edge, liquidity, urgencyFactor)
+            ? this.buildScaleInOrders(targetSize, workingEdge, liquidity, urgencyFactor)
             : undefined;
         
         // 14. Calculate expected slippage
-        const expectedSlippage = this.marketModel.estimateSlippage(edge.marketId, targetSize);
+        const expectedSlippage = this.marketModel.estimateSlippage(workingEdge.marketId, targetSize);
         
         // 15. Build partial exit triggers for high-confidence trades
         const partialExitTriggers = this.buildPartialExitTriggers(effectiveSigma, volatility.volatilityRegime);
         
         // Build reason with liquidity info
-        let reason = this.buildReason(edge, volatility, liquidity, baseKelly, urgencyFactor, effectiveSigma, edgeDecayFactor);
+        let reason = this.buildReason(workingEdge, volatility, liquidity, baseKelly, urgencyFactor, effectiveSigma, edgeDecayFactor);
         if (!liquidityCheck.passes) {
             reason = `BLOCKED: ${liquidityCheck.reason} | ${reason}`;
         } else if (liquidityCheck.warnings.length > 0) {
@@ -288,16 +363,16 @@ export class EntryOptimizer {
         }
         
         const signal: EntrySignal = {
-            marketId: edge.marketId,
-            side: edge.side,
+            marketId: workingEdge.marketId,
+            side: workingEdge.side,
             size: parseFloat(targetSize.toFixed(2)),
             orderType: urgencyFactor > 0.8 ? 'MARKET' : 'LIMIT',
-            priceLimit: this.calculateOptimalLimitPrice(edge, liquidity, urgencyFactor),
-            urgency: this.determineUrgency(urgencyFactor, edge.isGuaranteed),
+            priceLimit: this.calculateOptimalLimitPrice(workingEdge, liquidity, urgencyFactor),
+            urgency: this.determineUrgency(urgencyFactor, workingEdge.isGuaranteed),
             reason,
-            confidence: edge.confidence * liquidity.depthScore,
-            estimatedEdge: edge.adjustedEdge - marketImpact - expectedSlippage,
-            isGuaranteed: edge.isGuaranteed,
+            confidence: workingEdge.confidence * liquidity.depthScore,
+            estimatedEdge: workingEdge.adjustedEdge - marketImpact - expectedSlippage,
+            isGuaranteed: workingEdge.isGuaranteed,
             scaleInOrders,
             urgencyFactor: parseFloat(urgencyFactor.toFixed(3)),
             expectedSlippage: parseFloat(expectedSlippage.toFixed(4)),

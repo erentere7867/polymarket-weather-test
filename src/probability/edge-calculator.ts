@@ -36,6 +36,7 @@ export interface EdgeCalculationOptions {
     sigma?: number;           // Confidence level in standard deviations
     tradeSizeUsd?: number;    // Trade size in USD for fee calculation
     skipCosts?: boolean;      // Skip all cost adjustments (for guaranteed outcomes)
+    confidence?: number;      // Confidence score from strategy (0-1), replaces probability-based confidence
 }
 
 export class EdgeCalculator {
@@ -237,14 +238,16 @@ export class EdgeCalculator {
         const finalKelly = Math.max(0, kelly * safetyMultiplier);
 
         // 8. Build and return the result
+        // Use confidence from strategy (stability-based), fallback to 0.5 if not provided
+        const strategyConfidence = options?.confidence ?? 0.5;
+
         const result: CalculatedEdge = {
             marketId: market.market.id,
             side,
             rawEdge,
             adjustedEdge,
-            // Confidence based on how decisive the forecast is (distance from 50/50)
-            // probWin=0.9 → confidence=0.8, probWin=0.6 → confidence=0.2, probWin=0.5 → confidence=0
-            confidence: isGuaranteed ? 1.0 : Math.min(1.0, Math.abs(probWin - 0.5) * 2),
+            // Confidence comes from strategy (stability-based), not calculated from probability
+            confidence: isGuaranteed ? 1.0 : strategyConfidence,
             KellyFraction: isGuaranteed ? safetyMultiplier : finalKelly, // Higher Kelly for guaranteed
             reason: `Forecast ${(probWin * 100).toFixed(1)}% vs Price ${(price * 100).toFixed(1)}%${isGuaranteed ? ' (GUARANTEED)' : ''}`,
             isGuaranteed,

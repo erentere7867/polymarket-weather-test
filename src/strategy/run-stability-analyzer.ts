@@ -32,13 +32,15 @@ export interface StabilityResult {
 export interface StabilityConfig {
     tempStabilityThreshold: number;  // Max allowed Δ in °C
     minStableRuns: number;           // Minimum runs needed for stability
+    minPersistenceHours: number;     // Minimum hours forecast must persist
     precipStepsThreshold: number;    // N steps with precip = precip day
     precipAmountThreshold: number;   // mm threshold for precip flag
 }
 
 const DEFAULT_CONFIG: StabilityConfig = {
-    tempStabilityThreshold: 0.3,     // 0.3°C as per spec
-    minStableRuns: 2,                // ≥2 consecutive runs
+    tempStabilityThreshold: 0.2,     // 0.2°C - tighter threshold for higher confidence
+    minStableRuns: 3,                // ≥3 consecutive runs - more persistence required
+    minPersistenceHours: 1,          // Minimum hours a forecast must persist
     precipStepsThreshold: 3,         // At least 3 hours of precip
     precipAmountThreshold: 0.1,      // 0.1mm threshold
 };

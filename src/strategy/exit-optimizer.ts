@@ -16,6 +16,7 @@ export interface Position {
     entryTime: Date;
     pnl: number;        // Unrealized PnL amount
     pnlPercent: number; // Unrealized PnL % (e.g. 0.10 for 10%)
+    entryForecastProb?: number;  // Forecast probability at entry time
 }
 
 export interface ExitSignal {
@@ -61,18 +62,44 @@ export class ExitOptimizer {
     private timeLimitMs: number = 12 * 60 * 60 * 1000; // 12 hours max hold (reduced from 24)
     
     // Regime-specific thresholds - ALL with minimum 2:1 R:R
+    // FIXED: Now using EXIT_CONFIG values for consistency
     private regimeConfig: Record<VolatilityRegime, RegimeThresholds> = {
-        TRENDING_UP: { takeProfit: 0.20, stopLoss: -0.10, trailingStop: true, partialExit: true },    // 2:1
-        TRENDING_DOWN: { takeProfit: 0.12, stopLoss: -0.06, trailingStop: false, partialExit: true }, // 2:1
-        RANGING: { takeProfit: 0.16, stopLoss: -0.08, trailingStop: false, partialExit: true },       // 2:1
-        VOLATILE: { takeProfit: 0.24, stopLoss: -0.12, trailingStop: true, partialExit: true },      // 2:1
-        UNKNOWN: { takeProfit: 0.16, stopLoss: -0.08, trailingStop: true, partialExit: true }        // 2:1
+        TRENDING_UP: { 
+            takeProfit: EXIT_CONFIG.REGIME_TAKE_PROFIT_TRENDING, 
+            stopLoss: EXIT_CONFIG.REGIME_STOP_LOSS_TRENDING, 
+            trailingStop: true, 
+            partialExit: true 
+        },    // 2:1
+        TRENDING_DOWN: { 
+            takeProfit: EXIT_CONFIG.REGIME_TAKE_PROFIT_TRENDING, 
+            stopLoss: EXIT_CONFIG.REGIME_STOP_LOSS_TRENDING, 
+            trailingStop: false, 
+            partialExit: true 
+        }, // 2:1
+        RANGING: { 
+            takeProfit: EXIT_CONFIG.REGIME_TAKE_PROFIT_RANGING, 
+            stopLoss: EXIT_CONFIG.REGIME_STOP_LOSS_RANGING, 
+            trailingStop: false, 
+            partialExit: true 
+        },       // 2:1
+        VOLATILE: { 
+            takeProfit: EXIT_CONFIG.REGIME_TAKE_PROFIT_TRENDING * 1.2, 
+            stopLoss: EXIT_CONFIG.REGIME_STOP_LOSS_TRENDING * 1.2, 
+            trailingStop: true, 
+            partialExit: true 
+        },      // 2:1
+        UNKNOWN: { 
+            takeProfit: EXIT_CONFIG.TAKE_PROFIT_THRESHOLD, 
+            stopLoss: EXIT_CONFIG.STOP_LOSS_THRESHOLD, 
+            trailingStop: true, 
+            partialExit: true 
+        }        // 2:1
     };
     
-    // Trailing stop configuration - FIXED: looser to let winners run (from EXIT_CONFIG)
+    // Trailing stop configuration - FIXED: locks in 2.5% profit after 5% gain
     private trailingStopEnabled: boolean = true;
     private trailingStopActivationPercent: number = EXIT_CONFIG.TRAILING_STOP_TRIGGER;
-    private trailingStopOffsetPercent: number = 0.05; // Trail 5% behind (was breakeven+2%)
+    private trailingStopDistance: number = EXIT_CONFIG.TRAILING_STOP_DISTANCE; // Trail 2.5% behind high water mark
     
     // Track highest PnL seen for each position (for trailing stop)
     private positionHighWaterMark: Map<string, number> = new Map();
@@ -178,6 +205,7 @@ export class ExitOptimizer {
     
     /**
      * Check if trailing stop should be triggered
+     * FIXED: Trails from high water mark, not breakeven
      */
     private checkTrailingStop(position: Position): ExitSignal | null {
         if (!this.trailingStopEnabled) return null;
@@ -188,16 +216,18 @@ export class ExitOptimizer {
         
         // Check if trailing stop is activated (position is up more than activation threshold)
         if (highWaterMark >= this.trailingStopActivationPercent) {
-            // Calculate trailing stop level: breakeven + offset
-            const trailingStopLevel = this.trailingStopOffsetPercent;
+            // Calculate trailing stop level: high water mark - trail distance
+            // This locks in (highWaterMark - trailDistance) profit
+            const trailingStopLevel = highWaterMark - this.trailingStopDistance;
             
             // If current PnL drops below trailing stop level, exit
             if (position.pnlPercent <= trailingStopLevel) {
+                const lockedInProfit = (highWaterMark - this.trailingStopDistance) * 100;
                 // Clean up high water mark
                 this.positionHighWaterMark.delete(position.marketId);
                 return {
                     shouldExit: true,
-                    reason: `Trailing Stop triggered: PnL ${(position.pnlPercent * 100).toFixed(1)}% dropped from high ${(highWaterMark * 100).toFixed(1)}%`,
+                    reason: `Trailing Stop triggered: PnL ${(position.pnlPercent * 100).toFixed(1)}% dropped from high ${(highWaterMark * 100).toFixed(1)}%, locked in ${lockedInProfit.toFixed(1)}%`,
                     urgency: 'HIGH'
                 };
             }
@@ -214,8 +244,103 @@ export class ExitOptimizer {
     }
 
     /**
+     * Check if forecast has moved significantly against position
+     * Exits if forecast probability changes 5%+ against position or position becomes overvalued
+     * 
+     * @param position - Current position
+     * @param currentForecastProb - Current forecast probability
+     * @param entryForecastProb - Forecast probability at entry (optional, uses position.entryForecastProb if not provided)
+     */
+    checkForecastBasedExit(
+        position: Position, 
+        currentForecastProb: number, 
+        entryForecastProb?: number
+    ): ExitSignal | null {
+        const currentPrice = position.currentPrice;
+        const entryPrice = position.entryPrice;
+        
+        // Use provided entryForecastProb or fallback to position's stored value
+        const entryProb = entryForecastProb ?? position.entryForecastProb;
+        
+        // Calculate fair value based on current forecast
+        const fairValue = currentForecastProb;
+        
+        // Check if position is now overvalued (fair value crossed against us)
+        const isOvervalued = position.side === 'yes'
+            ? currentPrice >= fairValue
+            : currentPrice <= fairValue;
+        
+        // Check if forecast has moved significantly against position (5%+)
+        if (entryProb !== undefined) {
+            let forecastMovedAgainst = false;
+            let forecastMovePercent = 0;
+            
+            if (position.side === 'yes') {
+                // For YES position, forecast going down is against us
+                forecastMovePercent = entryProb - currentForecastProb;
+                forecastMovedAgainst = forecastMovePercent >= EXIT_CONFIG.FORECAST_REVERSAL_THRESHOLD;
+            } else {
+                // For NO position, forecast going up is against us
+                // For NO, we track the probability of NO outcome
+                const entryNoProb = 1 - entryProb;
+                const currentNoProb = 1 - currentForecastProb;
+                forecastMovePercent = currentNoProb - entryNoProb;
+                forecastMovedAgainst = forecastMovePercent >= EXIT_CONFIG.FORECAST_REVERSAL_THRESHOLD;
+            }
+            
+            // Exit if forecast moved 5%+ against position
+            if (forecastMovedAgainst) {
+                return {
+                    shouldExit: true,
+                    reason: `Forecast reversal: moved ${(Math.abs(forecastMovePercent) * 100).toFixed(1)}% against ${position.side} position (entry: ${(entryProb * 100).toFixed(1)}%, current: ${(currentForecastProb * 100).toFixed(1)}%)`,
+                    urgency: 'HIGH'
+                };
+            }
+        }
+        
+        // Exit if position became overvalued (fair value crossed) and we have profit
+        if (isOvervalued && position.pnlPercent > 0) {
+            return {
+                shouldExit: true,
+                reason: `Position overvalued: ${position.side} at ${(currentPrice * 100).toFixed(1)}% vs fair value ${(fairValue * 100).toFixed(1)}%`,
+                urgency: 'MEDIUM'
+            };
+        }
+        
+        return null;
+    }
+
+    /**
+     * Check if edge has decayed below threshold based on time held
+     * Exits if position held too long and edge has decayed significantly
+     * 
+     * @param position - Current position
+     * @param entryTime - Position entry time (optional, uses position.entryTime if not provided)
+     */
+    checkEdgeDecayExit(position: Position, entryTime?: Date): ExitSignal | null {
+        const entry = entryTime ?? position.entryTime;
+        const holdTimeMs = Date.now() - entry.getTime();
+        
+        // Calculate decay factor based on half-life
+        // decayFactor = 0.5^(holdTime / halfLife)
+        const decayFactor = Math.exp(-holdTimeMs / EXIT_CONFIG.EDGE_DECAY_HALF_LIFE_MS * Math.LN2);
+        
+        // Exit if edge has decayed significantly (decayFactor < 0.3) and position is in profit
+        if (decayFactor < 0.3 && position.pnlPercent > 0) {
+            const holdTimeHours = holdTimeMs / (1000 * 60 * 60);
+            return {
+                shouldExit: true,
+                reason: `Edge decayed: held ${holdTimeHours.toFixed(1)}h, decay factor ${(decayFactor * 100).toFixed(1)}% (below 30% threshold)`,
+                urgency: 'MEDIUM'
+            };
+        }
+        
+        return null;
+    }
+
+    /**
      * Check if a position should be exited
-     * Enhanced with regime-based thresholds and partial exit support
+     * Enhanced with regime-based thresholds, forecast-based exits, and partial exit support
      */
     checkExit(position: Position, forecastProbability: number): ExitSignal {
         const thresholds = this.getRegimeThresholds(position.marketId);
@@ -228,7 +353,21 @@ export class ExitOptimizer {
             }
         }
         
-        // 1. Check for partial exit opportunity (before full exit checks)
+        // 1. Check for forecast-based exit (NEW)
+        const forecastExitSignal = this.checkForecastBasedExit(position, forecastProbability);
+        if (forecastExitSignal) {
+            this.cleanupPositionTracking(position.marketId);
+            return forecastExitSignal;
+        }
+        
+        // 2. Check for edge decay exit (NEW)
+        const edgeDecaySignal = this.checkEdgeDecayExit(position);
+        if (edgeDecaySignal) {
+            this.cleanupPositionTracking(position.marketId);
+            return edgeDecaySignal;
+        }
+        
+        // 3. Check for partial exit opportunity (before full exit checks)
         if (thresholds.partialExit && !this.hasPartiallyExited(position.marketId)) {
             const partialExitSignal = this.checkPartialExit(position, thresholds);
             if (partialExitSignal) {
@@ -236,7 +375,7 @@ export class ExitOptimizer {
             }
         }
         
-        // 2. Stop Loss (regime-adjusted)
+        // 4. Stop Loss (regime-adjusted)
         const adjustedStopLoss = this.hasPartiallyExited(position.marketId) 
             ? thresholds.stopLoss * 0.8  // Tighter stop after partial exit
             : thresholds.stopLoss;
@@ -251,7 +390,7 @@ export class ExitOptimizer {
             };
         }
 
-        // 3. Fair Value Exit
+        // 5. Fair Value Exit
         const fairValue = forecastProbability;
         const currentPrice = position.currentPrice;
         const hasMeaningfulProfit = position.pnlPercent > 0.01; // >1% profit
@@ -269,7 +408,7 @@ export class ExitOptimizer {
             };
         }
 
-        // 4. Take Profit (regime-adjusted)
+        // 6. Take Profit (regime-adjusted)
         const adjustedTakeProfit = this.hasPartiallyExited(position.marketId)
             ? thresholds.takeProfit * 1.2  // Higher target after taking some profit
             : thresholds.takeProfit;
@@ -283,7 +422,7 @@ export class ExitOptimizer {
             };
         }
 
-        // 5. Time Limit
+        // 7. Time Limit
         const holdTimeMs = Date.now() - position.entryTime.getTime();
         if (holdTimeMs > this.timeLimitMs) {
             this.cleanupPositionTracking(position.marketId);

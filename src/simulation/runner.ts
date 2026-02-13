@@ -166,7 +166,7 @@ export class SimulationRunner {
             return fallback;
         }
     })();
-    private speedArbEnabled: boolean = false;
+    private speedArbEnabled: boolean = true;  // ENABLED by default for better PnL
     private speedArbStrategy: SpeedArbitrageStrategy;
     private speedArbStats = {
         tradesExecuted: 0,
@@ -1012,7 +1012,7 @@ export class SimulationRunner {
                     logger.info(`⚡ Speed Arbitrage state loaded from disk: ${this.speedArbEnabled ? 'ENABLED' : 'DISABLED'}`);
                 }
             } else {
-                logger.info(`[SpeedArb] No state file found, starting with speed arb DISABLED`);
+                logger.info(`[SpeedArb] No state file found, using default: ENABLED`);
             }
         } catch (e) {
             logger.warn(`[SpeedArb] Could not load speed arb state: ${(e as Error).message}`);

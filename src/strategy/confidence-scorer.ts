@@ -53,13 +53,13 @@ export interface ConfidenceConfig {
 
 const DEFAULT_CONFIG: ConfidenceConfig = {
     weights: {
-        w1: 0.4,  // 40% stability
-        w2: 0.4,  // 40% hierarchy agreement
-        w3: 0.2,  // 20% regime support
+        w1: 0.6,  // 60% stability - increased weight on run-to-run consistency
+        w2: 0.3,  // 30% hierarchy agreement - decreased
+        w3: 0.1,  // 10% regime support - decreased
     },
     thresholds: {
-        temperature: 0.60,    // 60% threshold for temp
-        precipitation: 0.75,  // 75% threshold for precip (stricter)
+        temperature: 0.65,    // 65% threshold for temp (tighter)
+        precipitation: 0.80,  // 80% threshold for precip (stricter)
     },
 };
 
@@ -125,8 +125,8 @@ export class ConfidenceScorer {
         if (marketType === 'temperature') {
             // Agreement based on how close the temperature forecasts are
             const tempDiff = Math.abs(primaryRun.maxTempC - secondaryRun.maxTempC);
-            // Perfect agreement at 0°C diff, drops linearly to 0 at 3°C diff
-            return Math.max(0, 1 - tempDiff / 3);
+            // Perfect agreement at 0°C diff, drops linearly to 0 at 1.5°C diff (tighter tolerance)
+            return Math.max(0, 1 - tempDiff / 1.5);
         } else {
             // Perfect agreement if both predict same precip flag
             return primaryRun.precipFlag === secondaryRun.precipFlag ? 1.0 : 0.0;

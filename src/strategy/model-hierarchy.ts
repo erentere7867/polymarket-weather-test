@@ -103,7 +103,7 @@ const CITY_REGIONS: Record<string, 'US' | 'EUROPE' | 'GLOBAL'> = {
     'ankara': 'EUROPE',
     'seoul': 'EUROPE',
 
-    // Global Cities - use GFS
+    // Global Cities - use GFS (including Canadian cities - HRRR coverage is poor outside CONUS)
     'tokyo': 'GLOBAL',
     'sydney': 'GLOBAL',
     'hong kong': 'GLOBAL',
@@ -113,8 +113,8 @@ const CITY_REGIONS: Record<string, 'US' | 'EUROPE' | 'GLOBAL'> = {
     'são paulo': 'GLOBAL',
     'buenos aires': 'GLOBAL',
     'mexico city': 'GLOBAL',
-    'toronto': 'US', // Close enough to use HRRR coverage
-    'vancouver': 'US', // Close enough to use HRRR coverage
+    'toronto': 'GLOBAL', // HRRR doesn't cover Toronto well, use GFS
+    'vancouver': 'GLOBAL', // Outside HRRR domain, use GFS
 };
 
 /**
@@ -222,6 +222,34 @@ export class ModelHierarchy {
      */
     getRegimeModel(cityId: string): ModelType | undefined {
         return this.getHierarchy(cityId).regime;
+    }
+
+    /**
+     * Get the optimal model for a city based on forecast horizon
+     * Horizon-based model selection for best accuracy:
+     * - 0-18h: HRRR (US), ECMWF (Europe) - highest resolution short-range
+     * - 18-48h: RAP (US), ECMWF (Europe) - medium range
+     * - 48h+: GFS (all regions) - global coverage for longer range
+     */
+    getOptimalModel(cityId: string, horizonHours: number): ModelType {
+        const region = this.getRegion(cityId);
+        
+        // Short range (0-18h): highest resolution models
+        if (horizonHours <= 18) {
+            if (region === 'US') return 'HRRR';
+            if (region === 'EUROPE') return 'ECMWF';
+            return 'GFS'; // Global fallback
+        }
+        
+        // Medium range (18-48h): RAP for US, ECMWF for Europe
+        if (horizonHours <= 48) {
+            if (region === 'US') return 'RAP';
+            if (region === 'EUROPE') return 'ECMWF';
+            return 'GFS'; // Global fallback
+        }
+        
+        // Long range (48h+): GFS for all regions (global coverage)
+        return 'GFS';
     }
 
     /**

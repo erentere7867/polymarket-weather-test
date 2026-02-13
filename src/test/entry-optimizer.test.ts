@@ -123,7 +123,11 @@ describe('EntryOptimizer', () => {
             const signalShallow = entryOptimizer.optimizeEntry(edge, shallowOrderBook, new Date(), 100000);
             
             // Deep liquidity should allow larger positions
-            expect(signalDeep.size).toBeGreaterThanOrEqual(signalShallow.size);
+            expect(signalDeep).not.toBeNull();
+            expect(signalShallow).not.toBeNull();
+            if (signalDeep && signalShallow) {
+                expect(signalDeep.size).toBeGreaterThanOrEqual(signalShallow.size);
+            }
         });
 
         it('should reduce size for wide spreads', () => {
@@ -135,7 +139,11 @@ describe('EntryOptimizer', () => {
             const signalWide = entryOptimizer.optimizeEntry(edge, wideSpreadBook, new Date(), 100000);
             
             // Wide spread should result in smaller position
-            expect(signalWide.size).toBeLessThanOrEqual(signalTight.size);
+            expect(signalWide).not.toBeNull();
+            expect(signalTight).not.toBeNull();
+            if (signalWide && signalTight) {
+                expect(signalWide.size).toBeLessThanOrEqual(signalTight.size);
+            }
         });
 
         it('should calculate depth score correctly', () => {
@@ -166,7 +174,10 @@ describe('EntryOptimizer', () => {
             const signal = entryOptimizer.optimizeEntry(edge, undefined, new Date(), 100000);
             
             // Should have some size
-            expect(signal.size).toBeGreaterThan(0);
+            expect(signal).not.toBeNull();
+            if (signal) {
+                expect(signal.size).toBeGreaterThan(0);
+            }
         });
 
         it('should decrease size in high volatility regime', () => {

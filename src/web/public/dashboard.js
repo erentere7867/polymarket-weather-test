@@ -37,6 +37,14 @@ const dashboardState = {
     maxHistoryPoints: 50,
     // Change-detection hashes to skip redundant DOM rebuilds
     _hashes: {},
+    // Abort controller for request deduplication
+    abortController: null,
+    // Request in flight flag
+    isFetching: false,
+    // Last successful fetch timestamp
+    lastFetchTime: 0,
+    // Minimum time between fetches (ms)
+    minFetchInterval: 1000,
 };
 
 /**
@@ -144,23 +152,30 @@ function updateConnectionStatus(connected) {
 
 /**
  * Handle WebSocket messages
+ * NOTE: WebSocket only shows inline event notifications, NOT dashboard data
+ * Dashboard data comes from HTTP polling to avoid race conditions
  */
 function handleWebSocketMessage(message) {
     switch (message.type) {
         case 'INITIAL_DATA':
-            updateDashboard(message.payload);
+            // Ignore - we use HTTP polling for data
+            console.log('[Dashboard] WebSocket INITIAL_DATA ignored - using HTTP polling');
             break;
         case 'FILE_DETECTED':
             handleFileDetected(message.payload);
+            // Trigger poll refresh for latest data
+            setTimeout(fetchAllDashboardData, 100);
             break;
         case 'FILE_CONFIRMED':
             handleFileConfirmed(message.payload);
+            setTimeout(fetchAllDashboardData, 100);
             break;
         case 'API_DATA_RECEIVED':
             handleApiDataReceived(message.payload);
             break;
         case 'FORECAST_CHANGE':
             handleForecastChange(message.payload);
+            setTimeout(fetchAllDashboardData, 100);
             break;
         case 'DETECTION_WINDOW_START':
             handleDetectionWindowStart(message.payload);
@@ -173,12 +188,39 @@ function handleWebSocketMessage(message) {
 /**
  * Single consolidated poll — replaces all individual fetch intervals
  * Fetches everything from /api/poll in one request
+ * Includes request deduplication and error handling
  */
 async function fetchAllDashboardData() {
+    // Prevent concurrent requests
+    if (dashboardState.isFetching) {
+        console.log('[Dashboard] Fetch already in progress, skipping');
+        return;
+    }
+
+    // Rate limiting - don't fetch more than once per second
+    const now = Date.now();
+    if (now - dashboardState.lastFetchTime < dashboardState.minFetchInterval) {
+        return;
+    }
+
+    // Cancel any previous in-flight request
+    if (dashboardState.abortController) {
+        dashboardState.abortController.abort();
+    }
+    dashboardState.abortController = new AbortController();
+    dashboardState.isFetching = true;
+
     try {
-        const response = await fetch('/api/poll');
+        const response = await fetch('/api/poll', {
+            signal: dashboardState.abortController.signal,
+            headers: { 'Cache-Control': 'no-cache' }
+        });
+        
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        dashboardState.lastFetchTime = Date.now();
         }
         const data = await response.json();
         
@@ -210,8 +252,43 @@ async function fetchAllDashboardData() {
         
         // Update win/lose ratio
         if (data.winLossStats) updateWinLossDisplay(data.winLossStats);
+        
+        // Clear any error state on success
+        clearErrorState();
+        
     } catch (err) {
-        console.error('[Dashboard] Poll error:', err.message);
+        if (err.name === 'AbortError') {
+            console.log('[Dashboard] Fetch aborted (newer request started)');
+        } else {
+            console.error('[Dashboard] Poll error:', err.message);
+            showErrorState(`Data refresh failed: ${err.message}`);
+        }
+    } finally {
+        dashboardState.isFetching = false;
+    }
+}
+
+/**
+ * Show error state in UI when data fetching fails
+ */
+function showErrorState(message) {
+    const statusTextEl = document.getElementById('status-text');
+    if (statusTextEl) {
+        statusTextEl.textContent = 'ERROR';
+        statusTextEl.className = 'text-amber-500 font-mono font-bold';
+        statusTextEl.title = message;
+    }
+}
+
+/**
+ * Clear error state when data fetching succeeds
+ */
+function clearErrorState() {
+    const statusTextEl = document.getElementById('status-text');
+    if (statusTextEl && statusTextEl.textContent === 'ERROR') {
+        statusTextEl.textContent = 'ONLINE';
+        statusTextEl.className = 'text-emerald-400 font-mono font-bold';
+        statusTextEl.title = '';
     }
 }
 
@@ -227,8 +304,33 @@ function updateMarketEdge(analysis, activePositions = []) {
         return;
     }
 
+    // Filter out clutter (stability check failures, first run blocks, invalid prices)
+    // Only show: non-blocked trades, or blocked with meaningful edge (>2%)
+    const filtered = analysis.filter(item => {
+        // Skip invalid prices (market closed, no base price, $0)
+        const hasValidPrice = item.marketProbability > 0 && item.marketProbability < 1;
+        if (!hasValidPrice) return false;
+        
+        // Skip stability/first-run noise unless it's a real trade opportunity
+        if (!item.blocked) return true;
+        
+        return item.blockReason !== 'STABILITY_CHECK_FAILED' && 
+               item.blockReason !== 'FIRST_RUN' &&
+               item.blockReason !== 'NOT_PRIMARY_MODEL' &&
+               (item.rawEdge || 0) > 0.02;
+    });
+    
+    // Calculate hidden count for UI feedback
+    const hiddenCount = analysis.length - filtered.length;
+    
     // Sort by edge magnitude descending
-    const sorted = [...analysis].sort((a, b) => (b.rawEdge || 0) - (a.rawEdge || 0));
+    const sorted = filtered.sort((a, b) => (b.rawEdge || 0) - (a.rawEdge || 0));
+    
+    // Show empty state with hidden count if everything filtered
+    if (sorted.length === 0) {
+        list.innerHTML = `<tr><td colspan="8" class="p-4 text-center text-slate-500 italic">No actionable markets (${hiddenCount} filtered: stability/first-run checks)</td></tr>`;
+        return;
+    }
 
     list.innerHTML = sorted.map(item => {
         const mktProb = (item.marketProbability || 0) * 100;
@@ -1191,10 +1293,9 @@ function updatePortfolioDisplay(data) {
     }
 
     if (openPositionsEl) {
-        // Fallback from portfolio data
-        if (!openPositionsEl.textContent || openPositionsEl.textContent === '--') {
-            openPositionsEl.textContent = data.openPositions || '0';
-        }
+        // Always update - don't skip if already has value
+        // This ensures HTTP polling updates override WebSocket initial data
+        openPositionsEl.textContent = data.openPositions || '0';
     }
 
     // Update Risk Panel

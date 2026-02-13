@@ -44,7 +44,7 @@ export interface Config {
     // Speed arbitrage settings
     skipPriceCheck: boolean;              // Skip market price reaction check on forecast changes (trade immediately)
     SPEED_ARBITRAGE_MODE: boolean;        // First-model-wins: all cities monitored via GFS+ECMWF, US cities also HRRR+RAP, trade on ANY model change
-    SPEED_ARB_REQUIRE_THRESHOLD_CROSSING: boolean;  // Require threshold crossing for speed arbitrage (default: true)
+    SPEED_ARB_REQUIRE_THRESHOLD_CROSSING: boolean;  // Require threshold crossing for speed arbitrage (default: false)
     SPEED_ARB_MIN_CROSSING_DISTANCE: number;        // Minimum distance from threshold to consider crossing valid (default: 0.5)
 
     // Webhook-based forecast detection settings
@@ -277,7 +277,7 @@ export const config: Config = {
     // Speed arbitrage settings
     skipPriceCheck: getEnvVarBool('SKIP_PRICE_CHECK', false), // Skip market price reaction check on forecast changes
     SPEED_ARBITRAGE_MODE: getEnvVarBool('SPEED_ARBITRAGE_MODE', true), // First-model-wins mode
-    SPEED_ARB_REQUIRE_THRESHOLD_CROSSING: getEnvVarBool('SPEED_ARB_REQUIRE_THRESHOLD_CROSSING', true), // Require threshold crossing
+    SPEED_ARB_REQUIRE_THRESHOLD_CROSSING: getEnvVarBool('SPEED_ARB_REQUIRE_THRESHOLD_CROSSING', false), // DISABLED - capture more signals
     SPEED_ARB_MIN_CROSSING_DISTANCE: getEnvVarNumber('SPEED_ARB_MIN_CROSSING_DISTANCE', 0.5), // Min distance from threshold
 
     // Webhook-based forecast detection settings
@@ -522,19 +522,30 @@ export const ENTRY_CONFIG = {
 // EXIT OPTIMIZER CONFIG
 // ============================================================
 export const EXIT_CONFIG = {
-    // Take profit thresholds - OPTIMIZED for speed arb strategy
-    // 8% TP for faster turnover (was 16% - too greedy for speed arb)
+    // Take profit thresholds - MATCH .env values (8% / -10%)
     TAKE_PROFIT_THRESHOLD: 0.08,
     PARTIAL_TAKE_PROFIT_THRESHOLD: 0.04,
     
-    // Stop loss thresholds
+    // Stop loss thresholds - MATCH .env values
     STOP_LOSS_THRESHOLD: -0.10,
-    TRAILING_STOP_TRIGGER: 0.04,
+    TRAILING_STOP_TRIGGER: 0.05,  // Activate at 5% profit
+    TRAILING_STOP_DISTANCE: 0.025, // Trail 2.5% behind high water mark
     
     // Regime-based adjustments
+    REGIME_TAKE_PROFIT_TRENDING: 0.20,  // 20% TP in trending markets
+    REGIME_STOP_LOSS_TRENDING: -0.10,   // -10% SL in trending markets
+    REGIME_TAKE_PROFIT_RANGING: 0.08,   // 8% TP in ranging markets
+    REGIME_STOP_LOSS_RANGING: -0.04,    // -4% SL in ranging markets
     TRENDING_STOP_MULTIPLIER: 1.03,
     TRENDING_TAKE_MULTIPLIER: 1.2,
     RANGING_STOP_MULTIPLIER: 0.97,
+    
+    // Edge decay exit threshold
+    EDGE_DECAY_EXIT_THRESHOLD: 0.02,  // Exit if edge decays below 2%
+    EDGE_DECAY_HALF_LIFE_MS: 60000,   // 1 minute half-life for edge decay
+    
+    // Forecast-based exit
+    FORECAST_REVERSAL_THRESHOLD: 0.05,  // Exit if forecast moves 5% against position
 };
 
 // ============================================================
@@ -566,8 +577,8 @@ export const SPEED_ARBITRAGE_CONFIG = {
     UNCERTAINTY_BASE: 3,
     UNCERTAINTY_MULTIPLIER: 1.5,
     CONFIDENCE_DIVISOR: 0.8,
-    // Threshold crossing settings
-    REQUIRE_THRESHOLD_CROSSING: true,   // Require threshold crossing for signals
+    // Threshold crossing settings - DISABLED by default to capture more signals
+    REQUIRE_THRESHOLD_CROSSING: false,   // Don't require threshold crossing
     MIN_CROSSING_DISTANCE: 0.5,         // Minimum distance from threshold (°F)
 };
 

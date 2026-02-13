@@ -408,7 +408,9 @@ export const CITY_MODEL_CONFIGS: CityModelConfig[] = [
     { cityName: 'Seattle', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS', 'ECMWF'] },
     { cityName: 'Atlanta', primaryModel: 'HRRR', fallbackModels: ['RAP', 'GFS', 'ECMWF'] },
     // International cities - GFS primary (global, 6h cycle, ~3.5h delay), also ECMWF
-    { cityName: 'Toronto', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
+    // Canadian cities: GFS primary (HRRR doesn't cover well), RAP as fallback for Toronto (close to US border)
+    { cityName: 'Toronto', primaryModel: 'GFS', fallbackModels: ['RAP', 'ECMWF'] },
+    { cityName: 'Vancouver', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
     { cityName: 'London', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
     { cityName: 'Seoul', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
     { cityName: 'Ankara', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
