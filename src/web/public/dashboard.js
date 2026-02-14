@@ -220,9 +220,8 @@ async function fetchAllDashboardData() {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         
-        dashboardState.lastFetchTime = Date.now();
-        }
         const data = await response.json();
+        dashboardState.lastFetchTime = Date.now();
         
         // Update status display
         if (data.status) updateStatusDisplay(data.status);

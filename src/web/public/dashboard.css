@@ -554,3 +554,52 @@
 ::-webkit-scrollbar-thumb:hover {
     background: rgba(100, 116, 139, 0.7);
 }
+
+/* Custom scrollbar for position lists */
+#positions-list,
+#closed-positions-list,
+#city-coverage-container,
+#event-log-container,
+#detection-windows-container,
+#upcoming-runs-container {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(100, 116, 139, 0.4) rgba(15, 23, 42, 0.3);
+}
+
+#positions-list::-webkit-scrollbar,
+#closed-positions-list::-webkit-scrollbar,
+#city-coverage-container::-webkit-scrollbar,
+#event-log-container::-webkit-scrollbar,
+#detection-windows-container::-webkit-scrollbar,
+#upcoming-runs-container::-webkit-scrollbar {
+    width: 6px;
+}
+
+#positions-list::-webkit-scrollbar-track,
+#closed-positions-list::-webkit-scrollbar-track,
+#city-coverage-container::-webkit-scrollbar-track,
+#event-log-container::-webkit-scrollbar-track,
+#detection-windows-container::-webkit-scrollbar-track,
+#upcoming-runs-container::-webkit-scrollbar-track {
+    background: rgba(15, 23, 42, 0.3);
+    border-radius: 3px;
+}
+
+#positions-list::-webkit-scrollbar-thumb,
+#closed-positions-list::-webkit-scrollbar-thumb,
+#city-coverage-container::-webkit-scrollbar-thumb,
+#event-log-container::-webkit-scrollbar-thumb,
+#detection-windows-container::-webkit-scrollbar-thumb,
+#upcoming-runs-container::-webkit-scrollbar-thumb {
+    background: rgba(100, 116, 139, 0.4);
+    border-radius: 3px;
+}
+
+#positions-list::-webkit-scrollbar-thumb:hover,
+#closed-positions-list::-webkit-scrollbar-thumb:hover,
+#city-coverage-container::-webkit-scrollbar-thumb:hover,
+#event-log-container::-webkit-scrollbar-thumb:hover,
+#detection-windows-container::-webkit-scrollbar-thumb:hover,
+#upcoming-runs-container::-webkit-scrollbar-thumb:hover {
+    background: rgba(100, 116, 139, 0.6);
+}
