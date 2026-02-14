@@ -3,23 +3,6 @@
  * Handles real-time updates via WebSocket, charts, and dashboard interactivity
  */
 
-// Manual test function - type in console: testSpeedArbToggle(true)
-window.testSpeedArbToggle = async (enabled) => {
-    console.log('[MANUAL TEST] Toggling speed arb to:', enabled);
-    try {
-        const res = await fetch('/api/speed-arb/toggle', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled }),
-        });
-        console.log('[MANUAL TEST] Response status:', res.status);
-        const data = await res.json();
-        console.log('[MANUAL TEST] Response:', data);
-    } catch (err) {
-        console.error('[MANUAL TEST] Error:', err);
-    }
-};
-
 // Dashboard state
 const dashboardState = {
     ws: null,

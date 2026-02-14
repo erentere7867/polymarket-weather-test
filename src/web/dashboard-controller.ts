@@ -745,29 +745,6 @@ export function createDashboardRouter(controller: DashboardController): Router {
         res.json(controller.getApiFallbackStatus());
     });
 
-    // GET /api/dashboard/confidence - Confidence compression strategy metrics
-    // (This endpoint provides useful strategy data for the dashboard)
-    router.get('/confidence', (req: Request, res: Response) => {
-        // Return placeholder for now - will be populated by ConfidenceCompressionStrategy
-        res.json({
-            totalMarketsAnalyzed: 0,
-            firstRunBlocks: 0,
-            stabilityBlocks: 0,
-            confidenceBlocks: 0,
-            signalsGenerated: 0,
-            tradesExecuted: 0,
-            avgConfidenceScore: 0,
-            modelHierarchy: {
-                us: { primary: 'HRRR', secondary: 'RAP', regime: 'GFS' },
-                eu: { primary: 'ECMWF', secondary: 'GFS' },
-            },
-            thresholds: {
-                temperature: 0.60,
-                precipitation: 0.75,
-            },
-        });
-    });
-
     // GET /api/dashboard/all - All dashboard data in one request
     router.get('/all', (req: Request, res: Response) => {
         res.json({
