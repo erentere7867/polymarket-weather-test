@@ -11,6 +11,7 @@
 import { ParsedWeatherMarket, TradingOpportunity } from '../polymarket/types.js';
 import { CalculatedEdge } from '../probability/edge-calculator.js';
 import { logger } from '../logger.js';
+import { KNOWN_CITIES, findCity } from '../weather/types.js';
 
 /**
  * Geographic correlation between cities
@@ -132,6 +133,24 @@ export class CrossMarketArbitrage {
 
     constructor() {
         this.initializeCorrelations();
+    }
+
+    /**
+     * Normalize city name to match correlation format (new_york)
+     * Handles: "New York", "New York City", "new york", "new_york" -> "new_york"
+     */
+    private normalizeCityId(cityName: string | null | undefined): string {
+        if (!cityName) return '';
+        
+        // First try to find in KNOWN_CITIES to get the canonical name
+        const knownCity = findCity(cityName);
+        if (knownCity) {
+            // Return as underscore format
+            return knownCity.name.toLowerCase().replace(/\s+/g, '_');
+        }
+        
+        // Fallback: just normalize the input
+        return cityName.toLowerCase().replace(/\s+/g, '_').replace(/[._]+/g, '_');
     }
 
     /**
@@ -271,13 +290,13 @@ export class CrossMarketArbitrage {
         
         if (!primaryMarket.city) return pairs;
         
-        const primaryCityId = primaryMarket.city.toLowerCase().replace(/\s+/g, '_');
+        const primaryCityId = this.normalizeCityId(primaryMarket.city);
         
         for (const otherMarket of allMarkets) {
             if (otherMarket.market.id === primaryMarket.market.id) continue;
             if (!otherMarket.city) continue;
             
-            const otherCityId = otherMarket.city.toLowerCase().replace(/\s+/g, '_');
+            const otherCityId = this.normalizeCityId(otherMarket.city);
             
             const correlation = this.getCorrelation(primaryCityId, otherCityId);
             if (!correlation) continue;
@@ -443,13 +462,13 @@ export class CrossMarketArbitrage {
         
         if (!primaryMarket.city) return opportunities;
         
-        const primaryCityId = primaryMarket.city.toLowerCase().replace(/\s+/g, '_');
+        const primaryCityId = this.normalizeCityId(primaryMarket.city);
         
         for (const otherMarket of allMarkets) {
             if (otherMarket.market.id === primaryMarket.market.id) continue;
             if (!otherMarket.city) continue;
             
-            const otherCityId = otherMarket.city.toLowerCase().replace(/\s+/g, '_');
+            const otherCityId = this.normalizeCityId(otherMarket.city);
             
             const correlation = this.getCorrelation(primaryCityId, otherCityId);
             if (!correlation) continue;

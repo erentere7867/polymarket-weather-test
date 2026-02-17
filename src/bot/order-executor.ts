@@ -73,18 +73,16 @@ export class OrderExecutor {
             }
 
             // Recalculate edge with live prices
-            const liveMarketProbability = liveYesPrice;
-            const liveEdge = opportunity.forecastProbability - liveMarketProbability;
-            const absLiveEdge = Math.abs(liveEdge);
-
-            let shouldExecute = false;
+            // For YES: edge = forecastProb - yesPrice (positive = underpriced YES)
+            // For NO: edge = (1 - forecastProb) - noPrice (positive = underpriced NO)
             let liveEdgeForAction = 0;
+            let shouldExecute = false;
 
             if (isBuyYes) {
-                liveEdgeForAction = liveEdge;
-                shouldExecute = liveEdge > MIN_EXECUTION_EDGE;
+                liveEdgeForAction = opportunity.forecastProbability - liveYesPrice;
+                shouldExecute = liveEdgeForAction > MIN_EXECUTION_EDGE;
             } else {
-                liveEdgeForAction = -liveEdge;
+                liveEdgeForAction = (1 - opportunity.forecastProbability) - liveNoPrice;
                 shouldExecute = liveEdgeForAction > MIN_EXECUTION_EDGE;
             }
 
@@ -161,29 +159,60 @@ export class OrderExecutor {
             return drift <= MAX_PRICE_DRIFT;
         });
 
-        // Execute all batches in parallel (removed artificial 50ms delay for ~50ms savings)
+        // Execute all batches in parallel but add cooldown between batch items
         for (let i = 0; i < eligible.length; i += MAX_CONCURRENT_ORDERS) {
             const batch = eligible.slice(i, i + MAX_CONCURRENT_ORDERS);
             const batchResults = await Promise.all(
                 batch.map(opp => this.executeOpportunity(opp, opp.traceId))
             );
             results.push(...batchResults);
-            // Delay removed - was causing unnecessary latency between batches
+            
+            // FIXED: Add small cooldown between batch items to respect rate limits
+            // This ensures we don't overwhelm the order system with concurrent requests
+            if (i + MAX_CONCURRENT_ORDERS < eligible.length) {
+                await this.delay(100); // 100ms cooldown between batches
+            }
         }
 
         return results;
     }
 
     /**
-     * Calculate position size
+     * Calculate position size using proper Kelly Criterion
+     * Kelly % = p - q/b where:
+     * - p = probability of winning (win rate)
+     * - q = probability of losing = 1 - p
+     * - b = net payout ratio = (1 - price) / price
      */
     private calculatePositionSize(opportunity: TradingOpportunity, edge: number, price: number): number {
         const maxSize = config.maxPositionSize;
-        const kellyFraction = Math.abs(edge) * opportunity.confidence;
-        const halfKelly = kellyFraction * ORDER_CONFIG.KELLY_MULTIPLIER;
-        const usdcAmount = maxSize * Math.min(halfKelly * ORDER_CONFIG.MAX_KELLY_SIZE, 1);
-
+        
         if (price <= 0) return 0;
+
+        // Get win rate from opportunity or use default 50%
+        // In a real system, this would be tracked historically
+        const winRate = opportunity.confidence || 0.5;
+        const lossRate = 1 - winRate;
+        
+        // Calculate payout ratio (net profit per $1 stake if win)
+        // For binary options: if price = 0.60, payout = 0.40/0.60 = 0.67
+        const payoutRatio = (1 - price) / price;
+        
+        // Proper Kelly: f* = p - q/b = p - (1-p)/payoutRatio
+        let kelly = winRate - (lossRate / payoutRatio);
+        
+        // FIXED: Clamp negative Kelly values to 0 (no bet if Kelly is negative)
+        kelly = Math.max(0, kelly);
+        
+        // Apply Kelly multiplier (conservative - use fraction of full Kelly)
+        const kellyFraction = kelly * ORDER_CONFIG.KELLY_MULTIPLIER;
+        
+        // Cap at maximum Kelly fraction (50% is standard Kelly max)
+        const MAX_KELLY_FRACTION = 0.5;
+        const cappedKelly = Math.min(kellyFraction, MAX_KELLY_FRACTION);
+        
+        // Calculate position size in USD
+        const usdcAmount = maxSize * cappedKelly;
 
         const shares = Math.floor(usdcAmount / price);
         return Math.max(1, Math.min(shares, Math.floor(maxSize / price)));

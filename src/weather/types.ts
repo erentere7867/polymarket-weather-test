@@ -260,8 +260,10 @@ export interface ExpectedFileInfo {
 export interface CityGRIBData {
     cityName: string;
     coordinates: Coordinates;
-    temperatureC: number;
+    temperatureC: number;           // Current/primary temp (from f003 for backward compat)
     temperatureF: number;
+    hourlyTempsF: number[];         // NEW: temps for multiple forecast hours (f003, f006, f009, etc.)
+    forecastHours: number[];        // NEW: which forecast hours these temps correspond to
     windSpeedMps: number;
     windSpeedMph: number;
     windDirection: number;
@@ -410,7 +412,6 @@ export const CITY_MODEL_CONFIGS: CityModelConfig[] = [
     // International cities - GFS primary (global, 6h cycle, ~3.5h delay), also ECMWF
     // Canadian cities: GFS primary (HRRR doesn't cover well), RAP as fallback for Toronto (close to US border)
     { cityName: 'Toronto', primaryModel: 'GFS', fallbackModels: ['RAP', 'ECMWF'] },
-    { cityName: 'Vancouver', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
     { cityName: 'London', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
     { cityName: 'Seoul', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },
     { cityName: 'Ankara', primaryModel: 'GFS', fallbackModels: ['ECMWF'] },

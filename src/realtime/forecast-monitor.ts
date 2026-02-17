@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Forecast Monitor
  * Polls weather APIs and updates DataStore with latest forecasts
  * 
@@ -501,11 +501,12 @@ export class ForecastMonitor {
         } else if (market.metricType === 'precipitation') {
             const targetDateObj = new Date(market.targetDate);
             targetDateObj.setUTCHours(0, 0, 0, 0);
+            const targetDateStr = targetDateObj.toISOString().split('T')[0];
 
             const dayForecasts = weatherData.hourly.filter((h: { timestamp: Date }) => {
                 const hourDate = new Date(h.timestamp);
-                hourDate.setUTCHours(0, 0, 0, 0);
-                return hourDate.getTime() === targetDateObj.getTime();
+                // Use date string comparison to avoid timestamp mismatch issues
+                return hourDate.toISOString().split('T')[0] === targetDateStr;
             });
 
             if (dayForecasts.length > 0) {

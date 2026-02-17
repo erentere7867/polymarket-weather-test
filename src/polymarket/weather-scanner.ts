@@ -254,24 +254,68 @@ export class WeatherScanner {
             };
         }
 
-        // Temperature threshold patterns (e.g. "90°F or higher")
-        const tempThresholdMatch = text.match(/(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?\s*(?:or\s*)?(?:above|higher|more|over|greater)/i);
-        if (tempThresholdMatch) {
-            return {
-                metricType: 'temperature_threshold',
-                threshold: parseInt(tempThresholdMatch[1], 10),
-                thresholdUnit: (tempThresholdMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
-                comparisonType: 'above',
-            };
+        // Temperature threshold patterns (e.g. "90°F or higher", "be 64°F or higher", "at least 64°F", "reach 64°F")
+        // Matches various phrasings: "64°F or higher", "64°F or more", "be 64°F or higher", "at least 64°F", "reach 64°F"
+        const tempThresholdMatch = text.match(/(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?\s*(?:(?:be\s+)?(?:or\s+)?(?:at\s*least|from|above|higher|more|over|greater|reach)\b|\b(?:at\s*least)\s+\d+)/i);
+        
+        // Try more specific patterns if the general one doesn't match
+        let aboveMatch = tempThresholdMatch;
+        if (!aboveMatch) {
+            // Pattern for "at least 64°F" (number comes after "at least")
+            aboveMatch = text.match(/(?:at\s*least|minimum)\s*(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
+        }
+        if (!aboveMatch) {
+            // Pattern for "will reach 64°F" (number comes after "reach")
+            aboveMatch = text.match(/(?:reach|exceed)\s*(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
+        }
+        if (aboveMatch) {
+            // Check if there's explicit "above" context in the text
+            const hasAboveContext = text.match(/\b(above|higher|more|over|greater|at least|minimum|reach|exceed)\b/i);
+            // Only treat as 'above' if we have explicit above context or if pattern matched above keywords
+            if (hasAboveContext || tempThresholdMatch) {
+                return {
+                    metricType: 'temperature_threshold',
+                    threshold: parseInt(aboveMatch[1], 10),
+                    thresholdUnit: (aboveMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
+                    comparisonType: 'above',
+                };
+            }
         }
 
-        // Temperature below patterns
-        const tempBelowMatch = text.match(/(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?\s*(?:or\s*)?(?:below|under|less|lower)/i);
-        if (tempBelowMatch) {
+        // Temperature below patterns (e.g. "64°F or below", "under 64°F", "less than 64°F")
+        const tempBelowMatch = text.match(/(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?\s*(?:(?:be\s+)?(?:or\s+)?(?:below|under|less|lower)\b|\b(?:below|under|less)\s+than\s+\d+)/i);
+        
+        // Try more specific patterns if the general one doesn't match
+        let belowMatch = tempBelowMatch;
+        if (!belowMatch) {
+            // Pattern for "below 64°F", "under 64°F", "less than 64°F"
+            belowMatch = text.match(/\b(below|under|less\s*than)\s+(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
+        }
+        if (!belowMatch) {
+            // Pattern for "at most 64°F" (number comes after "at most")
+            belowMatch = text.match(/(?:at\s*most|maximum)\s*(-?\d+)\s*(?:°|degrees?|deg)?\s*([fc])?/i);
+        }
+        if (belowMatch) {
+            // Determine which capture group has the threshold value
+            // For patterns like "64°F or below": belowMatch[1] = threshold, belowMatch[2] = unit
+            // For patterns like "below 64°F": belowMatch[1] = 'below', belowMatch[2] = threshold, belowMatch[3] = unit
+            let thresholdVal: number;
+            let thresholdUnit: 'F' | 'C';
+            
+            if (belowMatch[2] && /^\d+$/.test(belowMatch[2])) {
+                // Pattern with 3 groups: number is in group 2
+                thresholdVal = parseInt(belowMatch[2], 10);
+                thresholdUnit = belowMatch[3] ? (belowMatch[3].toUpperCase() as 'F' | 'C') : defaultUnit;
+            } else {
+                // Pattern with 2 groups: number is in group 1
+                thresholdVal = parseInt(belowMatch[1], 10);
+                thresholdUnit = belowMatch[2] ? (belowMatch[2].toUpperCase() as 'F' | 'C') : defaultUnit;
+            }
+            
             return {
                 metricType: 'temperature_threshold',
-                threshold: parseInt(tempBelowMatch[1], 10),
-                thresholdUnit: (tempBelowMatch[2]?.toUpperCase() as 'F' | 'C') || defaultUnit,
+                threshold: thresholdVal,
+                thresholdUnit,
                 comparisonType: 'below',
             };
         }

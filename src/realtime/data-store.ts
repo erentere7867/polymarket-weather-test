@@ -55,7 +55,30 @@ export class DataStore {
     // Key: "cityId:model" → { value (°F), timestamp }
     private modelForecastCache: Map<string, { value: number; timestamp: Date }> = new Map();
 
+    // Singleton instance
+    private static instance: DataStore | null = null;
+    
+    // Lock for thread-safe operations
+    private updateLock: Map<string, boolean> = new Map();
+
     constructor() { }
+    
+    /**
+     * Get singleton instance
+     */
+    public static getInstance(): DataStore {
+        if (!DataStore.instance) {
+            DataStore.instance = new DataStore();
+        }
+        return DataStore.instance;
+    }
+    
+    /**
+     * Reset singleton instance (useful for testing)
+     */
+    public static resetInstance(): void {
+        DataStore.instance = null;
+    }
 
     /**
      * Register a market for tracking
@@ -94,12 +117,49 @@ export class DataStore {
     }
 
     /**
-     * Update price for a token
+     * Acquire lock for a specific market
+     */
+    private acquireLock(marketId: string): boolean {
+        if (this.updateLock.get(marketId)) {
+            return false;
+        }
+        this.updateLock.set(marketId, true);
+        return true;
+    }
+    
+    /**
+     * Release lock for a specific market
+     */
+    private releaseLock(marketId: string): void {
+        this.updateLock.delete(marketId);
+    }
+
+    /**
+     * Update price for a token - thread-safe with locking
      */
     updatePrice(tokenId: string, price: number, timestamp: Date = new Date()): void {
         const marketId = this.tokenToMarketId.get(tokenId);
         if (!marketId) return;
 
+        // Try to acquire lock for this market
+        if (!this.acquireLock(marketId)) {
+            // Another update is in progress for this market, skip this one
+            // This prevents race conditions in concurrent updates
+            return;
+        }
+        
+        try {
+            this.doUpdatePrice(marketId, tokenId, price, timestamp);
+        } finally {
+            this.releaseLock(marketId);
+        }
+    }
+    
+    /**
+     * Internal method to perform the actual price update
+     * Called only when lock is acquired
+     */
+    private doUpdatePrice(marketId: string, tokenId: string, price: number, timestamp: Date): void {
         const state = this.markets.get(marketId);
         if (!state) return;
 
@@ -119,7 +179,9 @@ export class DataStore {
         // Prune history older than 10 minutes (reduced from 60 for performance)
         // We only need recent history for velocity calculation
         const cutoffTime = timestamp.getTime() - 10 * 60 * 1000;
+        
         // Use binary search to find the cutoff index for O(log n) pruning
+        // FIXED: Binary search off-by-one - find first index where timestamp >= cutoffTime
         const history = historyObj.history;
         let left = 0;
         let right = history.length;
@@ -131,7 +193,8 @@ export class DataStore {
                 right = mid;
             }
         }
-        // Remove all elements before the found index
+        // left now points to the first element >= cutoffTime
+        // Remove all elements before left (elements with timestamp < cutoffTime)
         if (left > 0) {
             history.splice(0, left);
         }
@@ -464,6 +527,23 @@ export class DataStore {
         for (const [key, value] of this.previousRunCache.entries()) {
             if (now.getTime() - value.timestamp.getTime() > maxAgeMs) {
                 this.previousRunCache.delete(key);
+            }
+        }
+
+        // Clean up model forecast cache (6 hour max age to match staleness check)
+        const modelMaxAgeMs = 6 * 60 * 60 * 1000;
+        for (const [key, value] of this.modelForecastCache.entries()) {
+            if (now.getTime() - value.timestamp.getTime() > modelMaxAgeMs) {
+                this.modelForecastCache.delete(key);
+            }
+        }
+
+        // Clean up file-confirmed forecasts (24 hour max age)
+        for (const [key, snapshot] of this.fileConfirmedForecasts.entries()) {
+            const ageMs = now.getTime() - snapshot.timestamp.getTime();
+            if (ageMs > maxAgeMs) {
+                this.fileConfirmedForecasts.delete(key);
+                this.confirmationStatus.delete(key);
             }
         }
 

@@ -413,8 +413,8 @@ export class FileBasedIngestion extends EventEmitter {
      * Calculate the run date for a given cycle hour
      * This ensures consistent date calculation across the confirmation flow
      *
-     * For cycles that haven't happened yet today, use today's date
-     * For cycles that already happened today, also use today's date
+     * For cycles that haven't happened yet today (e.g., 18Z at 12Z), use today's date
+     * For cycles that already happened today (e.g., 00Z at 06Z), use today's date
      * For late-night cycles (e.g., 23Z) being confirmed early morning (e.g., 01Z next day),
      * we need to use yesterday's date
      *
@@ -425,19 +425,32 @@ export class FileBasedIngestion extends EventEmitter {
         const now = new Date();
         const currentHour = now.getUTCHours();
         
-        // If current time is earlier than the cycle hour, the cycle likely belongs to yesterday
-        // This handles the case where it's 01:00 UTC and we're confirming the 23:00Z cycle from yesterday
-        // However, for real-time detection, the cycle should match today unless we're catching up
-        // For simplicity, we always use today's date since detection windows are created for today's cycles
-        // The key is consistency - both queuing and confirming use the same logic
+        let runDate: Date;
         
-        // Create a date with just the date portion (no time)
-        return new Date(Date.UTC(
-            now.getUTCFullYear(),
-            now.getUTCMonth(),
-            now.getUTCDate(),
-            0, 0, 0, 0
-        ));
+        // If current UTC hour is less than cycle hour, the cycle belongs to yesterday
+        // This handles: 01:00 UTC confirming 23:00Z cycle from yesterday
+        // Also handles: 06:00 UTC confirming 00:00Z cycle from today
+        if (currentHour < cycleHour) {
+            // Cycle hasn't happened yet today, use yesterday's date
+            const yesterday = new Date(now);
+            yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+            runDate = new Date(Date.UTC(
+                yesterday.getUTCFullYear(),
+                yesterday.getUTCMonth(),
+                yesterday.getUTCDate(),
+                0, 0, 0, 0
+            ));
+        } else {
+            // Cycle has happened today (or is happening now), use today's date
+            runDate = new Date(Date.UTC(
+                now.getUTCFullYear(),
+                now.getUTCMonth(),
+                now.getUTCDate(),
+                0, 0, 0, 0
+            ));
+        }
+        
+        return runDate;
     }
 
     /**

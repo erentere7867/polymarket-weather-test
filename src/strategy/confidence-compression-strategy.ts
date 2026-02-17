@@ -190,13 +190,16 @@ export class ConfidenceCompressionStrategy {
                 const state = this.store.getMarketState(market.market.id);
                 if (state?.lastForecast) {
                     const forecastValue = state.lastForecast.forecastValue;
-                    const threshold = market.threshold || 0;
+                    // Convert threshold to Fahrenheit if needed (forecast is stored in Fahrenheit)
+                    let thresholdF = market.threshold || 0;
+                    if (market.thresholdUnit === 'C') {
+                        thresholdF = (thresholdF * 9 / 5) + 32;
+                    }
                     const comparisonType = market.comparisonType || 'above';
 
-                    const modelProbability = this.confidenceToProbability(
-                        confidenceResult.score,
+                    const modelProbability = this.calculateModelProbability(
                         forecastValue,
-                        threshold,
+                        thresholdF,
                         comparisonType as 'above' | 'below',
                         horizonHours
                     );
@@ -236,13 +239,16 @@ export class ConfidenceCompressionStrategy {
 
         // Calculate probability
         let modelProbability: number;
-        const threshold = market.threshold || 0;
+        // Convert threshold to Fahrenheit if needed (forecast is stored in Fahrenheit)
+        let thresholdF = market.threshold || 0;
+        if (market.thresholdUnit === 'C') {
+            thresholdF = (thresholdF * 9 / 5) + 32;
+        }
         const comparisonType = market.comparisonType || 'above';
 
-        modelProbability = this.confidenceToProbability(
-            confidenceResult.score,
+        modelProbability = this.calculateModelProbability(
             forecastValue,
-            threshold,
+            thresholdF,
             comparisonType as 'above' | 'below',
             horizonHours
         );
@@ -331,10 +337,10 @@ export class ConfidenceCompressionStrategy {
     }
 
     /**
-     * Convert confidence to probability with dynamic sigma based on horizon
+     * Calculate model probability from forecast value and threshold
+     * This is the CORRECT way to calculate probability - from actual forecast, NOT from confidence
      */
-    private confidenceToProbability(
-        confidence: number,
+    private calculateModelProbability(
         forecastValue: number,
         threshold: number,
         comparisonType: 'above' | 'below',
@@ -342,7 +348,7 @@ export class ConfidenceCompressionStrategy {
     ): number {
         const distance = forecastValue - threshold;
 
-        // Dynamic sigma based on horizon hours
+        // Dynamic sigma based on horizon hours (model uncertainty increases with time)
         let sigma: number;
         if (horizonHours <= 12) {
             sigma = 1.5;
@@ -354,7 +360,43 @@ export class ConfidenceCompressionStrategy {
             sigma = 4.0;
         }
 
-        // Effective sigma scales with confidence (higher confidence = lower sigma needed)
+        // Fixed sigma - confidence should only affect trade decision, NOT probability calculation
+        const effectiveSigma = sigma;
+
+        const zScore = distance / effectiveSigma;
+        const baseProbability = normalCDF(zScore);
+        const probability = comparisonType === 'above' ? baseProbability : (1 - baseProbability);
+
+        return Math.max(0.01, Math.min(0.99, probability));
+    }
+
+    /**
+     * Convert confidence to probability (legacy - kept for internal use)
+     * WARNING: This was incorrectly used to calculate model probability!
+     * Use calculateModelProbability instead for actual forecast-based probability
+     */
+    private confidenceToProbability(
+        confidence: number,
+        forecastValue: number,
+        threshold: number,
+        comparisonType: 'above' | 'below',
+        horizonHours: number
+    ): number {
+        // This function is deprecated - use calculateModelProbability instead
+        // It incorrectly uses confidence to modulate probability
+        const distance = forecastValue - threshold;
+
+        let sigma: number;
+        if (horizonHours <= 12) {
+            sigma = 1.5;
+        } else if (horizonHours <= 24) {
+            sigma = 2.0;
+        } else if (horizonHours <= 48) {
+            sigma = 3.0;
+        } else {
+            sigma = 4.0;
+        }
+
         const effectiveSigma = sigma * (1.2 - confidence * 0.2);
 
         const zScore = distance / effectiveSigma;

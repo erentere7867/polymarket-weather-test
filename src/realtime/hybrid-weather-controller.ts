@@ -39,7 +39,7 @@ import { LatencyTracker } from './latency-tracker.js';
 /**
  * Data source priority ranking (higher = more trusted)
  */
-export type DataSourceType = 'S3_FILE' | 'API' | 'WEBHOOK' | 'CACHE';
+export type DataSourceType = 'S3_FILE' | 'API' | 'WEBHOOK' | 'CACHE' | 'IDLE_POLL';
 
 export interface DataSourcePriority {
     source: DataSourceType;
@@ -242,6 +242,12 @@ const DATA_SOURCE_PRIORITIES: Record<DataSourceType, DataSourcePriority> = {
         priority: 3,
         confidenceWeight: 0.50,
         maxStalenessMs: 2 * 60 * 1000   // 2 minutes
+    },
+    IDLE_POLL: {
+        source: 'IDLE_POLL',
+        priority: 4,
+        confidenceWeight: 0.80,
+        maxStalenessMs: 5 * 60 * 1000   // 5 minutes
     }
 };
 
@@ -324,6 +330,9 @@ export class HybridWeatherController extends EventEmitter {
     private confirmationManager: ConfirmationManager | null = null;
     private fileBasedIngestionEnabled: boolean = config.ENABLE_FILE_BASED_INGESTION;
     private eventBus: EventBus;
+    
+    // Event listener cleanup - store unsubscribe functions
+    private eventBusUnsubscribers: Array<() => void> = [];
     
     // Track which cities have file-confirmed data (to stop API polling)
     private fileConfirmedCities: Set<string> = new Set();
@@ -617,7 +626,9 @@ export class HybridWeatherController extends EventEmitter {
 
                     if (market.metricType === 'temperature_high' || market.metricType === 'temperature_low' || market.metricType === 'temperature_threshold') {
                         if (market.threshold !== undefined) {
-                            forecastValue = cityData.temperatureF;
+                            // Get the actual daily high/low from file data
+                            // Now uses hourly temps if available, falls back to estimation
+                            forecastValue = this.calculateDailyTempFromFile(cityData as any, market.metricType, payload.cycleHour);
 
                             let thresholdF = market.threshold;
                             if (market.thresholdUnit === 'C') {
@@ -660,7 +671,8 @@ export class HybridWeatherController extends EventEmitter {
                         this.initializedFileMarkets.add(marketId);
                     }
 
-                    // Real change = value changed significantly AND not first time seeing this market
+                    // Real change = value changed significantly AND this is NOT the first time seeing this market
+                    // (i.e., we've already seen it once, so we have a previous value to compare against)
                     const isRealChange = !isFirstSeen && previousValue !== undefined && changeAmount >= 1;
                     if (isRealChange) {
                         anyRealChange = true;
@@ -1158,6 +1170,12 @@ export class HybridWeatherController extends EventEmitter {
         if (this.confirmationManager) {
             this.confirmationManager.dispose();
         }
+
+        // Cleanup event listeners - unsubscribe from EventBus to prevent memory leaks
+        for (const unsubscribe of this.eventBusUnsubscribers) {
+            unsubscribe();
+        }
+        this.eventBusUnsubscribers = [];
 
         logger.info('HybridWeatherController stopped');
         this.emit('stopped', { timestamp: new Date() });
@@ -1752,6 +1770,119 @@ export class HybridWeatherController extends EventEmitter {
         
         // Base confidence from source priority
         return priority.confidenceWeight * freshnessMultiplier;
+    }
+
+    /**
+     * Calculate daily high/low temperature from file data
+     * 
+     * NEW: Uses actual hourly forecast data (hourlyTempsF) if available
+     * This provides TRUE daily high/low from the model instead of estimation
+     * 
+     * Falls back to estimation if hourly data not available (backward compatibility)
+     */
+    private calculateDailyTempFromFile(
+        cityData: {
+            temperatureF: number;
+            hourlyTempsF: number[];
+            forecastHours: number[];
+        }, 
+        metricType: string, 
+        cycleHour: number
+    ): number {
+        // Use actual hourly data if available (multiple forecast hours extracted)
+        if (cityData.hourlyTempsF && cityData.hourlyTempsF.length > 1) {
+            if (metricType === 'temperature_high') {
+                const dailyHigh = Math.max(...cityData.hourlyTempsF);
+                logger.debug(`[HybridWeatherController] Using actual daily high: ${dailyHigh.toFixed(1)}°F from ${cityData.hourlyTempsF.length} hours`);
+                return dailyHigh;
+            } else if (metricType === 'temperature_low') {
+                const dailyLow = Math.min(...cityData.hourlyTempsF);
+                logger.debug(`[HybridWeatherController] Using actual daily low: ${dailyLow.toFixed(1)}°F from ${cityData.hourlyTempsF.length} hours`);
+                return dailyLow;
+            }
+            // For other metric types, use primary temperature
+            return cityData.temperatureF;
+        }
+        
+        // Fallback to estimation for backward compatibility (single forecast hour)
+        let adjustment: number;
+        const tempF = cityData.temperatureF;
+        
+        if (metricType === 'temperature_high') {
+            // Estimate daily high based on cycle time
+            if (cycleHour <= 6) {
+                // Early morning cycle (00Z, 06Z) - high typically 12-15°F higher than f003
+                adjustment = 14;
+            } else if (cycleHour <= 12) {
+                // Late morning (12Z) - high 8-10°F higher
+                adjustment = 10;
+            } else {
+                // Afternoon/evening - high only 3-5°F higher
+                adjustment = 5;
+            }
+        } else if (metricType === 'temperature_low') {
+            // Estimate daily low
+            if (cycleHour >= 18 || cycleHour <= 6) {
+                // Evening/morning cycle - low typically 8-12°F lower than f003
+                adjustment = -10;
+            } else {
+                // Daytime cycle - low 5-8°F lower (overnight cooling)
+                adjustment = -6;
+            }
+        } else {
+            // For threshold markets, use as-is
+            adjustment = 0;
+        }
+        
+        return tempF + adjustment;
+    }
+
+    /**
+     * NEW: Calculate daily high from hourly temps for a specific calendar day
+     * Filters hourly temps to only include those for the target date
+     */
+    private calculateDailyHighFromHourly(
+        hourlyTempsF: number[],
+        forecastHours: number[],
+        targetDate: Date,
+        cycleHour: number
+    ): number {
+        if (!hourlyTempsF || hourlyTempsF.length === 0) {
+            return 0;
+        }
+        
+        // Calculate valid times for each forecast hour
+        const targetDateStart = new Date(targetDate);
+        targetDateStart.setHours(0, 0, 0, 0);
+        const targetDateEnd = new Date(targetDate);
+        targetDateEnd.setHours(23, 59, 59, 999);
+        
+        // Filter temps that fall on the target date
+        const tempsForDate: number[] = [];
+        
+        for (let i = 0; i < forecastHours.length; i++) {
+            const fh = forecastHours[i];
+            const validTime = new Date(Date.UTC(
+                targetDate.getUTCFullYear(),
+                targetDate.getUTCMonth(),
+                targetDate.getUTCDate(),
+                cycleHour,
+                0,
+                0
+            ));
+            validTime.setHours(validTime.getHours() + fh);
+            
+            if (validTime >= targetDateStart && validTime <= targetDateEnd) {
+                tempsForDate.push(hourlyTempsF[i]);
+            }
+        }
+        
+        if (tempsForDate.length > 0) {
+            return Math.max(...tempsForDate);
+        }
+        
+        // If no temps match the date, return overall max
+        return Math.max(...hourlyTempsF);
     }
 
     // ====================

@@ -25,6 +25,7 @@ import { EntrySignal } from '../strategy/entry-optimizer.js';
 import { OpportunityDetector } from './opportunity-detector.js';
 import { MarketModel } from '../probability/market-model.js';
 import { DrawdownKillSwitch } from '../strategy/drawdown-kill-switch.js';
+import { ExitOptimizer, Position } from '../strategy/exit-optimizer.js';
 
 export type TradingMode = 'speed' | 'safe' | 'orchestrated';
 
@@ -53,6 +54,20 @@ export class BotManager {
     
     // Kill switch for risk control
     private killSwitch: DrawdownKillSwitch;
+    
+    // Exit management
+    private exitOptimizer: ExitOptimizer | null = null;
+    private openPositions: Map<string, {
+        marketId: string;
+        side: 'yes' | 'no';
+        entryPrice: number;
+        size: number;
+        entryTime: Date;
+        forecastProbAtEntry: number;
+    }> = new Map();
+    
+    // Daily reset timer
+    private dailyResetTimer: NodeJS.Timeout | null = null;
 
     private isRunning: boolean = false;
     private stats: BotStats;
@@ -128,6 +143,11 @@ export class BotManager {
             );
             logger.info('[BotManager] Strategy Orchestrator initialized');
         }
+
+        // Initialize ExitOptimizer
+        const marketModel = new MarketModel(this.dataStore);
+        this.exitOptimizer = new ExitOptimizer(marketModel);
+        logger.info('[BotManager] ExitOptimizer initialized');
 
         // Start PriceTracker
         await this.priceTracker.start(this.weatherScanner, 60000);
@@ -206,6 +226,8 @@ export class BotManager {
                     const result = await this.orderExecutor.executeOpportunity(opp);
                     if (result.executed) {
                         this.stats.tradesExecuted++;
+                        // Record trade for kill switch
+                        this.recordTradeResult(0);
                         this.speedStrategy.markOpportunityCaptured(marketId, opp.forecastValue || 0);
                     }
                 }
@@ -298,16 +320,28 @@ export class BotManager {
 
                 this.stats.opportunitiesFound += opportunities.length;
 
-                // Execute trades
+                    // Execute trades
                 if (opportunities.length > 0) {
                     const results = await this.orderExecutor.executeOpportunities(opportunities);
                     const executed = results.filter(r => r.executed);
                     this.stats.tradesExecuted += executed.length;
                     this.stats.opportunitiesExecuted += executed.length;
 
-                    // Mark captured
+                    // Track positions and record trade for kill switch
                     for (const result of executed) {
                         const opp = result.opportunity;
+                        
+                        // Track open position for exit management
+                        this.openPositions.set(opp.market.market.id, {
+                            marketId: opp.market.market.id,
+                            side: opp.action === 'buy_yes' ? 'yes' : 'no',
+                            entryPrice: opp.action === 'buy_yes' ? opp.snapshotYesPrice : opp.snapshotNoPrice,
+                            size: opp.suggestedSize || config.maxPositionSize,
+                            entryTime: new Date(),
+                            forecastProbAtEntry: opp.forecastProbability,
+                        });
+                        
+                        // Mark captured for strategy
                         if (opp.forecastValue !== undefined) {
                             if (this.tradingMode === 'speed') {
                                 this.speedStrategy.markOpportunityCaptured(opp.market.market.id, opp.forecastValue);
@@ -388,6 +422,9 @@ export class BotManager {
         for (const successResult of results.filter((r): r is NonNullable<typeof r> => r !== null)) {
             this.stats.tradesExecuted++;
             this.stats.opportunitiesExecuted++;
+            
+            // Record trade for kill switch
+            this.recordTradeResult(0);
             
             // Track in orchestrator
             this.strategyOrchestrator.executeTrade(

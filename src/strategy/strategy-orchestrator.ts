@@ -75,6 +75,7 @@ export class StrategyOrchestrator {
   // Performance tracking (in-memory)
   private performance: Map<StrategyType, StrategyPerformance> = new Map();
   private compoundState: CompoundGrowthState;
+  private readonly MAX_TRADE_HISTORY = 1000;  // Bound memory usage
   private tradeHistory: Array<{
     timestamp: Date;
     strategy: StrategyType;
@@ -402,6 +403,14 @@ export class StrategyOrchestrator {
       entryPrice,
       status: 'open' as const,
     };
+
+    // Bound trade history to prevent memory leak
+    while (this.tradeHistory.length >= this.MAX_TRADE_HISTORY) {
+      const removed = this.tradeHistory.shift();
+      if (removed && removed.status === 'open') {
+        this.tradeHistoryByMarket.delete(removed.marketId);
+      }
+    }
 
     this.tradeHistory.push(trade);
     this.tradeHistoryByMarket.set(trade.marketId, trade);  // O(1) lookup

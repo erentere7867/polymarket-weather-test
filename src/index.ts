@@ -7,6 +7,22 @@ import { BotManager } from './bot/manager.js';
 import { logger } from './logger.js';
 import path from 'path';
 
+// FIXED: Add global unhandled promise rejection handlers
+process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
+    logger.error('Unhandled Promise Rejection', { 
+        reason: reason?.message || String(reason), 
+        stack: reason?.stack 
+    });
+});
+
+process.on('uncaughtException', (error: Error) => {
+    logger.error('Uncaught Exception', { 
+        error: error.message, 
+        stack: error.stack 
+    });
+    process.exit(1);
+});
+
 async function main(): Promise<void> {
     const bot = new BotManager();
 

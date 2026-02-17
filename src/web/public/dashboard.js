@@ -372,48 +372,103 @@ function updateMarketEdge(analysis, activePositions = []) {
 
 /**
  * Update Model Intelligence Panel (part of dashboard update)
+ * NOTE: This function is kept for backward compatibility but is no longer called
+ * as the Model Intelligence panel was removed from the dashboard.
  */
 function updateModelIntelligence(models) {
-    const grid = document.getElementById('model-intelligence-grid');
-    if (!grid) return;
-    
-    // We reuse the data from 'models' passed to updateDashboard
-    // But we render it differently here (more compact/intelligence focused)
-    
-    if (!Array.isArray(models)) return;
+    // Function kept for backward compatibility - panel removed from dashboard
+    return;
+}
 
-    grid.innerHTML = models.map(m => {
-        const lastRunTime = m.lastRun ? new Date(m.lastRun) : null;
-        const nextRunTime = m.nextExpected ? new Date(m.nextExpected) : null;
+/**
+ * Update Temperature Range Summary Panel
+ * Displays highest and lowest temperatures from model data
+ */
+function updateTemperatureRange(cities) {
+    const container = document.getElementById('temp-range-container');
+    if (!container) return;
+    
+    if (!Array.isArray(cities) || cities.length === 0) {
+        container.innerHTML = '<div class="text-slate-500 text-sm italic col-span-4">No temperature data available</div>';
+        return;
+    }
+
+    // Calculate temperature statistics from city data
+    let highestTemp = -Infinity;
+    let lowestTemp = Infinity;
+    let highestCity = '';
+    let lowestCity = '';
+    let validTemps = 0;
+
+    cities.forEach(city => {
+        const temp = city.temperature !== undefined ? city.temperature : null;
+        const cityName = city.cityName || city.city_name || city.name || 'Unknown';
         
-        // Calculate delay/freshness
-        let status = 'Unknown';
-        let statusColor = 'text-slate-500';
-        
-        if (m.status === 'CONFIRMED') {
-            status = 'Fresh';
-            statusColor = 'text-emerald-400';
-        } else if (m.status === 'DETECTING') {
-            status = 'Ingesting...';
-            statusColor = 'text-amber-400 animate-pulse';
-        } else if (m.status === 'WAITING') {
-            status = 'Waiting';
-            statusColor = 'text-blue-400';
+        if (temp !== null && !isNaN(temp)) {
+            validTemps++;
+            if (temp > highestTemp) {
+                highestTemp = temp;
+                highestCity = cityName;
+            }
+            if (temp < lowestTemp) {
+                lowestTemp = temp;
+                lowestCity = cityName;
+            }
         }
-        
-        return `
-            <div class="flex items-center justify-between p-2 bg-slate-800/30 rounded border border-slate-700/30">
-                <div class="flex items-center space-x-3">
-                    <div class="w-2 h-2 rounded-full ${m.status === 'CONFIRMED' ? 'bg-emerald-500' : (m.status === 'DETECTING' ? 'bg-amber-500' : 'bg-slate-600')}"></div>
-                    <span class="font-bold text-slate-200">${m.model}</span>
-                </div>
-                <div class="text-right">
-                    <div class="text-xs ${statusColor}">${status}</div>
-                    <div class="text-[10px] text-slate-500 font-mono">${m.lastRun ? formatTimeAgo(lastRunTime) : 'No data'}</div>
-                </div>
-            </div>
-        `;
-    }).join('');
+
+        // Also check hourly temps array for high/low calculation
+        const hourlyTemps = city.hourlyTempsF || city.hourly_temps_f;
+        if (hourlyTemps && Array.isArray(hourlyTemps) && hourlyTemps.length > 0) {
+            const cityHigh = Math.max(...hourlyTemps.filter(t => !isNaN(t)));
+            const cityLow = Math.min(...hourlyTemps.filter(t => !isNaN(t)));
+            
+            if (cityHigh > highestTemp) {
+                highestTemp = cityHigh;
+                highestCity = cityName;
+            }
+            if (cityLow < lowestTemp) {
+                lowestTemp = cityLow;
+                lowestCity = cityName;
+            }
+        }
+    });
+
+    if (validTemps === 0) {
+        container.innerHTML = '<div class="text-slate-500 text-sm italic col-span-4">No valid temperature readings</div>';
+        return;
+    }
+
+    // Calculate average temperature
+    const avgTemp = cities.reduce((sum, city) => {
+        const temp = city.temperature !== undefined ? city.temperature : null;
+        return temp !== null && !isNaN(temp) ? sum + temp : sum;
+    }, 0) / validTemps;
+
+    // Calculate temperature spread
+    const tempSpread = highestTemp - lowestTemp;
+
+    container.innerHTML = `
+        <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+            <p class="text-slate-500 text-xs uppercase tracking-wider">Highest Temp</p>
+            <p class="text-2xl font-bold text-rose-400">${highestTemp.toFixed(1)}°F</p>
+            <p class="text-xs text-slate-400 mt-1">${highestCity}</p>
+        </div>
+        <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+            <p class="text-slate-500 text-xs uppercase tracking-wider">Lowest Temp</p>
+            <p class="text-2xl font-bold text-blue-400">${lowestTemp.toFixed(1)}°F</p>
+            <p class="text-xs text-slate-400 mt-1">${lowestCity}</p>
+        </div>
+        <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+            <p class="text-slate-500 text-xs uppercase tracking-wider">Average Temp</p>
+            <p class="text-2xl font-bold text-emerald-400">${avgTemp.toFixed(1)}°F</p>
+            <p class="text-xs text-slate-400 mt-1">${validTemps} cities</p>
+        </div>
+        <div class="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+            <p class="text-slate-500 text-xs uppercase tracking-wider">Temp Spread</p>
+            <p class="text-2xl font-bold text-amber-400">${tempSpread.toFixed(1)}°F</p>
+            <p class="text-xs text-slate-400 mt-1">Range coverage</p>
+        </div>
+    `;
 }
 
 /**
@@ -484,28 +539,12 @@ function updateWinLossDisplay(stats) {
 
 /**
  * Update confidence compression strategy panel
+ * NOTE: This function is kept for backward compatibility but is no longer called
+ * as the Confidence Compression Strategy panel was removed from the dashboard.
  */
 function updateConfidencePanel(data) {
-    if (!data) return;
-
-    const firstRunBlocksEl = document.getElementById('cc-first-run-blocks');
-    const stabilityBlocksEl = document.getElementById('cc-stability-blocks');
-    const confidenceBlocksEl = document.getElementById('cc-confidence-blocks');
-    const signalsEl = document.getElementById('cc-signals');
-    const tempThresholdEl = document.getElementById('cc-temp-threshold');
-    const precipThresholdEl = document.getElementById('cc-precip-threshold');
-
-    if (firstRunBlocksEl) firstRunBlocksEl.textContent = data.firstRunBlocks || 0;
-    if (stabilityBlocksEl) stabilityBlocksEl.textContent = data.stabilityBlocks || 0;
-    if (confidenceBlocksEl) confidenceBlocksEl.textContent = data.confidenceBlocks || 0;
-    if (signalsEl) signalsEl.textContent = data.signalsGenerated || 0;
-
-    if (tempThresholdEl && data.thresholds) {
-        tempThresholdEl.textContent = `${Math.round((data.thresholds.temperature || 0.6) * 100)}%`;
-    }
-    if (precipThresholdEl && data.thresholds) {
-        precipThresholdEl.textContent = `${Math.round((data.thresholds.precipitation || 0.75) * 100)}%`;
-    }
+    // Function kept for backward compatibility - panel removed from dashboard
+    return;
 }
 
 /**
@@ -515,11 +554,12 @@ function updateDashboard(data) {
     if (data.status) updateSystemStatus(data.status);
     if (data.models) {
         updateModelStatus(data.models);
-        updateModelIntelligence(data.models);
     }
-    if (data.cities) updateCityCoverage(data.cities);
+    if (data.cities) {
+        updateCityCoverage(data.cities);
+        updateTemperatureRange(data.cities);
+    }
     if (data.latency) updateLatencyMetrics(data.latency);
-    if (data.apiFallback) updateApiFallbackStatus(data.apiFallback);
     if (data.events) updateEventLog(data.events);
     if (data.windows) updateDetectionWindows(data.windows);
     if (data.upcoming) updateUpcomingRuns(data.upcoming);
@@ -664,6 +704,12 @@ function updateCityCoverage(cities) {
         const precipitation = city.precipitation !== undefined ? city.precipitation : city.precip !== undefined ? city.precip : null;
         const temperatureChange = city.temperatureChange !== undefined ? city.temperatureChange : city.temperature_change !== undefined ? city.temperature_change : null;
         const lastUpdate = city.lastUpdate || city.last_update || null;
+        
+        // Previous forecast values
+        const previousTemperature = city.previousTemperature !== undefined ? city.previousTemperature : null;
+        const previousWindSpeed = city.previousWindSpeed !== undefined ? city.previousWindSpeed : null;
+        const previousPrecipitation = city.previousPrecipitation !== undefined ? city.previousPrecipitation : null;
+        const previousUpdate = city.previousUpdate || null;
 
         const statusIcon = confirmationStatus === 'FILE_CONFIRMED'
             ? '<span class="text-emerald-400">✓</span>'
@@ -686,6 +732,37 @@ function updateCityCoverage(cities) {
             }
         }
 
+        // Format previous update time
+        let previousUpdateStr = '';
+        if (previousUpdate) {
+            try {
+                previousUpdateStr = formatTimeAgo(new Date(previousUpdate));
+            } catch (e) {
+                previousUpdateStr = String(previousUpdate);
+            }
+        }
+
+        // Calculate temperature change from previous
+        let tempDiff = '';
+        if (previousTemperature !== null && temperature !== null) {
+            const diff = temperature - previousTemperature;
+            if (diff !== 0) {
+                tempDiff = `<span class="${diff > 0 ? 'text-rose-400' : 'text-blue-400'} text-xs ml-1">(${diff > 0 ? '+' : ''}${diff.toFixed(1)})</span>`;
+            }
+        }
+
+        // Calculate daily high/low from hourly temps if available
+        const hourlyTemps = city.hourlyTempsF || city.hourly_temps_f;
+        let dailyHighLow = '';
+        if (hourlyTemps && Array.isArray(hourlyTemps) && hourlyTemps.length > 0) {
+            const validTemps = hourlyTemps.filter(t => !isNaN(t));
+            if (validTemps.length > 0) {
+                const dailyHigh = Math.max(...validTemps);
+                const dailyLow = Math.min(...validTemps);
+                dailyHighLow = `<div class="text-slate-500 text-[10px]">H: ${dailyHigh.toFixed(1)}° L: ${dailyLow.toFixed(1)}°</div>`;
+            }
+        }
+
         return `
             <div class="bg-slate-800/30 rounded p-3 border border-slate-700/50 hover:border-slate-600 transition-colors">
                 <div class="flex items-center justify-between mb-2">
@@ -702,17 +779,22 @@ function updateCityCoverage(cities) {
                 <div class="mt-2 grid grid-cols-3 gap-2 text-xs">
                     <div class="text-center">
                         <span class="text-slate-500">Temp</span>
-                        <div class="text-slate-200">${temperature !== null ? temperature.toFixed(1) + '°F' : '--'} ${tempChange}</div>
+                        <div class="text-slate-200">${temperature !== null ? temperature.toFixed(1) + '°F' : '--'} ${tempChange}${tempDiff}</div>
+                        ${dailyHighLow}
+                        ${previousTemperature !== null ? `<div class="text-slate-500 text-[10px]">Prev: ${previousTemperature.toFixed(1)}°F</div>` : ''}
                     </div>
                     <div class="text-center">
                         <span class="text-slate-500">Wind</span>
                         <div class="text-slate-200">${windSpeed !== null ? windSpeed.toFixed(1) + ' mph' : '--'}</div>
+                        ${previousWindSpeed !== null ? `<div class="text-slate-500 text-[10px]">Prev: ${previousWindSpeed.toFixed(1)} mph</div>` : ''}
                     </div>
                     <div class="text-center">
                         <span class="text-slate-500">Precip</span>
                         <div class="text-slate-200">${precipitation !== null ? precipitation.toFixed(2) + '"' : '--'}</div>
+                        ${previousPrecipitation !== null ? `<div class="text-slate-500 text-[10px]">Prev: ${previousPrecipitation.toFixed(2)}"</div>` : ''}
                     </div>
                 </div>
+                ${previousUpdate ? `<div class="mt-2 pt-2 border-t border-slate-700/50 text-[10px] text-slate-500">Previous: ${previousUpdateStr}</div>` : ''}
             </div>
         `;
     }).join('');
@@ -786,34 +868,12 @@ function updateLatencyMetrics(metrics) {
 
 /**
  * Update API fallback status panel
+ * NOTE: This function is kept for backward compatibility but is no longer called
+ * as the API Fallback panel was removed from the dashboard.
  */
 function updateApiFallbackStatus(status) {
-    if (!status) return;
-
-    const statusEl = document.getElementById('api-status');
-    const pollsEl = document.getElementById('api-polls');
-    const lastUpdateEl = document.getElementById('api-last-update');
-    const ratioEl = document.getElementById('api-ratio');
-
-    if (statusEl) {
-        statusEl.textContent = status.status;
-        const statusColors = {
-            'ACTIVE': 'text-emerald-400',
-            'INACTIVE': 'text-slate-400',
-            'STANDBY': 'text-amber-400',
-        };
-        statusEl.className = `text-lg font-bold ${statusColors[status.status] || 'text-slate-400'}`;
-    }
-
-    if (pollsEl) pollsEl.textContent = status.totalPollsInWindow || 0;
-    if (lastUpdateEl) {
-        if (status.lastApiUpdate) {
-            lastUpdateEl.textContent = formatTimeAgo(new Date(status.lastApiUpdate));
-        } else {
-            lastUpdateEl.textContent = 'Never';
-        }
-    }
-    if (ratioEl) ratioEl.textContent = status.ratio || 'N/A';
+    // Function kept for backward compatibility - panel removed from dashboard
+    return;
 }
 
 /**
@@ -1280,23 +1340,7 @@ function updatePortfolioDisplay(data) {
         openPositionsEl.textContent = data.openPositions || '0';
     }
 
-    // Update Risk Panel
-    const riskCashEl = document.getElementById('risk-cash');
-    const riskAllocatedEl = document.getElementById('risk-allocated');
-    const riskBarEl = document.getElementById('risk-bar');
-    const riskTextEl = document.getElementById('risk-text');
-
-    if (riskCashEl) riskCashEl.textContent = `$${(data.currentCash || 0).toLocaleString()}`;
-    if (riskAllocatedEl) {
-        const allocated = (data.totalValue || 0) - (data.currentCash || 0);
-        riskAllocatedEl.textContent = `$${allocated.toLocaleString()}`;
-        
-        if (riskBarEl && riskTextEl && data.totalValue > 0) {
-            const percent = (allocated / data.totalValue) * 100;
-            riskBarEl.style.width = `${percent}%`;
-            riskTextEl.textContent = `${percent.toFixed(1)}% utilized`;
-        }
-    }
+    // Risk Panel removed from dashboard - code removed
 }
 
 

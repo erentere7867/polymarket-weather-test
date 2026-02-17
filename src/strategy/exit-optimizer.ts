@@ -164,12 +164,29 @@ export class ExitOptimizer {
     }
 
     /**
-     * Update configuration thresholds
+     * Validate and update configuration thresholds
+     * FIXED: Add range validation to ensure takeProfit > stopLoss and values are within reasonable bounds
      */
     updateConfig(takeProfit: number, stopLoss: number): void {
-        this.takeProfitThreshold = takeProfit;
-        this.stopLossThreshold = stopLoss;
-        logger.info(`ExitOptimizer config updated: TP=${(takeProfit * 100).toFixed(1)}%, SL=${(stopLoss * 100).toFixed(1)}%`);
+        // Validate ranges - takeProfit should be positive, stopLoss should be negative
+        const validatedTakeProfit = Math.max(0.01, Math.min(1.0, takeProfit));
+        const validatedStopLoss = Math.max(-1.0, Math.min(-0.01, stopLoss));
+        
+        // Ensure 2:1 risk-reward ratio minimum (takeProfit > |stopLoss|)
+        if (validatedTakeProfit <= Math.abs(validatedStopLoss)) {
+            logger.warn(`ExitOptimizer: takeProfit (${validatedTakeProfit}) must be > |stopLoss| (${Math.abs(validatedStopLoss)}). Adjusting to maintain 2:1 ratio.`);
+            // Adjust takeProfit to maintain 2:1 ratio
+            if (validatedStopLoss < 0) {
+                // Use the larger absolute value to maintain ratio
+                const minTakeProfit = Math.abs(validatedStopLoss) * 2;
+                this.takeProfitThreshold = Math.max(validatedTakeProfit, minTakeProfit);
+            }
+        } else {
+            this.takeProfitThreshold = validatedTakeProfit;
+        }
+        
+        this.stopLossThreshold = validatedStopLoss;
+        logger.info(`ExitOptimizer config updated: TP=${(this.takeProfitThreshold * 100).toFixed(1)}%, SL=${(this.stopLossThreshold * 100).toFixed(1)}%`);
     }
 
     /**

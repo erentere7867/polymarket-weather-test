@@ -43,7 +43,7 @@ export class EdgeCalculator {
     private marketModel: MarketModel;
     private minEdgeThreshold: number;
 
-    constructor(marketModel: MarketModel, minEdgeThreshold: number = 0.10) {
+    constructor(marketModel: MarketModel, minEdgeThreshold: number = config.minEdgeThreshold) {
         this.marketModel = marketModel;
         this.minEdgeThreshold = minEdgeThreshold;
     }
@@ -218,22 +218,24 @@ export class EdgeCalculator {
         }
 
         // 7. Calculate Kelly Criterion
-        // f = (bp - q) / b
-        // where b = odds - 1 (decimal odds = 1/price)
-        // p = probability
-        // q = 1-p
-
-        // Correct Kelly for binary options (price P, prob W):
-        // f = W/P - (1-W)/(1-P)
+        // Standard Kelly formula: f* = (bp - q) / b
+        // where b = odds received, p = probability of win, q = 1-p
+        
+        // For binary options:
+        // - price P = market's implied probability
+        // - payoutRatio = (1-P)/P = net profit per $1 stake if win
+        // - probWin = our estimated probability
         const probWin = side === 'yes' ? forecastProbability : (1 - forecastProbability);
-        const payoutRatio = (1 - price) / price; // Revenue/Risk
-
+        const payoutRatio = (1 - price) / price; // Net profit per $1 if win
+        
         let kelly = 0;
         if (payoutRatio > 0) {
+            // Standard Kelly: f = p - q/b = p - (1-p)/payoutRatio
+            // This gives the optimal fraction of bankroll to bet
             kelly = probWin - ((1 - probWin) / payoutRatio);
         }
 
-        // Fractional Kelly for safety (Half-Kelly or Quarter-Kelly)
+        // Fractional Kelly for safety (Quarter-Kelly is conservative)
         const safetyMultiplier = 0.25;
         const finalKelly = Math.max(0, kelly * safetyMultiplier);
 

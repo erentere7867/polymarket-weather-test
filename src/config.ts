@@ -47,6 +47,7 @@ export interface Config {
     SPEED_ARB_REQUIRE_THRESHOLD_CROSSING: boolean;  // Require threshold crossing for speed arbitrage (default: false)
     SPEED_ARB_MIN_CROSSING_DISTANCE: number;        // Minimum distance from threshold to consider crossing valid (default: 0.5)
     SPEED_ARB_REQUIRE_RAP_HRRR_CONFIRMATION: boolean; // Require RAP-HRRR confirmation for US cities (default: false for speed)
+    SPEED_ARB_MIN_SIGMA: number;         // Minimum sigma for speed arbitrage (default: 0.3)
 
     // Webhook-based forecast detection settings
     TOMORROW_WEBHOOK_SECRET: string;      // Secret for validating Tomorrow.io webhooks
@@ -281,6 +282,7 @@ export const config: Config = {
     SPEED_ARB_REQUIRE_THRESHOLD_CROSSING: getEnvVarBool('SPEED_ARB_REQUIRE_THRESHOLD_CROSSING', false), // DISABLED - capture more signals
     SPEED_ARB_MIN_CROSSING_DISTANCE: getEnvVarNumber('SPEED_ARB_MIN_CROSSING_DISTANCE', 0.5), // Min distance from threshold
     SPEED_ARB_REQUIRE_RAP_HRRR_CONFIRMATION: getEnvVarBool('SPEED_ARB_REQUIRE_RAP_HRRR_CONFIRMATION', false), // DISABLED for speed - trade on any model change
+    SPEED_ARB_MIN_SIGMA: getEnvVarNumber('SPEED_ARB_MIN_SIGMA', 0.3), // Minimum sigma for speed arbitrage (default: 0.3)
 
     // Webhook-based forecast detection settings
     TOMORROW_WEBHOOK_SECRET: getEnvVarOptional('TOMORROW_WEBHOOK_SECRET', ''),
@@ -379,7 +381,7 @@ export const config: Config = {
     // =====================================
     // NEW: Strategy Orchestrator Settings
     // =====================================
-    ENABLE_STRATEGY_ORCHESTRATOR: getEnvVarBool('ENABLE_STRATEGY_ORCHESTRATOR', true),
+    ENABLE_STRATEGY_ORCHESTRATOR: getEnvVarBool('ENABLE_STRATEGY_ORCHESTRATOR', false),  // Disabled to use SPEED_ARBITRAGE_MODE
     TARGET_WIN_RATE: getEnvVarNumber('TARGET_WIN_RATE', 0.80),
     MIN_WIN_RATE_ADJUSTMENT: getEnvVarNumber('MIN_WIN_RATE_ADJUSTMENT', 0.50),
     MAX_DAILY_TRADES: getEnvVarNumber('MAX_DAILY_TRADES', 50),

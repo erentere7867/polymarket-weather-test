@@ -46,6 +46,11 @@ interface CityCoverage {
     temperatureChange: number | null;
     windChange: number | null;
     precipChange: number | null;
+    // Previous forecast values for comparison
+    previousTemperature: number | null;
+    previousWindSpeed: number | null;
+    previousPrecipitation: number | null;
+    previousUpdate: string | null;
 }
 
 /**
@@ -313,6 +318,11 @@ export class DashboardController {
             temperatureChange: null,
             windChange: null,
             precipChange: null,
+            // Previous forecast values
+            previousTemperature: null,
+            previousWindSpeed: null,
+            previousPrecipitation: null,
+            previousUpdate: null,
         }));
     }
 
@@ -364,6 +374,22 @@ export class DashboardController {
                 c => c.cityName.toLowerCase() === cityData.cityName.toLowerCase()
             );
             if (city) {
+                // Store current values as previous before updating
+                // This preserves the "previous forecast" for display
+                if (city.temperature !== null) {
+                    city.previousTemperature = city.temperature;
+                }
+                if (city.windSpeed !== null) {
+                    city.previousWindSpeed = city.windSpeed;
+                }
+                if (city.precipitation !== null) {
+                    city.previousPrecipitation = city.precipitation;
+                }
+                if (city.lastUpdate !== null) {
+                    city.previousUpdate = city.lastUpdate;
+                }
+
+                // Update to new values
                 city.lastUpdate = payload.timestamp.toISOString();
                 city.confirmationStatus = 'FILE_CONFIRMED';
                 city.temperature = cityData.temperatureF;

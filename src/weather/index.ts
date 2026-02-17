@@ -9,6 +9,7 @@ import { WeatherProviderManager } from './provider-manager.js';
 import { WeatherData, HourlyForecast, Coordinates, CityLocation, KNOWN_CITIES, findCity } from './types.js';
 import { exceedanceProbability } from '../probability/normal-cdf.js';
 import { logger } from '../logger.js';
+import { DataStore } from '../realtime/data-store.js';
 
 // Export file-based ingestion components
 export { FileBasedIngestion } from './file-based-ingestion.js';
@@ -24,6 +25,7 @@ export { type WeatherData, type HourlyForecast, type Coordinates };
 export class WeatherService {
     private noaaClient: NOAAClient;
     private providerManager: WeatherProviderManager;
+    private dataStore: DataStore | null = null;
 
     // US bounding box (rough)
     private readonly US_BOUNDS = {
@@ -33,9 +35,17 @@ export class WeatherService {
         maxLon: -66.5,
     };
 
-    constructor() {
+    constructor(dataStore?: DataStore) {
         this.noaaClient = new NOAAClient();
         this.providerManager = new WeatherProviderManager();
+        this.dataStore = dataStore || null;
+    }
+
+    /**
+     * Set the DataStore instance for reading cached forecasts
+     */
+    public setDataStore(store: DataStore): void {
+        this.dataStore = store;
     }
 
     /**
@@ -284,6 +294,7 @@ export class WeatherService {
 
     /**
      * Get expected high temperature for a city on a specific date
+     * Reads from DataStore cache instead of making API calls
      */
     async getExpectedHigh(cityName: string, date: Date): Promise<number | null> {
         const city = findCity(cityName);
@@ -291,12 +302,20 @@ export class WeatherService {
             throw new Error(`Unknown city: ${cityName}`);
         }
 
-        const data = await this.getForecast(city.coordinates, city.country);
-        return WeatherService.calculateHigh(data, date);
+        // Try to get data from DataStore cache
+        const data = await this.getCachedWeatherData(cityName);
+        if (data) {
+            return WeatherService.calculateHigh(data, date);
+        }
+
+        // Fallback: return null if no cached data available
+        logger.warn(`[WeatherService] No cached data for ${cityName}, returning null for getExpectedHigh`);
+        return null;
     }
 
     /**
      * Get expected low temperature for a city on a specific date
+     * Reads from DataStore cache instead of making API calls
      */
     async getExpectedLow(cityName: string, date: Date): Promise<number | null> {
         const city = findCity(cityName);
@@ -304,12 +323,20 @@ export class WeatherService {
             throw new Error(`Unknown city: ${cityName}`);
         }
 
-        const data = await this.getForecast(city.coordinates, city.country);
-        return WeatherService.calculateLow(data, date);
+        // Try to get data from DataStore cache
+        const data = await this.getCachedWeatherData(cityName);
+        if (data) {
+            return WeatherService.calculateLow(data, date);
+        }
+
+        // Fallback: return null if no cached data available
+        logger.warn(`[WeatherService] No cached data for ${cityName}, returning null for getExpectedLow`);
+        return null;
     }
 
     /**
      * Get expected snowfall for a location over a date range
+     * Reads from DataStore cache instead of making API calls
      */
     async getExpectedSnowfall(cityName: string, date: Date, endDate: Date): Promise<number> {
         const city = findCity(cityName);
@@ -317,22 +344,70 @@ export class WeatherService {
             throw new Error(`Unknown city: ${cityName}`);
         }
 
-        const data = await this.getForecast(city.coordinates, city.country);
-        return WeatherService.calculateSnowfall(data, date, endDate);
+        // Try to get data from DataStore cache
+        const data = await this.getCachedWeatherData(cityName);
+        if (data) {
+            return WeatherService.calculateSnowfall(data, date, endDate);
+        }
+
+        // Fallback: return 0 if no cached data available
+        logger.warn(`[WeatherService] No cached data for ${cityName}, returning 0 for getExpectedSnowfall`);
+        return 0;
+    }
+
+    /**
+     * Get cached weather data from DataStore
+     * Searches through all markets to find one matching the city name
+     */
+    private async getCachedWeatherData(cityName: string): Promise<WeatherData | null> {
+        if (!this.dataStore) {
+            logger.warn('[WeatherService] DataStore not configured, cannot read cached weather data');
+            return null;
+        }
+
+        const city = findCity(cityName);
+        if (!city) {
+            return null;
+        }
+
+        const cityId = cityName.toLowerCase().replace(/\s+/g, '_');
+
+        // Find markets for this city
+        const markets = this.dataStore.getAllMarkets();
+        const matchingMarket = markets.find(m => {
+            const marketCityId = m.city?.toLowerCase().replace(/\s+/g, '_');
+            return marketCityId === cityId;
+        });
+
+        if (!matchingMarket) {
+            logger.debug(`[WeatherService] No market found for city: ${cityName}`);
+            return null;
+        }
+
+        // Get the market state to access the forecast
+        const marketState = this.dataStore.getMarketState(matchingMarket.market.id);
+        if (!marketState?.lastForecast?.weatherData) {
+            logger.debug(`[WeatherService] No forecast data in cache for market: ${matchingMarket.market.id}`);
+            return null;
+        }
+
+        return marketState.lastForecast.weatherData;
     }
 
     // --- Static Calculation Helpers (Efficient Processing) ---
 
     static calculateHigh(data: WeatherData, date: Date): number | null {
-        // Normalize the target date to midnight UTC for comparison
+        // Normalize the target date to YYYY-MM-DD string for comparison
+        // This avoids timezone issues with timestamp equality checks
         const targetDateObj = new Date(date);
         targetDateObj.setUTCHours(0, 0, 0, 0);
+        const targetDateStr = targetDateObj.toISOString().split('T')[0];
 
         const dayTemps = data.hourly
             .filter(h => {
                 const hourDate = new Date(h.timestamp);
-                hourDate.setUTCHours(0, 0, 0, 0);
-                return hourDate.getTime() === targetDateObj.getTime();
+                // Use date string comparison to avoid timestamp mismatch issues
+                return hourDate.toISOString().split('T')[0] === targetDateStr;
             })
             .map(h => h.temperatureF);
 
@@ -341,15 +416,17 @@ export class WeatherService {
     }
 
     static calculateLow(data: WeatherData, date: Date): number | null {
-        // Normalize the target date to midnight UTC for comparison
+        // Normalize the target date to YYYY-MM-DD string for comparison
+        // This avoids timezone issues with timestamp equality checks
         const targetDateObj = new Date(date);
         targetDateObj.setUTCHours(0, 0, 0, 0);
+        const targetDateStr = targetDateObj.toISOString().split('T')[0];
 
         const dayTemps = data.hourly
             .filter(h => {
                 const hourDate = new Date(h.timestamp);
-                hourDate.setUTCHours(0, 0, 0, 0);
-                return hourDate.getTime() === targetDateObj.getTime();
+                // Use date string comparison to avoid timestamp mismatch issues
+                return hourDate.toISOString().split('T')[0] === targetDateStr;
             })
             .map(h => h.temperatureF);
 

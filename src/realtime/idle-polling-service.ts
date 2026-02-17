@@ -270,6 +270,7 @@ export class IdlePollingService {
 
             if (market.metricType === 'temperature_high' || market.metricType === 'temperature_threshold') {
                 const high = WeatherService.calculateHigh(data, market.targetDate);
+                logger.info(`[IDLE POLL] ${cityId} ${market.metricType}: high=${high}°F, targetDate=${market.targetDate?.toISOString()}, source=${data.source}`);
                 if (high !== null && market.threshold !== undefined) {
                     forecastValue = high;
                     let thresholdF = market.threshold;
@@ -295,10 +296,11 @@ export class IdlePollingService {
             } else if (market.metricType === 'precipitation') {
                 const targetDateObj = new Date(market.targetDate);
                 targetDateObj.setUTCHours(0, 0, 0, 0);
+                const targetDateStr = targetDateObj.toISOString().split('T')[0];
                 const dayForecasts = data.hourly.filter((h: { timestamp: Date }) => {
                     const hourDate = new Date(h.timestamp);
-                    hourDate.setUTCHours(0, 0, 0, 0);
-                    return hourDate.getTime() === targetDateObj.getTime();
+                    // Use date string comparison to avoid timestamp mismatch issues
+                    return hourDate.toISOString().split('T')[0] === targetDateStr;
                 });
                 if (dayForecasts.length > 0) {
                     const maxPrecipProb = Math.max(...dayForecasts.map((h: { probabilityOfPrecipitation: number }) => h.probabilityOfPrecipitation));

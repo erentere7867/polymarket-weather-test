@@ -114,13 +114,33 @@ export class OpportunityDetector {
         const history = this.priceHistory.get(marketId) || [];
         const now = Date.now();
         
-        // Get prices from 5 minutes ago
-        const price5mAgo = history.find(h => now - h.timestamp >= 4.5 * 60 * 1000 && now - h.timestamp <= 5.5 * 60 * 1000);
-        const change5m = price5mAgo ? currentPrice - price5mAgo.price : 0;
+        // Get closest price to 5 minutes ago (find the entry closest to 5min mark)
+        const target5m = now - 5 * 60 * 1000;
+        let price5mAgo: { price: number; timestamp: number } | undefined;
+        let best5mDiff = Infinity;
+        for (const h of history) {
+            const diff = Math.abs(h.timestamp - target5m);
+            if (diff < best5mDiff && h.timestamp <= now) {
+                best5mDiff = diff;
+                price5mAgo = h;
+            }
+        }
+        // Only use if within 2 minutes of target (3-7 min ago)
+        const change5m = (price5mAgo && best5mDiff < 2 * 60 * 1000) ? currentPrice - price5mAgo.price : 0;
         
-        // Get prices from 1 minute ago
-        const price1mAgo = history.find(h => now - h.timestamp >= 0.9 * 60 * 1000 && now - h.timestamp <= 1.1 * 60 * 1000);
-        const change1m = price1mAgo ? currentPrice - price1mAgo.price : 0;
+        // Get closest price to 1 minute ago
+        const target1m = now - 1 * 60 * 1000;
+        let price1mAgo: { price: number; timestamp: number } | undefined;
+        let best1mDiff = Infinity;
+        for (const h of history) {
+            const diff = Math.abs(h.timestamp - target1m);
+            if (diff < best1mDiff && h.timestamp <= now) {
+                best1mDiff = diff;
+                price1mAgo = h;
+            }
+        }
+        // Only use if within 30 seconds of target (30s-90s ago)
+        const change1m = (price1mAgo && best1mDiff < 30 * 1000) ? currentPrice - price1mAgo.price : 0;
         
         // Determine direction relative to our edge
         // If edge > 0 (we want to buy YES), price going UP is against us
@@ -265,10 +285,11 @@ export class OpportunityDetector {
                 if (forecast) {
                     const targetDateObj = new Date(targetDate);
                     targetDateObj.setUTCHours(0, 0, 0, 0);
+                    const targetDateStr = targetDateObj.toISOString().split('T')[0];
                     const dayForecasts = forecast.hourly.filter(h => {
                         const hourDate = new Date(h.timestamp);
-                        hourDate.setUTCHours(0, 0, 0, 0);
-                        return hourDate.getTime() === targetDateObj.getTime();
+                        // Use date string comparison to avoid timestamp mismatch issues
+                        return hourDate.toISOString().split('T')[0] === targetDateStr;
                     });
                     if (dayForecasts.length > 0) {
                         precipProbability = Math.max(...dayForecasts.map(h => h.probabilityOfPrecipitation));
@@ -549,6 +570,34 @@ export class OpportunityDetector {
                 return null;
             }
 
+            // DEFENSIVE VALIDATION: Check if comparisonType aligns with forecast vs threshold
+            // This catches bugs like: forecast=66°F, threshold=64°F, comparisonType='below' (WRONG!)
+            if (market.threshold !== undefined && forecastValue !== undefined) {
+                const validationResult = this.validateComparisonType(
+                    market.comparisonType,
+                    market.threshold,
+                    forecastValue,
+                    market.thresholdUnit,
+                    market.metricType
+                );
+                
+                if (!validationResult.isValid) {
+                    logger.error(
+                        `⚠️ COMPARISON TYPE MISMATCH DETECTED: ${market.market.question}`,
+                        {
+                            comparisonType: market.comparisonType,
+                            threshold: market.threshold,
+                            thresholdUnit: market.thresholdUnit,
+                            forecastValue,
+                            issue: validationResult.issue,
+                            expectedComparisonType: validationResult.expectedComparisonType
+                        }
+                    );
+                    // Don't trade on markets with mismatched comparison types
+                    return null;
+                }
+            }
+
             // Market implied probability (YES price = probability of YES outcome)
             const marketProbability = market.yesPrice;
 
@@ -636,7 +685,13 @@ export class OpportunityDetector {
             let edge = finalProbability - marketProbability;
             
             // Check for late trade (information already priced in)
-            const lateTradeCheck = this.isLateTrade(market, edge, snapshotTimestamp);
+            // Use actual forecast timestamp from DataStore, not snapshotTimestamp (which is always "now")
+            let actualForecastTimestamp: Date | undefined;
+            if (this.store) {
+                const marketState = this.store.getMarketState(market.market.id);
+                actualForecastTimestamp = marketState?.lastForecast?.changeTimestamp;
+            }
+            const lateTradeCheck = this.isLateTrade(market, edge, actualForecastTimestamp);
             
             if (lateTradeCheck.isLate) {
                 logger.warn(`⚠️ ${lateTradeCheck.reason}`);
@@ -678,18 +733,30 @@ export class OpportunityDetector {
             const effectiveThreshold = isGuaranteed ? 0.05 : config.minEdgeThreshold;
 
             if (absEdge >= effectiveThreshold) {
-                if (edge > 0) {
-                    // Forecast says higher probability than market -> buy YES
-                    action = 'buy_yes';
-                    reason = isGuaranteed
-                        ? `🎯 GUARANTEED: ${certaintySigma?.toFixed(1)}σ confidence`
-                        : `Forecast higher than market by ${(absEdge * 100).toFixed(1)}%`;
-                } else {
-                    // Forecast says lower probability than market -> buy NO
-                    action = 'buy_no';
-                    reason = isGuaranteed
-                        ? `🎯 GUARANTEED: ${certaintySigma?.toFixed(1)}σ confidence`
-                        : `Forecast lower than market by ${(absEdge * 100).toFixed(1)}%`;
+                // SAFETY VALIDATION: Ensure action aligns with forecast vs threshold
+                // This is an additional check to prevent contradictory trades
+                const safetyCheck = this.validateTradeAction(
+                    action,
+                    forecastValue,
+                    normalizedThreshold,
+                    market.comparisonType,
+                    market.metricType
+                );
+                
+                if (!safetyCheck.isValid) {
+                    logger.error(
+                        `⚠️ SAFETY VALIDATION FAILED: ${market.market.question}`,
+                        {
+                            action,
+                            forecastValue,
+                            threshold: normalizedThreshold,
+                            comparisonType: market.comparisonType,
+                            issue: safetyCheck.issue
+                        }
+                    );
+                    // Don't execute trade that contradicts the forecast
+                    action = 'none';
+                    reason = `Safety check failed: ${safetyCheck.issue}`;
                 }
             } else {
                 reason = `Edge ${(absEdge * 100).toFixed(1)}% below threshold ${(effectiveThreshold * 100).toFixed(0)}%`;
@@ -957,15 +1024,16 @@ export class OpportunityDetector {
                 // Fallback to API call
                 const forecast = await this.weatherService.getForecastByCity(market.city);
 
-                // Normalize target date for comparison
+                // Normalize target date for comparison - use date string comparison
                 const targetDateObj = new Date(targetDate);
                 targetDateObj.setUTCHours(0, 0, 0, 0);
+                const targetDateStr = targetDateObj.toISOString().split('T')[0];
 
                 // Find precipitation probability for target date
                 const dayForecasts = forecast.hourly.filter(h => {
                     const hourDate = new Date(h.timestamp);
-                    hourDate.setUTCHours(0, 0, 0, 0);
-                    return hourDate.getTime() === targetDateObj.getTime();
+                    // Use date string comparison to avoid timestamp mismatch issues
+                    return hourDate.toISOString().split('T')[0] === targetDateStr;
                 });
 
                 if (dayForecasts.length === 0) {
@@ -1136,5 +1204,132 @@ export class OpportunityDetector {
         }
 
         return { probability, sigma };
+    }
+
+    /**
+     * Validate that comparisonType makes sense given the forecast and threshold
+     * This is a defensive check to catch parsing bugs where comparisonType is wrong
+     * 
+     * @returns {isValid: boolean, issue?: string, expectedComparisonType?: string}
+     */
+    private validateComparisonType(
+        comparisonType: string | undefined,
+        threshold: number,
+        forecastValue: number,
+        thresholdUnit: 'F' | 'C' | 'inches' | undefined,
+        metricType: string
+    ): { isValid: boolean; issue?: string; expectedComparisonType?: string } {
+        
+        // If comparisonType is undefined, we can't validate
+        if (comparisonType === undefined) {
+            return {
+                isValid: false,
+                issue: 'comparisonType is undefined - market parsing may have failed',
+                expectedComparisonType: 'above or below'
+            };
+        }
+
+        // For non-temperature metrics, skip validation
+        if (!metricType.includes('temperature')) {
+            return { isValid: true };
+        }
+
+        // Normalize threshold to Fahrenheit for comparison
+        let thresholdF = threshold;
+        if (thresholdUnit === 'C') {
+            thresholdF = (threshold * 9 / 5) + 32;
+        }
+
+        // Calculate how far the forecast is from the threshold
+        const diff = forecastValue - thresholdF;
+        
+        // Determine what the expected comparison type should be based on forecast vs threshold
+        // Use a small buffer (±2°F) to account for uncertainty
+        let expectedComparisonType: 'above' | 'below';
+        if (diff > 2) {
+            // Forecast is significantly above threshold
+            expectedComparisonType = 'above';
+        } else if (diff < -2) {
+            // Forecast is significantly below threshold
+            expectedComparisonType = 'below';
+        } else {
+            // Forecast is close to threshold - can't determine, skip validation
+            return { isValid: true };
+        }
+
+        // Check if actual comparisonType matches expected
+        if (comparisonType !== expectedComparisonType) {
+            return {
+                isValid: false,
+                issue: `comparisonType is '${comparisonType}' but forecast (${forecastValue}°F) is ${diff > 0 ? 'above' : 'below'} threshold (${thresholdF}°F)`,
+                expectedComparisonType
+            };
+        }
+
+        return { isValid: true };
+    }
+
+    /**
+     * Validate that the trading action aligns with forecast vs threshold
+     * This is the final safety check before trade execution
+     * 
+     * @returns {isValid: boolean, issue?: string}
+     */
+    private validateTradeAction(
+        action: TradingOpportunity['action'],
+        forecastValue: number | undefined,
+        threshold: number | undefined,
+        comparisonType: string | undefined,
+        metricType: string
+    ): { isValid: boolean; issue?: string } {
+        
+        // Skip validation for non-temperature metrics or if no action
+        if (action === 'none' || !metricType.includes('temperature') || forecastValue === undefined || threshold === undefined) {
+            return { isValid: true };
+        }
+
+        // Determine expected action based on forecast vs threshold
+        // Use a small buffer (±2°F) for uncertainty
+        const diff = forecastValue - threshold;
+        
+        let expectedAction: TradingOpportunity['action'];
+        
+        if (comparisonType === 'above') {
+            // Market asks: "Will temp be above threshold?"
+            // If forecast > threshold + buffer, expected is YES (buy_yes)
+            // If forecast < threshold - buffer, expected is NO (buy_no)
+            if (diff > 2) {
+                expectedAction = 'buy_yes';
+            } else if (diff < -2) {
+                expectedAction = 'buy_no';
+            } else {
+                // Forecast is close to threshold, can't determine
+                return { isValid: true };
+            }
+        } else if (comparisonType === 'below') {
+            // Market asks: "Will temp be below threshold?"
+            // If forecast < threshold - buffer, expected is YES (buy_yes)
+            // If forecast > threshold + buffer, expected is NO (buy_no)
+            if (diff < -2) {
+                expectedAction = 'buy_yes';
+            } else if (diff > 2) {
+                expectedAction = 'buy_no';
+            } else {
+                return { isValid: true };
+            }
+        } else {
+            // Unknown comparison type, skip validation
+            return { isValid: true };
+        }
+
+        // Check if action matches expected
+        if (action !== expectedAction) {
+            return {
+                isValid: false,
+                issue: `Action is '${action}' but forecast (${forecastValue}°F) vs threshold (${threshold}°F) with comparison '${comparisonType}' suggests '${expectedAction}'`
+            };
+        }
+
+        return { isValid: true };
     }
 }
