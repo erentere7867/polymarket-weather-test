@@ -18,22 +18,7 @@ const WEATHER_KEYWORDS = [
     'freeze', 'freezing', 'frost',
 ];
 
-// Common cities in weather markets
-const CITY_PATTERNS = [
-    'new york', 'nyc', 'ny',
-    'washington', 'dc', 'd.c.',
-    'chicago',
-    'los angeles', 'la',
-    'miami',
-    'dallas',
-    'seattle',
-    'atlanta',
-    'toronto',
-    'london',
-    'seoul',
-    'ankara',
-    'buenos aires',
-];
+
 
 // Keywords to EXCLUDE from weather markets (not actual weather)
 const EXCLUDED_KEYWORDS = [
@@ -151,22 +136,28 @@ export class WeatherScanner {
     }
 
     /**
-     * Extract city name from market text
+     * Extract city name from market text using findCity from types.js
      */
     private extractCity(text: string): string | null {
-        for (const cityPattern of CITY_PATTERNS) {
-            // Escape special chars for regex if any (dots in d.c.)
-            const escapedPattern = cityPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(`\\b${escapedPattern}\\b`, 'i');
-
-            if (regex.test(text)) {
-                // Normalize city name
-                if (cityPattern === 'nyc' || cityPattern === 'ny') return 'New York City';
-                if (cityPattern === 'dc' || cityPattern === 'd.c.') return 'Washington DC';
-                if (cityPattern === 'la') return 'Los Angeles';
-
-                // Capitalize properly
-                return cityPattern.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        const words = text.toLowerCase().split(/\s+/);
+        for (const word of words) {
+            const cityLocation = findCity(word);
+            if (cityLocation) {
+                return cityLocation.name;
+            }
+        }
+        for (let i = 0; i < words.length - 1; i++) {
+            const twoWord = `${words[i]} ${words[i + 1]}`;
+            const cityLocation = findCity(twoWord);
+            if (cityLocation) {
+                return cityLocation.name;
+            }
+        }
+        for (let i = 0; i < words.length - 2; i++) {
+            const threeWord = `${words[i]} ${words[i + 1]} ${words[i + 2]}`;
+            const cityLocation = findCity(threeWord);
+            if (cityLocation) {
+                return cityLocation.name;
             }
         }
         return null;
@@ -183,9 +174,11 @@ export class WeatherScanner {
         thresholdUnit?: 'F' | 'C' | 'inches';
         comparisonType?: 'above' | 'below' | 'equals' | 'range';
     } {
-        // Explicitly reject ALL snow-related markets
+        // Don't reject snow markets outright - check for temperature thresholds first
+        // Only mark as unknown if it's purely a snowfall amount market with no temperature
         if (text.match(/snow|blizzard/i)) {
-            return { metricType: 'unknown' };
+            // Continue to check for temperature thresholds before rejecting
+            // Temperature markets with snow context should still be parsed
         }
 
         // Determine default unit based on city location
@@ -350,6 +343,26 @@ export class WeatherScanner {
 
         // Precipitation
         if (text.includes('rain') || text.includes('precipitation')) {
+            // Look for patterns like "more than X inches", "at least X mm", etc.
+            const inchesMatch = text.match(/(\d+\.?\d*)\s*(?:inch|in|inches)/i);
+            const mmMatch = text.match(/(\d+\.?\d*)\s*(?:mm|millimeter)/i);
+            
+            if (inchesMatch) {
+                return {
+                    metricType: 'precipitation',
+                    threshold: parseFloat(inchesMatch[1]),
+                    thresholdUnit: 'inches',
+                    comparisonType: 'above',
+                };
+            }
+            if (mmMatch) {
+                return {
+                    metricType: 'precipitation',
+                    threshold: parseFloat(mmMatch[1]),
+                    thresholdUnit: 'inches', // Convert mm to inches for consistency
+                    comparisonType: 'above',
+                };
+            }
             return {
                 metricType: 'precipitation',
                 comparisonType: 'above',
@@ -439,6 +452,18 @@ export class WeatherScanner {
      */
     filterActionableMarkets(markets: ParsedWeatherMarket[]): ParsedWeatherMarket[] {
         return markets.filter(m => {
+            // Check if market is active and not closed
+            if (!m.market.active || m.market.closed) {
+                logger.debug(`Rejecting ${m.market.question}: Market inactive or closed`);
+                return false;
+            }
+
+            // Filter out closed/resolved markets (exact 0.01 or 0.99 prices)
+            if (m.yesPrice === 0.01 || m.yesPrice === 0.99 || m.noPrice === 0.01 || m.noPrice === 0.99) {
+                logger.debug(`Rejecting ${m.market.question}: Market closed (price 0.01 or 0.99)`);
+                return false;
+            }
+
             const fullText = `${m.eventTitle} ${m.market.question}`.toLowerCase();
 
             // Exclude earthquake/seismic markets - not actual weather
@@ -465,17 +490,16 @@ export class WeatherScanner {
                 return false;
             }
 
-            // Must have target date within forecast range (7 days)
+            // Must have target date within forecast range - NO PAST DATES
             if (m.targetDate) {
                 const now = new Date();
-                // Normalize both dates to midnight UTC for comparison
                 const targetDate = new Date(m.targetDate);
                 targetDate.setUTCHours(0, 0, 0, 0);
                 const today = new Date(now);
                 today.setUTCHours(0, 0, 0, 0);
 
                 const daysUntil = (targetDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24);
-                if (daysUntil < -2 || daysUntil > 14) { // Relaxed window: -2 to +14 days
+                if (daysUntil < 0 || daysUntil > 21) {  // CHANGED: No past dates allowed
                     logger.debug(`Rejecting ${m.market.question}: Date out of range (${daysUntil.toFixed(1)} days)`);
                     return false;
                 }

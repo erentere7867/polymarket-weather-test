@@ -8,7 +8,6 @@ import { ScheduleManager } from '../weather/schedule-manager.js';
 import { S3FileDetector } from '../weather/s3-file-detector.js';
 import { GRIB2Parser } from '../weather/grib2-parser.js';
 import { FileBasedIngestion } from '../weather/file-based-ingestion.js';
-import { ApiFallbackPoller } from '../weather/api-fallback-poller.js';
 import { ConfirmationManager } from '../weather/confirmation-manager.js';
 import { EventBus } from '../realtime/event-bus.js';
 import {
@@ -597,103 +596,6 @@ describe('GRIB2Parser', () => {
                 forecastHour: 0,
             });
             expect(result).toBeInstanceOf(Promise);
-        });
-    });
-});
-
-describe('ApiFallbackPoller', () => {
-    let poller: ApiFallbackPoller;
-    let eventBus: EventBus;
-
-    beforeEach(() => {
-        EventBus.resetInstance();
-        eventBus = EventBus.getInstance();
-        poller = new ApiFallbackPoller({
-            pollIntervalMs: 100,
-            maxDurationMinutes: 1,
-        });
-    });
-
-    afterEach(() => {
-        poller.dispose();
-        EventBus.resetInstance();
-    });
-
-    describe('Polling Lifecycle', () => {
-        it('should start polling on window start', () => {
-            expect(poller.getActiveSessionCount()).toBe(0);
-
-            poller.startPolling('HRRR', 12, new Date());
-            expect(poller.getActiveSessionCount()).toBe(1);
-
-            const sessions = poller.getActiveSessions();
-            expect(sessions[0].model).toBe('HRRR');
-            expect(sessions[0].cycleHour).toBe(12);
-        });
-
-        it('should not start duplicate polling sessions', () => {
-            poller.startPolling('HRRR', 12, new Date());
-            poller.startPolling('HRRR', 12, new Date()); // Duplicate
-
-            expect(poller.getActiveSessionCount()).toBe(1);
-        });
-
-        it('should stop polling on FILE_CONFIRMED', () => {
-            poller.startPolling('HRRR', 12, new Date());
-            expect(poller.getActiveSessionCount()).toBe(1);
-
-            // Emit FILE_CONFIRMED event
-            eventBus.emit({
-                type: 'FILE_CONFIRMED',
-                payload: {
-                    model: 'HRRR',
-                    cycleHour: 12,
-                    forecastHour: 0,
-                    cityData: [],
-                    timestamp: new Date(),
-                    source: 'FILE',
-                    detectionLatencyMs: 100,
-                    downloadTimeMs: 500,
-                    parseTimeMs: 150,
-                    fileSize: 1024000,
-                },
-            });
-
-            expect(poller.getActiveSessionCount()).toBe(0);
-        });
-    });
-
-    describe('Event Emission', () => {
-        it('should emit API_DATA_RECEIVED events', (done) => {
-            eventBus.on('API_DATA_RECEIVED', (event) => {
-                if (event.type === 'API_DATA_RECEIVED') {
-                    expect(event.payload.model).toBe('HRRR');
-                    expect(event.payload.confidence).toBe('LOW');
-                    expect(event.payload.source).toBe('API');
-                    expect(event.payload.status).toBe('UNCONFIRMED');
-                    done();
-                }
-            });
-
-            // Manually emit to test structure
-            eventBus.emit({
-                type: 'API_DATA_RECEIVED',
-                payload: {
-                    cityId: 'new_york_city',
-                    cityName: 'New York City',
-                    model: 'HRRR',
-                    cycleHour: 12,
-                    forecastHour: 0,
-                    temperatureC: 20,
-                    temperatureF: 68,
-                    windSpeedMph: 10,
-                    precipitationMm: 0,
-                    timestamp: new Date(),
-                    confidence: 'LOW',
-                    source: 'API',
-                    status: 'UNCONFIRMED',
-                },
-            });
         });
     });
 });

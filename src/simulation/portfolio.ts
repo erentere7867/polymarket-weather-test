@@ -24,6 +24,9 @@ export interface SimulatedPosition {
     exitPrice?: number;
     exitTime?: Date;
     realizedPnL?: number;
+    sigma?: number;
+    signalType?: 'forecast_change' | 'high_confidence' | 'standard';
+    entryForecastValue?: number;
 }
 
 export interface PortfolioStats {

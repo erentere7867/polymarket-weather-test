@@ -297,9 +297,11 @@ export class GRIB2Parser {
                 coordinates: city.coordinates,
                 temperatureC,
                 temperatureF,
+                dailyHighF,
+                dailyLowF,
                 hourlyTempsF,
                 forecastHours: forecastHoursExtracted,
-                windSpeedMps: 0,  // Will be populated from single-hour extraction if needed
+                windSpeedMps: 0,
                 windSpeedMph: 0,
                 windDirection: 0,
                 precipitationRateMmHr: 0,
@@ -642,9 +644,10 @@ export class GRIB2Parser {
                         coordinates: city.coordinates,
                         temperatureC,
                         temperatureF,
-                        // Backward compatibility: single forecast hour = use f003
+                        dailyHighF: temperatureF,
+                        dailyLowF: temperatureF,
                         hourlyTempsF: [temperatureF],
-                        forecastHours: [3], // Default to f003
+                        forecastHours: [3],
                         windSpeedMps,
                         windSpeedMph: windSpeedMps * 2.23694,
                         windDirection,
@@ -804,9 +807,10 @@ export class GRIB2Parser {
                 coordinates: city.coordinates,
                 temperatureC,
                 temperatureF,
-                // Backward compatibility: single forecast hour = use f003
+                dailyHighF: temperatureF,
+                dailyLowF: temperatureF,
                 hourlyTempsF: [temperatureF],
-                forecastHours: [3], // Default to f003
+                forecastHours: [3],
                 windSpeedMps,
                 windSpeedMph: windSpeedMps * 2.23694,
                 windDirection,

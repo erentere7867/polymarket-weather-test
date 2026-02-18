@@ -10,7 +10,6 @@ import { EventBus, eventBus } from '../realtime/event-bus.js';
 import { DataStore } from '../realtime/data-store.js';
 import { FileBasedIngestion } from '../weather/file-based-ingestion.js';
 import { ScheduleManager } from '../weather/schedule-manager.js';
-import { ApiFallbackPoller } from '../weather/api-fallback-poller.js';
 import { ModelType, DetectionWindow, CityModelConfig, CITY_MODEL_CONFIGS } from '../weather/types.js';
 import { logger } from '../logger.js';
 
@@ -111,7 +110,6 @@ export class DashboardController {
     private dataStore: DataStore;
     private fileIngestion?: FileBasedIngestion;
     private scheduleManager?: ScheduleManager;
-    private apiFallbackPoller?: ApiFallbackPoller;
     private wss?: WebSocketServer;
     private clients: Set<WebSocket> = new Set();
     private unsubscribers: (() => void)[] = [];
@@ -134,14 +132,12 @@ export class DashboardController {
     constructor(
         dataStore: DataStore,
         fileIngestion?: FileBasedIngestion,
-        scheduleManager?: ScheduleManager,
-        apiFallbackPoller?: ApiFallbackPoller
+        scheduleManager?: ScheduleManager
     ) {
         this.eventBus = EventBus.getInstance();
         this.dataStore = dataStore;
         this.fileIngestion = fileIngestion;
         this.scheduleManager = scheduleManager;
-        this.apiFallbackPoller = apiFallbackPoller;
 
         this.setupEventListeners();
         this.initializeCityCoverage();
@@ -590,8 +586,6 @@ export class DashboardController {
             } else {
                 mode = 'FILE_PRIMARY';
             }
-        } else if (this.apiFallbackPoller) {
-            mode = 'API_FALLBACK';
         }
 
         return {
@@ -680,8 +674,8 @@ export class DashboardController {
         const total = fileConfirmations + apiConfirmations;
 
         return {
-            status: this.apiFallbackPoller ? 'STANDBY' : 'INACTIVE',
-            activeSessions: 0, // Would need to expose from ApiFallbackPoller
+            status: 'INACTIVE',
+            activeSessions: 0,
             totalPollsInWindow: apiConfirmations,
             lastApiUpdate: eventStats.lastApiDataTime,
             fileConfirmations,

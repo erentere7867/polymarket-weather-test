@@ -30,7 +30,6 @@ import { ApiCallTracker, apiCallTracker } from './api-call-tracker.js';
 import { ForecastStateMachine } from './forecast-state-machine.js';
 import { DataStore } from './data-store.js';
 import { logger } from '../logger.js';
-import { WeatherProviderManager } from '../weather/provider-manager.js';
 import { WeatherService, FileBasedIngestion, ConfirmationManager } from '../weather/index.js';
 import { findCity, CityLocation, Coordinates, ModelType, type WeatherData } from '../weather/types.js';
 import { config } from '../config.js';
@@ -322,7 +321,6 @@ export class HybridWeatherController extends EventEmitter {
     private stateMachine: ForecastStateMachine;
     private dataStore: DataStore;
     private apiTracker: ApiCallTracker;
-    private providerManager: WeatherProviderManager;
     private weatherService: WeatherService;
     
     // File-based ingestion components
@@ -392,13 +390,12 @@ export class HybridWeatherController extends EventEmitter {
     // Track last update state for each city for arbitration
     private cityUpdateStates: Map<string, CityUpdateState> = new Map();
 
-    // Track markets that have received their first file-based forecast (prevents trading on initial data)
-    private initializedFileMarkets: Set<string> = new Set();
+    // Track markets that have received their first forecast from ANY source (prevents trading on initial data)
+    private initializedMarkets: Set<string> = new Set();
 
     constructor(
         stateMachine: ForecastStateMachine,
         dataStore: DataStore,
-        providerManager?: WeatherProviderManager,
         weatherService?: WeatherService
     ) {
         super();
@@ -406,7 +403,6 @@ export class HybridWeatherController extends EventEmitter {
         this.stateMachine = stateMachine;
         this.dataStore = dataStore;
         this.apiTracker = apiCallTracker;
-        this.providerManager = providerManager || new WeatherProviderManager();
         this.weatherService = weatherService || new WeatherService();
         this.eventBus = EventBus.getInstance();
         
@@ -535,6 +531,7 @@ export class HybridWeatherController extends EventEmitter {
             coordinates: Coordinates;
             temperatureC: number;
             temperatureF: number;
+            dailyHighF?: number;
             windSpeedMps: number;
             windSpeedMph: number;
             windDirection: number;
@@ -582,7 +579,7 @@ export class HybridWeatherController extends EventEmitter {
             const cityId = cityData.cityName.toLowerCase().replace(/\s+/g, '_');
 
             // ALWAYS update per-model forecast cache (O(1) write) — needed for consensus detection
-            this.dataStore.updateModelForecast(cityId, payload.model, cityData.temperatureF);
+            this.dataStore.updateModelForecast(cityId, payload.model, cityData.dailyHighF ?? cityData.temperatureF);
             
             // DUAL MODEL ARBITRATION LOGIC
             // Check if we should update this city based on model priority/timing
@@ -641,7 +638,7 @@ export class HybridWeatherController extends EventEmitter {
                         }
                     } else if (market.metricType === 'temperature_range') {
                         if (market.minThreshold !== undefined && market.maxThreshold !== undefined) {
-                            forecastValue = cityData.temperatureF;
+                            forecastValue = cityData.dailyHighF ?? cityData.temperatureF;
 
                             let minF = market.minThreshold;
                             let maxF = market.maxThreshold;
@@ -666,9 +663,11 @@ export class HybridWeatherController extends EventEmitter {
                     const changeAmount = previousValue !== undefined ? Math.abs(forecastValue - previousValue) : 0;
 
                     // Track first-seen markets — initial data is NOT a forecast change
-                    const isFirstSeen = !this.initializedFileMarkets.has(marketId);
+                    // Uses unified set for all sources (API, file-based, etc.) to prevent
+                    // false "first-seen" when switching between data sources
+                    const isFirstSeen = !this.initializedMarkets.has(marketId);
                     if (isFirstSeen) {
-                        this.initializedFileMarkets.add(marketId);
+                        this.initializedMarkets.add(marketId);
                     }
 
                     // Real change = value changed significantly AND this is NOT the first time seeing this market
@@ -708,7 +707,7 @@ export class HybridWeatherController extends EventEmitter {
                     payload: {
                         cityId,
                         provider: payload.model,
-                        newValue: cityData.temperatureF,
+                        newValue: cityData.dailyHighF ?? cityData.temperatureF,
                         changeAmount: 1.0,
                         timestamp: new Date(),
                     },
@@ -720,8 +719,9 @@ export class HybridWeatherController extends EventEmitter {
             const prevState = this.dataStore.getMarketState(
                 matchingMarkets.length > 0 ? matchingMarkets[0].market.id : ''
             );
-            const oldTempF = prevState?.lastForecast?.forecastValue ?? cityData.temperatureF;
-            const tempChangeAmount = Math.abs(cityData.temperatureF - oldTempF);
+            const currentTempF = cityData.dailyHighF ?? cityData.temperatureF;
+            const oldTempF = prevState?.lastForecast?.forecastValue ?? currentTempF;
+            const tempChangeAmount = Math.abs(currentTempF - oldTempF);
 
             this.eventBus.emit({
                 type: 'FORECAST_CHANGE',
@@ -730,7 +730,7 @@ export class HybridWeatherController extends EventEmitter {
                     cityName: cityData.cityName,
                     variable: 'TEMPERATURE' as const,
                     oldValue: (oldTempF - 32) * 5 / 9,       // Convert F → C for run history
-                    newValue: cityData.temperatureC,           // Already in Celsius
+                    newValue: (currentTempF - 32) * 5 / 9,    // Daily high in Celsius
                     changeAmount: tempChangeAmount * 5 / 9,    // Delta in Celsius
                     changePercent: oldTempF !== 0 ? (tempChangeAmount / Math.abs(oldTempF)) * 100 : 0,
                     model: payload.model,
@@ -783,65 +783,18 @@ export class HybridWeatherController extends EventEmitter {
     /**
      * Determines if a new forecast should be applied based on arbitration rules.
      * 
-     * SPEED_ARBITRAGE_MODE (default): First-model-wins.
+     * SPEED_ARBITRAGE_MODE: First-model-wins.
      * Accept ANY model update immediately — trade on whichever model publishes first.
      * Zero additional latency. All models feed all cities.
      * 
-     * Legacy mode (SPEED_ARBITRAGE_MODE=false):
-     * 1. Race: Whichever arrives first triggers update.
-     * 2. ECMWF Preference: If ECMWF arrives after GFS, always update.
-     * 3. GFS Restriction: If GFS arrives after ECMWF within 5-60min, ignore.
+     * All model updates are processed regardless of source or timing.
+     * This ensures fastest possible trading on any model change.
      */
     private shouldUpdateForecast(
         cityId: string, 
         newModel: ModelType, 
-        newTimestamp: Date // Current wall-clock time
+        newTimestamp: Date
     ): boolean {
-        // SPEED ARBITRAGE MODE: Accept every model update immediately
-        // This is the critical path — no blocking, no delays
-        if (config.SPEED_ARBITRAGE_MODE) {
-            return true;
-        }
-
-        // --- Legacy arbitration logic (only when speed mode is off) ---
-        const currentState = this.cityUpdateStates.get(cityId);
-
-        // Rule 1: First arrival (no previous state) -> Update
-        if (!currentState) {
-            return true;
-        }
-
-        // Rule 2: ECMWF Preference
-        if (newModel === 'ECMWF') {
-            return true; 
-        }
-
-        // Rule 3: GFS Handling
-        if (newModel === 'GFS') {
-            if (currentState.lastUpdateSource === 'GFS') {
-                return true;
-            }
-
-            if (currentState.lastUpdateSource === 'ECMWF') {
-                const timeSinceLastUpdateMs = newTimestamp.getTime() - currentState.lastUpdateTimestamp.getTime();
-                const timeSinceLastUpdateMinutes = timeSinceLastUpdateMs / (1000 * 60);
-
-                if (timeSinceLastUpdateMinutes < 5) {
-                    logger.info(`Ignoring GFS update for ${cityId}: Too close to ECMWF update (${timeSinceLastUpdateMinutes.toFixed(1)}m)`);
-                    return false;
-                }
-
-                if (timeSinceLastUpdateMinutes > 60) {
-                     logger.info(`Accepting GFS update for ${cityId}: Significantly fresher than ECMWF (${timeSinceLastUpdateMinutes.toFixed(1)}m)`);
-                    return true;
-                }
-
-                logger.info(`Ignoring GFS update for ${cityId}: Within ECMWF preference window (${timeSinceLastUpdateMinutes.toFixed(1)}m)`);
-                return false;
-            }
-        }
-
-        // Default: Allow update
         return true;
     }
 
@@ -1430,18 +1383,10 @@ export class HybridWeatherController extends EventEmitter {
 
     /**
      * Start early detection polling (faster interval)
+     * DISABLED: API polling removed - file-based ingestion only
      */
     private startEarlyDetectionPolling(): void {
-        logger.info('🚨 Starting early detection polling (every 1s)');
-        this.pollingActive = true;
-
-        // Execute first poll immediately
-        this.executePoll();
-
-        // Set up interval (1 second for early detection)
-        this.pollIntervalId = setInterval(() => {
-            this.executePoll();
-        }, EARLY_DETECTION_CONFIG.pollIntervalMs);
+        logger.info('🚨 Early detection polling disabled - file-based ingestion only');
     }
 
     // ====================
@@ -1450,22 +1395,15 @@ export class HybridWeatherController extends EventEmitter {
 
     /**
      * Start polling during detection window
+     * DISABLED: API polling removed - file-based ingestion only
      */
     private startPolling(): void {
         if (this.pollingActive) {
             return;
         }
 
-        logger.info('📡 Starting detection window polling (every 2s)');
-        this.pollingActive = true;
-
-        // Execute first poll immediately
-        this.executePoll();
-
-        // Set up interval (2 seconds as requested)
-        this.pollIntervalId = setInterval(() => {
-            this.executePoll();
-        }, 2000);
+        logger.info('📡 Detection window polling disabled - file-based ingestion only');
+        this.pollingActive = false;
     }
 
     /**
@@ -1486,270 +1424,31 @@ export class HybridWeatherController extends EventEmitter {
     }
 
     /**
-     * Execute a single poll using Open-Meteo with MeteoSource fallback
+     * Execute a single poll
+     * DISABLED: API polling removed - file-based ingestion only
      */
     private async executePoll(): Promise<void> {
-        if (!this.pollingActive) {
-            return;
-        }
-
-        // Check if Open-Meteo quota exceeded
-        if (this.apiTracker.isQuotaExceeded('openmeteo')) {
-            logger.warn('Open-Meteo quota exceeded, falling back to MeteoSource');
-            await this.executeMeteoSourcePoll();
-            return;
-        }
-
-        // Get active cities (exclude file-confirmed cities and FETCH_MODE cities)
-        let cities: string[] = [];
-        for (const cityId of this.state.activeCities) {
-            if (!this.fileConfirmedCities.has(cityId) && !this.stateMachine.isInFetchMode(cityId)) {
-                cities.push(cityId);
-            }
-        }
-        
-        if (cities.length === 0) {
-            // No active cities, poll all known cities from dataStore
-            const allMarkets = this.dataStore.getAllMarkets();
-            const citySet = new Set<string>();
-            for (const market of allMarkets) {
-                if (market.city) {
-                    const cityId = this.fastNormalizeCityId(market.city);
-                    if (!this.fileConfirmedCities.has(cityId) && !this.stateMachine.isInFetchMode(cityId)) {
-                        citySet.add(cityId);
-                    }
-                }
-            }
-            cities = Array.from(citySet);
-        }
-
-        if (cities.length === 0) {
-            logger.debug('No cities to poll');
-            return;
-        }
-
-        // Resolve city IDs to CityLocation objects
-        const cityLocations: Array<{ cityId: string; city: CityLocation }> = [];
-        for (const cityId of cities) {
-            const city = findCity(cityId);
-            if (city) {
-                cityLocations.push({ cityId, city });
-            }
-        }
-
-        if (cityLocations.length === 0) {
-            return;
-        }
-
-        try {
-            // Try Open-Meteo first
-            const openMeteoProvider = this.providerManager.getProvider('openmeteo');
-            
-            if (!('getHourlyForecastBatch' in openMeteoProvider)) {
-                logger.error('OpenMeteo provider does not support batch requests');
-                await this.executeMeteoSourcePoll();
-                return;
-            }
-
-            const openMeteoClient = openMeteoProvider as import('../weather/openmeteo-client.js').OpenMeteoClient;
-
-            const locations = cityLocations.map(({ city }) => ({
-                coords: city.coordinates,
-                locationName: city.name
-            }));
-
-            logger.debug(`🌤️ Open-Meteo batch request: ${locations.length} cities`);
-
-            // Execute batch request (no cache during detection window)
-            const batchResults = await openMeteoClient.getHourlyForecastBatch(locations, false);
-
-            // Record API call
-            this.apiTracker.recordCall('openmeteo', true);
-
-            // Process results
-            this.processBatchResults(batchResults, cityLocations, 'openmeteo');
-
-        } catch (error) {
-            logger.error('Open-Meteo poll failed, falling back to MeteoSource', {
-                error: (error as Error).message,
-            });
-            
-            // Record failed call
-            this.apiTracker.recordCall('openmeteo', false);
-            
-            // Fallback to MeteoSource
-            await this.executeMeteoSourcePoll();
-        }
+        return;
     }
 
     /**
      * Execute poll using MeteoSource (fallback)
+     * DISABLED: API polling removed - file-based ingestion only
      */
     private async executeMeteoSourcePoll(): Promise<void> {
-        const meteosourceProvider = this.providerManager.getProvider('meteosource');
-        if (!meteosourceProvider) {
-            logger.warn('MeteoSource provider not available');
-            return;
-        }
-
-        // Get cities (same logic as executePoll)
-        let cities: string[] = [];
-        for (const cityId of this.state.activeCities) {
-            if (!this.fileConfirmedCities.has(cityId) && !this.stateMachine.isInFetchMode(cityId)) {
-                cities.push(cityId);
-            }
-        }
-        
-        if (cities.length === 0) {
-            const allMarkets = this.dataStore.getAllMarkets();
-            const citySet = new Set<string>();
-            for (const market of allMarkets) {
-                if (market.city) {
-                    const cityId = this.fastNormalizeCityId(market.city);
-                    if (!this.fileConfirmedCities.has(cityId) && !this.stateMachine.isInFetchMode(cityId)) {
-                        citySet.add(cityId);
-                    }
-                }
-            }
-            cities = Array.from(citySet);
-        }
-
-        const cityLocations: Array<{ cityId: string; city: CityLocation }> = [];
-        for (const cityId of cities) {
-            const city = findCity(cityId);
-            if (city) {
-                cityLocations.push({ cityId, city });
-            }
-        }
-
-        if (cityLocations.length === 0) {
-            return;
-        }
-
-        try {
-            if (!('getHourlyForecastBatch' in meteosourceProvider)) {
-                logger.error('MeteoSource provider does not support batch requests');
-                return;
-            }
-
-            const meteosourceClient = meteosourceProvider as import('../weather/additional-providers.js').MeteosourceProvider;
-
-            const locations = cityLocations.map(({ city }) => ({
-                coords: city.coordinates,
-                locationName: city.name
-            }));
-
-            logger.debug(`🌤️ MeteoSource batch request: ${locations.length} cities`);
-
-            const batchResults = await meteosourceClient.getHourlyForecastBatch(locations, false);
-
-            // Record API calls
-            for (let i = 0; i < batchResults.length; i++) {
-                this.apiTracker.recordCall('meteosource', true);
-            }
-
-            this.processBatchResults(batchResults, cityLocations, 'meteosource');
-
-        } catch (error) {
-            logger.error('MeteoSource poll failed', {
-                error: (error as Error).message,
-            });
-            
-            for (let i = 0; i < cityLocations.length; i++) {
-                this.apiTracker.recordCall('meteosource', false);
-            }
-        }
+        return;
     }
 
     /**
      * Process batch poll results
+     * DISABLED: API polling removed - file-based ingestion only
      */
     private processBatchResults(
         batchResults: import('../weather/types.js').WeatherData[],
         cityLocations: Array<{ cityId: string; city: CityLocation }>,
         provider: string
     ): void {
-        const batchForecasts: Array<{
-            cityId: string;
-            cityName: string;
-            temperatureC: number;
-            temperatureF: number;
-            windSpeedMph: number;
-            precipitationMm: number;
-            timestamp: Date;
-            source: DataSourceType;
-            confidence: number;
-        }> = [];
-
-        for (let i = 0; i < batchResults.length && i < cityLocations.length; i++) {
-            const result = batchResults[i];
-            const { cityId, city } = cityLocations[i];
-
-            const currentForecast = result.hourly[0];
-            if (!currentForecast) continue;
-
-            const confidence = this.calculateDataConfidence('API', new Date());
-
-            const forecastData = {
-                cityId,
-                cityName: city.name,
-                temperatureC: currentForecast.temperatureC,
-                temperatureF: currentForecast.temperatureF,
-                windSpeedMph: currentForecast.windSpeedMph || 0,
-                precipitationMm: currentForecast.snowfallInches ? currentForecast.snowfallInches * 25.4 : 0,
-                timestamp: new Date(),
-                source: 'API' as DataSourceType,
-                confidence,
-            };
-
-            this.forecastCache.set(cityId, {
-                data: forecastData,
-                expiresAt: new Date(Date.now() + this.FORECAST_CACHE_TTL_MS),
-            });
-
-            this.storeDataWithConfidence(cityId, 'API', forecastData.temperatureF, confidence);
-
-            batchForecasts.push(forecastData);
-
-            this.eventBus.emit({
-                type: 'PROVIDER_FETCH',
-                payload: {
-                    cityId,
-                    provider,
-                    success: true,
-                    hasChanges: true,
-                },
-            });
-
-            this.eventBus.emit({
-                type: 'FORECAST_UPDATED',
-                payload: {
-                    cityId,
-                    cityName: city.name,
-                    provider,
-                    temperatureC: forecastData.temperatureC,
-                    temperatureF: forecastData.temperatureF,
-                    windSpeedMph: forecastData.windSpeedMph,
-                    precipitationMm: forecastData.precipitationMm,
-                    timestamp: forecastData.timestamp,
-                    source: 'API',
-                    confidence,
-                },
-            });
-        }
-
-        if (batchForecasts.length > 0) {
-            this.lastBatchUpdateTime = new Date();
-            this.eventBus.emit({
-                type: 'FORECAST_BATCH_UPDATED',
-                payload: {
-                    forecasts: batchForecasts,
-                    provider,
-                    batchTimestamp: this.lastBatchUpdateTime,
-                    totalCities: batchForecasts.length,
-                },
-            });
-        }
+        return;
     }
 
     /**
@@ -1973,13 +1672,13 @@ export class HybridWeatherController extends EventEmitter {
 
     /**
      * Execute a single burst poll
+     * DISABLED: API polling removed - file-based ingestion only
      */
     private async executeBurstPoll(): Promise<void> {
         if (!this.burstModeActive) {
             return;
         }
 
-        // Check if we've reached 60 seconds
         if (this.burstStartTime) {
             const elapsed = Date.now() - this.burstStartTime.getTime();
             if (elapsed >= BURST_CONFIG.durationMs) {
@@ -1988,13 +1687,8 @@ export class HybridWeatherController extends EventEmitter {
             }
         }
 
-        // Execute poll (same as detection polling)
-        await this.executePoll();
-
         this.burstRequestCount++;
         this.state.burstRequestsCompleted++;
-        
-        logger.debug(`Burst poll: ${this.burstRequestCount}/30`);
     }
 
     /**

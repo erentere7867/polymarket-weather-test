@@ -10,7 +10,7 @@ import { logger } from '../logger.js';
 import { DataStore } from '../realtime/data-store.js';
 
 // Threshold for considering market "caught up" to the forecast
-const MARKET_CAUGHT_UP_THRESHOLD = 0.02; // If price within 2% of probability, market caught up - trade even when market has moved partially
+const MARKET_CAUGHT_UP_THRESHOLD = 0.005; // Very low threshold - only skip if nearly identical
 
 // Default significant change (fallback)
 const DEFAULT_SIGNIFICANT_CHANGE = 1.0;
@@ -57,7 +57,7 @@ export class OpportunityDetector {
     private capturedOpportunities: Map<string, CapturedOpportunity> = new Map();
     
     // TTL for captured opportunities to prevent memory leaks
-    private readonly CAPTURE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+    private readonly CAPTURE_TTL_MS = 5 * 60 * 1000; // 5 minutes - allow re-trading sooner
     
     // Track rejection reasons for debugging
     private rejectionStats: RejectionStats = {
@@ -273,26 +273,35 @@ export class OpportunityDetector {
             }
             
             try {
-                // Fetch all weather data types in parallel for this city
-                const [high, low, forecast] = await Promise.all([
+                const [high, low] = await Promise.all([
                     this.weatherService.getExpectedHigh(city, targetDate).catch(() => null),
                     this.weatherService.getExpectedLow(city, targetDate).catch(() => null),
-                    this.weatherService.getForecastByCity(city).catch(() => null),
                 ]);
                 
-                // Extract precipitation from forecast if available
                 let precipProbability: number | null = null;
-                if (forecast) {
-                    const targetDateObj = new Date(targetDate);
-                    targetDateObj.setUTCHours(0, 0, 0, 0);
-                    const targetDateStr = targetDateObj.toISOString().split('T')[0];
-                    const dayForecasts = forecast.hourly.filter(h => {
-                        const hourDate = new Date(h.timestamp);
-                        // Use date string comparison to avoid timestamp mismatch issues
-                        return hourDate.toISOString().split('T')[0] === targetDateStr;
+                if (this.store) {
+                    const markets = this.store.getAllMarkets();
+                    const matchingMarket = markets.find(m => {
+                        const marketCityId = m.city?.toLowerCase().replace(/\s+/g, '_');
+                        const cityId = city.toLowerCase().replace(/\s+/g, '_');
+                        return marketCityId === cityId;
                     });
-                    if (dayForecasts.length > 0) {
-                        precipProbability = Math.max(...dayForecasts.map(h => h.probabilityOfPrecipitation));
+                    
+                    if (matchingMarket) {
+                        const state = this.store.getMarketState(matchingMarket.market.id);
+                        const weatherData = state?.lastForecast?.weatherData;
+                        if (weatherData?.hourly) {
+                            const targetDateObj = new Date(targetDate);
+                            targetDateObj.setUTCHours(0, 0, 0, 0);
+                            const targetDateStr = targetDateObj.toISOString().split('T')[0];
+                            const dayForecasts = weatherData.hourly.filter((h: { timestamp: Date; probabilityOfPrecipitation: number }) => {
+                                const hourDate = new Date(h.timestamp);
+                                return hourDate.toISOString().split('T')[0] === targetDateStr;
+                            });
+                            if (dayForecasts.length > 0) {
+                                precipProbability = Math.max(...dayForecasts.map((h: { probabilityOfPrecipitation: number }) => h.probabilityOfPrecipitation));
+                            }
+                        }
                     }
                 }
                 
@@ -684,43 +693,7 @@ export class OpportunityDetector {
             // Edge calculation: positive = market underprices YES, negative = market overprices YES
             let edge = finalProbability - marketProbability;
             
-            // Check for late trade (information already priced in)
-            // Use actual forecast timestamp from DataStore, not snapshotTimestamp (which is always "now")
-            let actualForecastTimestamp: Date | undefined;
-            if (this.store) {
-                const marketState = this.store.getMarketState(market.market.id);
-                actualForecastTimestamp = marketState?.lastForecast?.changeTimestamp;
-            }
-            const lateTradeCheck = this.isLateTrade(market, edge, actualForecastTimestamp);
-            
-            if (lateTradeCheck.isLate) {
-                logger.warn(`⚠️ ${lateTradeCheck.reason}`);
-                
-                // Use adjusted edge from late trade check
-                edge = lateTradeCheck.adjustedEdge;
-                
-                // If edge was reduced to near zero, don't trade
-                if (Math.abs(edge) < 0.02) {
-                    logger.info(`Trade blocked due to late detection: adjusted edge ${(edge * 100).toFixed(1)}% too small`);
-                    return {
-                        market,
-                        forecastProbability: finalProbability,
-                        marketProbability,
-                        edge,
-                        action: 'none',
-                        confidence: confidence * 0.5, // Reduced confidence for late trades
-                        reason: `Late trade blocked: ${lateTradeCheck.reason}`,
-                        weatherDataSource,
-                        forecastValue,
-                        forecastValueUnit,
-                        isGuaranteed,
-                        certaintySigma,
-                        snapshotYesPrice,
-                        snapshotNoPrice,
-                        snapshotTimestamp,
-                    };
-                }
-            }
+            // Late trade detection disabled - allow trading on all opportunities with sufficient edge
             
             const absEdge = Math.abs(edge);
 
@@ -733,8 +706,18 @@ export class OpportunityDetector {
             const effectiveThreshold = isGuaranteed ? 0.05 : config.minEdgeThreshold;
 
             if (absEdge >= effectiveThreshold) {
+                // DETERMINE ACTION BASED ON EDGE DIRECTION
+                if (edge > 0) {
+                    // Positive edge: forecast probability > market price
+                    // Market underprices YES outcome → buy YES
+                    action = 'buy_yes';
+                } else {
+                    // Negative edge: forecast probability < market price  
+                    // Market overprices YES outcome → buy NO
+                    action = 'buy_no';
+                }
+                
                 // SAFETY VALIDATION: Ensure action aligns with forecast vs threshold
-                // This is an additional check to prevent contradictory trades
                 const safetyCheck = this.validateTradeAction(
                     action,
                     forecastValue,
@@ -757,6 +740,8 @@ export class OpportunityDetector {
                     // Don't execute trade that contradicts the forecast
                     action = 'none';
                     reason = `Safety check failed: ${safetyCheck.issue}`;
+                } else {
+                    reason = `Edge ${(absEdge * 100).toFixed(1)}% >= threshold ${(effectiveThreshold * 100).toFixed(0)}%`;
                 }
             } else {
                 reason = `Edge ${(absEdge * 100).toFixed(1)}% below threshold ${(effectiveThreshold * 100).toFixed(0)}%`;
@@ -1018,21 +1003,20 @@ export class OpportunityDetector {
             let source: 'noaa' | 'openweather' = 'noaa';
             
             if (prefetched?.precipProbability !== null && prefetched?.precipProbability !== undefined) {
-                // Use prefetched precipitation data
                 maxPrecipProb = prefetched.precipProbability;
-            } else {
-                // Fallback to API call
-                const forecast = await this.weatherService.getForecastByCity(market.city);
+            } else if (this.store) {
+                const state = this.store.getMarketState(market.market.id);
+                const weatherData = state?.lastForecast?.weatherData;
+                if (!weatherData?.hourly) {
+                    return null;
+                }
 
-                // Normalize target date for comparison - use date string comparison
                 const targetDateObj = new Date(targetDate);
                 targetDateObj.setUTCHours(0, 0, 0, 0);
                 const targetDateStr = targetDateObj.toISOString().split('T')[0];
 
-                // Find precipitation probability for target date
-                const dayForecasts = forecast.hourly.filter(h => {
+                const dayForecasts = weatherData.hourly.filter((h: { timestamp: Date; probabilityOfPrecipitation: number }) => {
                     const hourDate = new Date(h.timestamp);
-                    // Use date string comparison to avoid timestamp mismatch issues
                     return hourDate.toISOString().split('T')[0] === targetDateStr;
                 });
 
@@ -1040,9 +1024,10 @@ export class OpportunityDetector {
                     return null;
                 }
 
-                // Use max precipitation probability for the day
-                maxPrecipProb = Math.max(...dayForecasts.map(h => h.probabilityOfPrecipitation));
-                source = forecast.source as 'noaa' | 'openweather';
+                maxPrecipProb = Math.max(...dayForecasts.map((h: { probabilityOfPrecipitation: number }) => h.probabilityOfPrecipitation));
+                source = weatherData.source as 'noaa' | 'openweather';
+            } else {
+                return null;
             }
 
             // Convert to 0-1 probability
@@ -1198,6 +1183,11 @@ export class OpportunityDetector {
             // If forecast << threshold: guaranteed YES (1.0)
             // If forecast >> threshold: guaranteed NO (0.0)
             probability = diff < 0 ? 1.0 : 0.0;
+        } else if (comparisonType === 'range') {
+            // Range markets are handled above by metricType === 'temperature_range'
+            // If we get here with range, it means metricType is not temperature_range
+            // which shouldn't happen, but return null to be safe
+            return null;
         } else {
             // Unknown comparison type, can't determine
             return null;
@@ -1254,6 +1244,10 @@ export class OpportunityDetector {
             expectedComparisonType = 'below';
         } else {
             // Forecast is close to threshold - can't determine, skip validation
+            return { isValid: true };
+        }
+
+        if (comparisonType === 'range') {
             return { isValid: true };
         }
 
@@ -1317,6 +1311,11 @@ export class OpportunityDetector {
             } else {
                 return { isValid: true };
             }
+        } else if (comparisonType === 'range') {
+            // Market asks: "Will temp be between min and max?"
+            // For range markets, we need minThreshold and maxThreshold from the market
+            // Skip validation here as range logic is handled elsewhere
+            return { isValid: true };
         } else {
             // Unknown comparison type, skip validation
             return { isValid: true };

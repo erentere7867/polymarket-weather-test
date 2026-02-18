@@ -217,9 +217,6 @@ async function fetchAllDashboardData() {
             updatePositionsDisplay(data.activePositions || [], data.closedPositions || []);
         }
         
-        // Update speed arb
-        if (data.speedArb) updateSpeedArbDisplay(data.speedArb);
-        
         // Update webhook/cycle counts
         if (data.webhook) updateWebhookDisplay(data.webhook);
         
@@ -487,31 +484,6 @@ function showError(message) {
             el.innerHTML = `<div class="text-rose-400 text-sm p-2">Error: ${message}</div>`;
         }
     });
-}
-
-/**
- * Update speed arb display from batched poll data
- */
-function updateSpeedArbDisplay(stats) {
-    const toggle = document.getElementById('speed-arb-toggle');
-    if (toggle && toggle.checked !== stats.enabled) {
-        toggle.checked = stats.enabled;
-    }
-    const tradesEl = document.getElementById('speed-arb-trades');
-    const oppsEl = document.getElementById('speed-arb-opportunities');
-    const pnlEl = document.getElementById('speed-arb-pnl');
-    const lastTradeEl = document.getElementById('speed-arb-last-trade');
-
-    if (tradesEl) tradesEl.textContent = stats.trades || 0;
-    if (oppsEl) oppsEl.textContent = `${stats.opportunities || 0} detected / ${stats.skipped || 0} skipped`;
-    if (pnlEl) {
-        const pnl = stats.pnl || 0;
-        pnlEl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
-        pnlEl.className = `text-2xl font-bold mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
-    }
-    if (lastTradeEl) {
-        lastTradeEl.textContent = stats.lastTradeTime ? formatTimeAgo(new Date(stats.lastTradeTime)) : '--';
-    }
 }
 
 /**
@@ -1151,25 +1123,6 @@ function setupEventListeners() {
     const refreshBtn = document.getElementById('refresh-dashboard-btn');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', fetchAllDashboardData);
-    }
-
-    // Speed Arbitrage Toggle
-    const speedArbToggle = document.getElementById('speed-arb-toggle');
-    if (speedArbToggle) {
-        speedArbToggle.addEventListener('change', async (e) => {
-            const enabled = e.target.checked;
-            try {
-                const res = await fetch('/api/speed-arb/toggle', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ enabled }),
-                });
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            } catch (err) {
-                console.error('Speed arb toggle failed:', err);
-                e.target.checked = !enabled;
-            }
-        });
     }
 
     // Window resize for charts

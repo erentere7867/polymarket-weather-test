@@ -25,6 +25,8 @@ export interface EntrySignal {
     estimatedEdge: number;
     isGuaranteed: boolean;
     sigma: number;           // Statistical significance
+    signalType?: 'forecast_change' | 'high_confidence' | 'standard';  // Exit strategy type
+    entryForecastValue?: number;  // Forecast probability at entry
 }
 
 // Confidence bands for position sizing
@@ -32,7 +34,8 @@ const POSITION_SIZE_BANDS = {
     HIGH: 1.0,      // σ ≥ 2.0: full position
     MEDIUM: 0.75,   // σ ≥ 1.5: 75% of max
     LOW: 0.50,      // σ ≥ 1.0: 50% of max
-    SKIP: 0         // σ < 1.0: skip (too uncertain)
+    MINIMAL: 0.25,  // σ ≥ 0.5: 25% of max
+    SKIP: 0         // σ < 0.5: skip (too uncertain)
 };
 
 export class EntryOptimizer {
@@ -52,6 +55,8 @@ export class EntryOptimizer {
             return POSITION_SIZE_BANDS.MEDIUM;
         } else if (sigma >= 1.0) {
             return POSITION_SIZE_BANDS.LOW;
+        } else if (sigma >= 0.5) {
+            return POSITION_SIZE_BANDS.MINIMAL;
         } else {
             return POSITION_SIZE_BANDS.SKIP;
         }
@@ -64,7 +69,8 @@ export class EntryOptimizer {
         if (sigma >= 2.0) return 'HIGH (σ≥2.0)';
         if (sigma >= 1.5) return 'MEDIUM (σ≥1.5)';
         if (sigma >= 1.0) return 'LOW (σ≥1.0)';
-        return 'SKIP (σ<1.0)';
+        if (sigma >= 0.5) return 'MINIMAL (σ≥0.5)';
+        return 'SKIP (σ<0.5)';
     }
 
     /**
@@ -110,8 +116,8 @@ export class EntryOptimizer {
         const effectiveSigma = sigma ?? (edge.confidence * 3);
         
         // Skip if sigma too low
-        if (effectiveSigma < 1.0) {
-            logger.info(`[EntryOptimizer] Skipped: sigma ${effectiveSigma.toFixed(2)} < 1.0 (too uncertain)`);
+        if (effectiveSigma < 0.5) {
+            logger.info(`[EntryOptimizer] Skipped: sigma ${effectiveSigma.toFixed(2)} < 0.5`);
             return null;
         }
 

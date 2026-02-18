@@ -11,13 +11,11 @@ import { createWebhookRouter } from './tomorrow-webhook.js';
 import { webhookValidator } from './middleware/webhook-validator.js';
 import { forecastStateMachine, StateContext } from '../realtime/forecast-state-machine.js';
 import { eventBus } from '../realtime/event-bus.js';
-import { WeatherProviderManager } from '../weather/provider-manager.js';
 import { HybridWeatherController, HybridWeatherMode } from '../realtime/hybrid-weather-controller.js';
 import { apiCallTracker } from '../realtime/api-call-tracker.js';
 import { DataStore } from '../realtime/data-store.js';
 import { FileBasedIngestion } from '../weather/file-based-ingestion.js';
 import { ScheduleManager } from '../weather/schedule-manager.js';
-import { ApiFallbackPoller } from '../weather/api-fallback-poller.js';
 import { DashboardController, createDashboardRouter } from './dashboard-controller.js';
 
 const dashboardApp = express();
@@ -46,16 +44,14 @@ const fileBasedIngestion = new FileBasedIngestion({
     publicBuckets: true,
 });
 
-// Initialize Schedule Manager and API Fallback Poller
+// Initialize Schedule Manager
 const scheduleManager = new ScheduleManager();
-const apiFallbackPoller = new ApiFallbackPoller();
 
 // Initialize Dashboard Controller
 const dashboardController = new DashboardController(
     dataStore,
     fileBasedIngestion,
-    scheduleManager,
-    apiFallbackPoller
+    scheduleManager
 );
 
 // Middleware (Dashboard)
@@ -144,7 +140,7 @@ dashboardApp.get('/api/positions/closed', (req, res) => {
 
 // 5. Settings Update
 dashboardApp.post('/api/settings', (req, res) => {
-    const { takeProfit, stopLoss, skipPriceCheck, speedArbEnabled } = req.body;
+    const { takeProfit, stopLoss, skipPriceCheck } = req.body;
 
     if (typeof takeProfit !== 'number' || typeof stopLoss !== 'number') {
         return res.status(400).json({ error: 'Invalid settings format. Expected numbers for takeProfit and stopLoss (percentages).' });
@@ -156,7 +152,6 @@ dashboardApp.post('/api/settings', (req, res) => {
         takeProfit: takeProfit / 100,
         stopLoss: stopLoss / 100,
         skipPriceCheck: typeof skipPriceCheck === 'boolean' ? skipPriceCheck : undefined,
-        speedArbEnabled: typeof speedArbEnabled === 'boolean' ? speedArbEnabled : undefined,
     });
 
     res.json({ success: true, message: 'Settings updated' });
@@ -169,25 +164,9 @@ dashboardApp.get('/api/settings', (req, res) => {
         takeProfit: settings.takeProfit * 100,
         stopLoss: settings.stopLoss * 100,
         skipPriceCheck: settings.skipPriceCheck,
-        speedArbEnabled: settings.speedArbEnabled,
         cacheTtlMs: runner.getCacheTtl(),
         pollIntervalMs: runner.getPollInterval()
     });
-});
-
-// 5b. Speed Arbitrage Toggle (dedicated endpoint)
-dashboardApp.post('/api/speed-arb/toggle', (req, res) => {
-    const { enabled } = req.body;
-    if (typeof enabled !== 'boolean') {
-        return res.status(400).json({ error: 'enabled must be a boolean' });
-    }
-    runner.setSpeedArbEnabled(enabled);
-    res.json({ success: true, enabled, message: `Speed Arbitrage ${enabled ? 'ENABLED' : 'DISABLED'}` });
-});
-
-// 5c. Speed Arbitrage Stats
-dashboardApp.get('/api/speed-arb/stats', (req, res) => {
-    res.json(runner.getSpeedArbStats());
 });
 
 // 7. Cache TTL Control (Dynamic adjustment)
@@ -290,48 +269,13 @@ dashboardApp.get('/api/state-machine/stats', (req, res) => {
         cities: allCityStates,
         fetchModeTimeoutMinutes: config.FETCH_MODE_TIMEOUT_MINUTES || 10,
         noChangeExitMinutes: config.NO_CHANGE_EXIT_MINUTES || 5,
-        providerPollIntervalMs: config.PROVIDER_POLL_INTERVAL_MS || 5000,
         idlePollIntervalMinutes: config.IDLE_POLL_INTERVAL_MINUTES || 5,
     });
 });
 
-// 10. Provider Health Endpoint
+// 10. Provider Health Endpoint (disabled - API code removed)
 dashboardApp.get('/api/providers/health', (req, res) => {
-    const providerManager = new WeatherProviderManager();
-    const providers: Array<{
-        name: string;
-        isConfigured: boolean;
-        isRateLimited: boolean;
-        rateLimitResetTime: number;
-    }> = [];
-
-    // Get all available providers
-    const allProviders = [
-        { name: 'openmeteo', key: '' }, // Always available
-        { name: 'openweather', key: config.openWeatherApiKey },
-        { name: 'tomorrow', key: config.tomorrowApiKey },
-        { name: 'weatherapi', key: config.weatherApiKey },
-        { name: 'weatherbit', key: config.weatherbitApiKey },
-        { name: 'visualcrossing', key: config.visualCrossingApiKey },
-        { name: 'meteosource', key: config.meteosourceApiKey },
-    ];
-
-    for (const provider of allProviders) {
-        const isConfigured = provider.name === 'openmeteo' || !!provider.key;
-        providers.push({
-            name: provider.name,
-            isConfigured,
-            isRateLimited: providerManager.isProviderRateLimited(provider.name),
-            rateLimitResetTime: providerManager.getRateLimitResetTime(provider.name),
-        });
-    }
-
-    res.json({
-        providers,
-        totalProviders: providers.length,
-        configuredProviders: providers.filter(p => p.isConfigured).length,
-        rateLimitedProviders: providers.filter(p => p.isRateLimited).length,
-    });
+    res.json({ status: 'disabled', message: 'Provider health checks removed' });
 });
 
 // 11. Forecast Trigger Statistics
@@ -561,8 +505,6 @@ dashboardApp.get('/api/poll', (req, res) => {
     const cycles = runner.getCycles();
     const uptime = process.uptime();
     const eventStats = eventBus.getEventStats();
-    const settings = runner.getSettings();
-    const speedArbStats = runner.getSpeedArbStats();
     const perf = runner.getComponentPerformance();
     const markets = runner.getStore().getAllMarkets();
     const strategyStats = runner.getStrategy().getStats();
@@ -611,10 +553,6 @@ dashboardApp.get('/api/poll', (req, res) => {
         portfolio: sim.getPortfolio(),
         activePositions,
         closedPositions,
-        speedArb: {
-            ...speedArbStats,
-            enabled: settings.speedArbEnabled,
-        },
         webhook: {
             webhooksReceived: eventStats.webhooksReceived,
             fetchCyclesCompleted: eventStats.fetchCyclesCompleted,

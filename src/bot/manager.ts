@@ -1,8 +1,6 @@
 /**
  * Bot Manager - Production Ready Weather Trading Bot
- * Clean dual-mode implementation:
- * - SPEED MODE: Fast execution on forecast changes (speed arbitrage)
- * - SAFE MODE: Conservative execution with high confidence requirements
+ * Hybrid trading strategy implementation
  *
  * Integrates DrawdownKillSwitch for risk control
  */
@@ -10,24 +8,19 @@
 import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { TradingClient } from '../polymarket/clob-client.js';
 import { OrderExecutor } from './order-executor.js';
-import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
-import { ConfidenceCompressionStrategy } from '../strategy/confidence-compression-strategy.js';
-import { StrategyOrchestrator, StrategySignal } from '../strategy/strategy-orchestrator.js';
+import { HybridTradingStrategy, HybridSignal } from '../strategy/hybrid-trading-strategy.js';
 import { DataStore } from '../realtime/data-store.js';
 import { PriceTracker } from '../realtime/price-tracker.js';
 import { ForecastMonitor } from '../realtime/forecast-monitor.js';
 import { config, validateConfig } from '../config.js';
 import { logger, rateLimitedLogger } from '../logger.js';
-import { TradingOpportunity, ParsedWeatherMarket } from '../polymarket/types.js';
+import { TradingOpportunity } from '../polymarket/types.js';
 import { eventBus } from '../realtime/event-bus.js';
-import { forecastStateMachine } from '../realtime/forecast-state-machine.js';
 import { EntrySignal } from '../strategy/entry-optimizer.js';
 import { OpportunityDetector } from './opportunity-detector.js';
 import { MarketModel } from '../probability/market-model.js';
 import { DrawdownKillSwitch } from '../strategy/drawdown-kill-switch.js';
-import { ExitOptimizer, Position } from '../strategy/exit-optimizer.js';
-
-export type TradingMode = 'speed' | 'safe' | 'orchestrated';
+import { ExitOptimizer } from '../strategy/exit-optimizer.js';
 
 interface BotStats {
     startTime: Date;
@@ -43,9 +36,7 @@ interface BotStats {
 export class BotManager {
     private weatherScanner: WeatherScanner;
     private tradingClient: TradingClient;
-    private speedStrategy: SpeedArbitrageStrategy;
-    private confidenceStrategy: ConfidenceCompressionStrategy;
-    private strategyOrchestrator: StrategyOrchestrator | null = null;
+    private hybridStrategy: HybridTradingStrategy;
     private opportunityDetector!: OpportunityDetector;
     private orderExecutor: OrderExecutor;
     private dataStore: DataStore;
@@ -76,18 +67,12 @@ export class BotManager {
     private cycleLock: Promise<void> | null = null;
     private eventUnsubscribers: (() => void)[] = [];
     
-    // Trading mode
-    private tradingMode: TradingMode;
-    
     // Forecast-triggered cycle guards
-    private lastForecastTriggeredCycle: Date | null = null;
-    private readonly FORECAST_CYCLE_DEBOUNCE_MS = 3000;
     private dirtyMarkets: Set<string> = new Set();
 
     private initialCapital: number;
 
-    constructor(mode?: TradingMode, initialCapital: number = 1000) {
-        this.tradingMode = mode || (config.ENABLE_STRATEGY_ORCHESTRATOR ? 'orchestrated' : (config.SPEED_ARBITRAGE_MODE ? 'speed' : 'safe'));
+    constructor(initialCapital: number = 1000) {
         this.initialCapital = initialCapital;
         
         // Initialize kill switch singleton
@@ -97,11 +82,7 @@ export class BotManager {
         this.tradingClient = new TradingClient();
         this.dataStore = new DataStore();
         this.opportunityDetector = new OpportunityDetector(this.dataStore);
-        this.speedStrategy = new SpeedArbitrageStrategy(this.dataStore);
-        this.confidenceStrategy = new ConfidenceCompressionStrategy(this.dataStore);
-        
-        // Orchestrator will be initialized in initialize() method
-        this.strategyOrchestrator = null;
+        this.hybridStrategy = new HybridTradingStrategy(this.dataStore);
         
         this.orderExecutor = new OrderExecutor(this.tradingClient, this.dataStore);
         this.priceTracker = new PriceTracker(this.dataStore);
@@ -125,24 +106,11 @@ export class BotManager {
     async initialize(): Promise<void> {
         logger.info('='.repeat(60));
         logger.info('Weather Trading Bot - Starting');
-        logger.info(`Mode: ${this.tradingMode.toUpperCase()}`);
         logger.info('='.repeat(60));
 
         validateConfig();
 
         await this.tradingClient.initialize();
-
-        // Initialize orchestrator if enabled
-        if (config.ENABLE_STRATEGY_ORCHESTRATOR && !this.strategyOrchestrator) {
-            const marketModel = new MarketModel(this.dataStore);
-            this.strategyOrchestrator = new StrategyOrchestrator(
-                this.dataStore,
-                this.opportunityDetector,
-                marketModel,
-                this.initialCapital
-            );
-            logger.info('[BotManager] Strategy Orchestrator initialized');
-        }
 
         // Initialize ExitOptimizer
         const marketModel = new MarketModel(this.dataStore);
@@ -152,91 +120,10 @@ export class BotManager {
         // Start PriceTracker
         await this.priceTracker.start(this.weatherScanner, 60000);
 
-        // Wire forecast events to strategies
-        const forecastUnsub = eventBus.on('FORECAST_CHANGE', (event) => {
-            if (event.type === 'FORECAST_CHANGE') {
-                this.handleForecastEvent(event.payload);
-            }
-        });
-        this.eventUnsubscribers.push(forecastUnsub);
-
         // Setup forecast monitor
         this.forecastMonitor.onForecastChanged = async (marketId, change) => {
             this.dirtyMarkets.add(marketId);
-            await this.handleForecastChange(marketId, change);
         };
-    }
-
-    /**
-     * Handle forecast event - feed to appropriate strategy
-     */
-    private handleForecastEvent(payload: {
-        cityId: string;
-        cityName: string;
-        variable: 'TEMPERATURE' | 'WIND_SPEED' | 'PRECIPITATION';
-        oldValue: number;
-        newValue: number;
-        changeAmount: number;
-        changePercent: number;
-        model: string;
-        cycleHour: number;
-        forecastHour: number;
-        timestamp: Date;
-        source: 'FILE' | 'API';
-        confidence: 'HIGH' | 'LOW';
-        threshold: number;
-        thresholdExceeded: boolean;
-    }): void {
-        const runDate = payload.timestamp;
-        
-        if (payload.variable === 'TEMPERATURE') {
-            this.confidenceStrategy.processModelRun(
-                payload.cityId,
-                payload.model as any,
-                payload.cycleHour,
-                runDate,
-                payload.newValue,
-                false,
-                0,
-                payload.source
-            );
-        }
-    }
-
-    /**
-     * Handle forecast change - trigger immediate scan
-     */
-    private async handleForecastChange(marketId: string, changeAmount: number): Promise<void> {
-        if (this.tradingMode !== 'speed') return;
-
-        const now = Date.now();
-        if (this.lastForecastTriggeredCycle && 
-            (now - this.lastForecastTriggeredCycle.getTime()) < this.FORECAST_CYCLE_DEBOUNCE_MS) {
-            return;
-        }
-        this.lastForecastTriggeredCycle = new Date(now);
-
-        // Speed mode: immediate execution on forecast changes
-        try {
-            const signal = this.speedStrategy.detectOpportunity(marketId);
-            if (signal) {
-                const opp = this.convertSignalToOpportunity(signal);
-                if (opp) {
-                    logger.info(`Speed arb: ${opp.market.market.question.substring(0, 50)}...`);
-                    const result = await this.orderExecutor.executeOpportunity(opp);
-                    if (result.executed) {
-                        this.stats.tradesExecuted++;
-                        // Record trade for kill switch
-                        this.recordTradeResult(0);
-                        this.speedStrategy.markOpportunityCaptured(marketId, opp.forecastValue || 0);
-                    }
-                }
-            }
-        } catch (error) {
-            rateLimitedLogger.error('forecast-change', 'Forecast change handler error', {
-                error: (error as Error).message,
-            });
-        }
     }
 
     /**
@@ -293,67 +180,55 @@ export class BotManager {
                 return;
             }
 
-            // Execute based on mode
-            if (this.tradingMode === 'orchestrated' && this.strategyOrchestrator) {
-                // Orchestrated mode: Multi-strategy with adaptive sizing
-                await this.runOrchestratedCycle(actionableMarkets);
-            } else {
-                // Legacy modes
-                let signals: EntrySignal[] = [];
-                
-                if (this.tradingMode === 'speed') {
-                    // Speed mode: Fast arbitrage on forecast changes
-                    signals = this.speedStrategy.detectOpportunities();
-                } else {
-                    // Safe mode: Conservative with confidence requirements
-                    signals = this.confidenceStrategy.detectOpportunities();
-                }
+            // Always use hybrid strategy
+            const hybridSignals = this.hybridStrategy.detectOpportunities();
+            const signals: EntrySignal[] = hybridSignals;
+            
+            if (signals.length === 0) {
+                return;
+            }
 
-                if (signals.length === 0) {
-                    return;
-                }
+            // Convert signals to opportunities
+            const opportunities = signals
+                .map(s => this.convertSignalToOpportunity(s))
+                .filter((o): o is TradingOpportunity => o !== null);
 
-                // Convert signals to opportunities
-                const opportunities = signals
-                    .map(s => this.convertSignalToOpportunity(s))
-                    .filter((o): o is TradingOpportunity => o !== null);
+            this.stats.opportunitiesFound += opportunities.length;
 
-                this.stats.opportunitiesFound += opportunities.length;
+            // Execute trades
+            if (opportunities.length > 0) {
+                const results = await this.orderExecutor.executeOpportunities(opportunities);
+                const executed = results.filter(r => r.executed);
+                this.stats.tradesExecuted += executed.length;
+                this.stats.opportunitiesExecuted += executed.length;
 
-                    // Execute trades
-                if (opportunities.length > 0) {
-                    const results = await this.orderExecutor.executeOpportunities(opportunities);
-                    const executed = results.filter(r => r.executed);
-                    this.stats.tradesExecuted += executed.length;
-                    this.stats.opportunitiesExecuted += executed.length;
-
-                    // Track positions and record trade for kill switch
-                    for (const result of executed) {
-                        const opp = result.opportunity;
-                        
-                        // Track open position for exit management
-                        this.openPositions.set(opp.market.market.id, {
-                            marketId: opp.market.market.id,
-                            side: opp.action === 'buy_yes' ? 'yes' : 'no',
-                            entryPrice: opp.action === 'buy_yes' ? opp.snapshotYesPrice : opp.snapshotNoPrice,
-                            size: opp.suggestedSize || config.maxPositionSize,
-                            entryTime: new Date(),
-                            forecastProbAtEntry: opp.forecastProbability,
-                        });
-                        
-                        // Mark captured for strategy
-                        if (opp.forecastValue !== undefined) {
-                            if (this.tradingMode === 'speed') {
-                                this.speedStrategy.markOpportunityCaptured(opp.market.market.id, opp.forecastValue);
-                            } else {
-                                this.confidenceStrategy.markOpportunityCaptured(opp.market.market.id, opp.forecastValue);
-                            }
-                        }
+                // Track positions and record trade for kill switch
+                for (const result of executed) {
+                    const opp = result.opportunity;
+                    
+                    // Track open position for exit management
+                    this.openPositions.set(opp.market.market.id, {
+                        marketId: opp.market.market.id,
+                        side: opp.action === 'buy_yes' ? 'yes' : 'no',
+                        entryPrice: opp.action === 'buy_yes' ? opp.snapshotYesPrice : opp.snapshotNoPrice,
+                        size: opp.suggestedSize || config.maxPositionSize,
+                        entryTime: new Date(),
+                        forecastProbAtEntry: opp.forecastProbability,
+                    });
+                    
+                    // Mark captured for strategy
+                    if (opp.forecastValue !== undefined) {
+                        const hybridSignal = signals.find(s => s.marketId === opp.market.market.id) as HybridSignal | undefined;
+                        this.hybridStrategy.markOpportunityCaptured(
+                            opp.market.market.id, 
+                            opp.forecastValue,
+                            hybridSignal?.signalType || 'high_confidence'
+                        );
                     }
-
-                    rateLimitedLogger.info('trade-execution',
-                        `Executed ${executed.length}/${opportunities.length} trades`);
                 }
+
+                rateLimitedLogger.info('trade-execution',
+                    `Executed ${executed.length}/${opportunities.length} trades`);
             }
 
         } catch (error) {
@@ -367,82 +242,6 @@ export class BotManager {
                 logger.debug(`Cycle completed in ${(duration / 1000).toFixed(1)}s`);
             }
         }
-    }
-
-    /**
-     * Run orchestrated cycle with multi-strategy support
-     */
-    private async runOrchestratedCycle(markets: ParsedWeatherMarket[]): Promise<void> {
-        if (!this.strategyOrchestrator) return;
-
-        // Get signals from orchestrator
-        const signals = await this.strategyOrchestrator.analyzeAllMarkets(markets);
-        
-        if (signals.length === 0) {
-            return;
-        }
-
-        this.stats.opportunitiesFound += signals.length;
-
-        // Execute top signals in parallel for ~200ms latency reduction
-        const topSignals = signals.slice(0, 5);  // Max 5 trades per cycle
-        
-        const tradePromises = topSignals.map(async (signal) => {
-            try {
-                // Get current market state
-                const state = this.dataStore.getMarketState(signal.opportunity.market.market.id);
-                if (!state) return null;
-
-                const entryPrice = signal.opportunity.action === 'buy_yes'
-                    ? state.market.yesPrice
-                    : state.market.noPrice;
-
-                // Get position size from orchestrator
-                const positionSize = signal.opportunity.suggestedSize || config.maxPositionSize;
-
-                // Execute trade
-                const result = await this.orderExecutor.executeOpportunity(signal.opportunity);
-                
-                if (result.executed) {
-                    return { signal, entryPrice, positionSize, result };
-                }
-                return null;
-            } catch (error) {
-                logger.error(`[BotManager] Error executing orchestrated trade`, {
-                    error: (error as Error).message,
-                    marketId: signal.opportunity.market.market.id,
-                });
-                return null;
-            }
-        });
-        
-        const results = await Promise.all(tradePromises);
-        
-        // Process successful executions
-        for (const successResult of results.filter((r): r is NonNullable<typeof r> => r !== null)) {
-            this.stats.tradesExecuted++;
-            this.stats.opportunitiesExecuted++;
-            
-            // Record trade for kill switch
-            this.recordTradeResult(0);
-            
-            // Track in orchestrator
-            this.strategyOrchestrator.executeTrade(
-                successResult.signal,
-                successResult.entryPrice,
-                successResult.positionSize
-            );
-
-            logger.info(`[BotManager] Executed ${successResult.signal.strategy} trade`, {
-                marketId: successResult.signal.opportunity.market.market.id,
-                side: successResult.signal.opportunity.action,
-                size: successResult.positionSize,
-                confidence: successResult.signal.confidence.toFixed(2),
-            });
-        }
-
-        rateLimitedLogger.info('trade-execution', 
-            `Orchestrated mode: ${this.stats.opportunitiesExecuted} trades executed`);
     }
 
     /**
@@ -532,21 +331,6 @@ export class BotManager {
      */
     getStats(): BotStats {
         return { ...this.stats };
-    }
-
-    /**
-     * Set trading mode
-     */
-    setMode(mode: TradingMode): void {
-        this.tradingMode = mode;
-        logger.info(`Mode changed to: ${mode.toUpperCase()}`);
-    }
-
-    /**
-     * Get current mode
-     */
-    getMode(): TradingMode {
-        return this.tradingMode;
     }
     
     /**

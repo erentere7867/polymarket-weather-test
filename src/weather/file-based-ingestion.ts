@@ -508,8 +508,11 @@ export class FileBasedIngestion extends EventEmitter {
         
         // Log per-city data
         for (const city of payload.cityData) {
+            const highLow = city.dailyHighF !== undefined 
+                ? ` (high: ${city.dailyHighF.toFixed(1)}°F, low: ${city.dailyLowF?.toFixed(1)}°F)`
+                : '';
             logger.debug(
-                `[FileBasedIngestion] ${city.cityName}: ${city.temperatureF.toFixed(1)}°F, ` +
+                `[FileBasedIngestion] ${city.cityName}: ${city.temperatureF.toFixed(1)}°F${highLow}, ` +
                 `${city.windSpeedMph.toFixed(1)}mph, ${city.totalPrecipitationIn.toFixed(2)}in precip`
             );
         }

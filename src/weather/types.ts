@@ -260,10 +260,12 @@ export interface ExpectedFileInfo {
 export interface CityGRIBData {
     cityName: string;
     coordinates: Coordinates;
-    temperatureC: number;           // Current/primary temp (from f003 for backward compat)
+    temperatureC: number;           // Primary temp (backward compat)
     temperatureF: number;
-    hourlyTempsF: number[];         // NEW: temps for multiple forecast hours (f003, f006, f009, etc.)
-    forecastHours: number[];        // NEW: which forecast hours these temps correspond to
+    dailyHighF?: number;            // Max temp across all forecast hours
+    dailyLowF?: number;             // Min temp across all forecast hours
+    hourlyTempsF: number[];         // Temps for multiple forecast hours
+    forecastHours: number[];        // Which forecast hours these correspond to
     windSpeedMps: number;
     windSpeedMph: number;
     windDirection: number;

@@ -113,6 +113,11 @@ export interface TradingOpportunity {
     snapshotNoPrice: number;    // NO price at detection time
     snapshotTimestamp: Date;    // When the snapshot was taken
 
+    // Exit strategy metadata
+    sigma?: number;              // Sigma value at entry
+    signalType?: 'forecast_change' | 'high_confidence' | 'standard';
+    entryForecastValue?: number; // Forecast probability at entry
+
     // Optional: Suggested position size (set by strategy orchestrator)
     suggestedSize?: number;
 }

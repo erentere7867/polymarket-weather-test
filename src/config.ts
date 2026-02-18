@@ -266,7 +266,7 @@ export const config: Config = {
 
     // Bot settings
     simulationMode: getEnvVarBool('SIMULATION_MODE', false),
-    maxPositionSize: getEnvVarNumber('MAX_POSITION_SIZE', 10),
+    maxPositionSize: getEnvVarNumber('MAX_POSITION_SIZE', 50),
     minEdgeThreshold: getEnvVarNumber('MIN_EDGE_THRESHOLD', 0.05),
     pollIntervalMs: getEnvVarNumber('POLL_INTERVAL_MS', 60000), // 1 minute
     forecastPollIntervalMs: getEnvVarNumber('FORECAST_POLL_INTERVAL_MS', 12000),

@@ -1,24 +1,22 @@
 /**
  * Forecast Monitor
- * Polls weather APIs and updates DataStore with latest forecasts
+ * Reacts to FILE_CONFIRMED events from file-based ingestion and updates DataStore
  * 
- * Webhook Integration:
- * - Integrates with event bus to listen for FORECAST_TRIGGER events
- * - Delegates to FetchModeController when entering FETCH_MODE
- * - Uses IdlePollingService when in IDLE mode
+ * File-based Integration:
+ * - Listens for FILE_CONFIRMED events from file-based ingestion
+ * - Converts GRIB data to weather format for market processing
+ * - Uses state machine to track FETCH_MODE for cities
  */
 
 import { WeatherService } from '../weather/index.js';
-import type { WeatherData } from '../weather/types.js';
+import type { WeatherData, CityGRIBData } from '../weather/types.js';
 import { DataStore } from './data-store.js';
 import { ParsedWeatherMarket } from '../polymarket/types.js';
 import { ForecastSnapshot, ThresholdPosition } from './types.js';
 import { logger, rateLimitedLogger } from '../logger.js';
 import { config } from '../config.js';
-import { eventBus, ForecastTriggerEvent, FetchModeEnterEvent, FetchModeExitEvent } from './event-bus.js';
+import { eventBus, FetchModeEnterEvent, FetchModeExitEvent, FileConfirmedEvent } from './event-bus.js';
 import { ForecastStateMachine, forecastStateMachine } from './forecast-state-machine.js';
-import { FetchModeController } from './fetch-mode-controller.js';
-import { IdlePollingService } from './idle-polling-service.js';
 
 export class ForecastMonitor {
     private weatherService: WeatherService;
@@ -35,8 +33,6 @@ export class ForecastMonitor {
 
     // Webhook integration components
     private stateMachine: ForecastStateMachine;
-    private fetchModeController: FetchModeController | null = null;
-    private idlePollingService: IdlePollingService | null = null;
     private eventBusUnsubscribers: Array<() => void> = [];
     private useWebhookMode: boolean;
 
@@ -64,11 +60,11 @@ export class ForecastMonitor {
      * Setup event bus listeners for webhook integration
      */
     private setupEventBusListeners(): void {
-        // Listen for FORECAST_TRIGGER events from webhooks
-        const unsubscribeTrigger = eventBus.on('FORECAST_TRIGGER', (event: ForecastTriggerEvent) => {
-            this.handleForecastTrigger(event);
+        // Listen for FILE_CONFIRMED events from file-based ingestion
+        const unsubscribeFileConfirmed = eventBus.on('FILE_CONFIRMED', (event: FileConfirmedEvent) => {
+            this.handleFileConfirmed(event);
         });
-        this.eventBusUnsubscribers.push(unsubscribeTrigger);
+        this.eventBusUnsubscribers.push(unsubscribeFileConfirmed);
 
         // Listen for FETCH_MODE_ENTER events
         const unsubscribeEnter = eventBus.on('FETCH_MODE_ENTER', (event: FetchModeEnterEvent) => {
@@ -87,35 +83,70 @@ export class ForecastMonitor {
      * Initialize webhook-based components
      */
     private initializeWebhookComponents(): void {
-        // Create fetch mode controller
-        this.fetchModeController = new FetchModeController(
-            this.stateMachine,
-            this.store,
-            undefined,
-            this.weatherService
-        );
-
-        // Create idle polling service
-        this.idlePollingService = new IdlePollingService(
-            this.stateMachine,
-            this.store,
-            undefined,
-            this.weatherService
-        );
+        // Webhook components initialized via event bus only
     }
 
     /**
-     * Handle FORECAST_TRIGGER event from webhook
+     * Handle FILE_CONFIRMED event from file-based ingestion
      */
-    private handleForecastTrigger(event: ForecastTriggerEvent): void {
-        const { cityId, provider, triggerTimestamp } = event.payload;
+    private async handleFileConfirmed(event: FileConfirmedEvent): Promise<void> {
+        const { model, cycleHour, cityData, timestamp } = event.payload;
         
-        logger.info(`ðŸŽ¯ Forecast trigger received from ${provider} for ${cityId}`, {
-            timestamp: triggerTimestamp.toISOString(),
+        logger.info(`📦 File confirmed: ${model} cycle ${cycleHour}`, {
+            cityCount: cityData.length,
+            timestamp: timestamp.toISOString(),
         });
 
-        // Enter FETCH_MODE for the city (idempotent - will reset if already in FETCH_MODE)
-        this.stateMachine.enterFetchMode(cityId, 'webhook');
+        for (const cityGRIBData of cityData) {
+            await this.processCityGRIBData(cityGRIBData);
+        }
+    }
+
+    /**
+     * Process city data from GRIB file
+     */
+    private async processCityGRIBData(cityData: CityGRIBData): Promise<void> {
+        const markets = this.store.getAllMarkets();
+        const cityMarkets = markets.filter(m => 
+            m.city?.toLowerCase().replace(/\s+/g, '_') === cityData.cityName.toLowerCase().replace(/\s+/g, '_')
+        );
+
+        if (cityMarkets.length === 0) {
+            return;
+        }
+
+        const weatherData = this.convertGRIBToWeatherData(cityData);
+        await this.processCityMarkets(cityData.cityName, cityMarkets, weatherData);
+    }
+
+    /**
+     * Convert CityGRIBData to WeatherData format for processing
+     */
+    private convertGRIBToWeatherData(cityData: CityGRIBData): WeatherData {
+        const hourly = cityData.hourlyTempsF.map((tempF, i) => ({
+            timestamp: new Date(Date.now() + i * 3600000),
+            temperatureF: tempF,
+            temperatureC: (tempF - 32) * 5 / 9,
+            humidity: 50,
+            windSpeedMph: cityData.windSpeedMph,
+            probabilityOfPrecipitation: cityData.precipitationRateMmHr > 0 ? 80 : 20,
+            isDaytime: true,
+        }));
+
+        return {
+            location: cityData.coordinates,
+            source: 'file',
+            fetchedAt: new Date(),
+            hourly,
+            daily: [{
+                date: new Date(),
+                highF: cityData.dailyHighF ?? cityData.temperatureF,
+                lowF: cityData.dailyLowF ?? cityData.temperatureF,
+                highC: ((cityData.dailyHighF ?? cityData.temperatureF) - 32) * 5 / 9,
+                lowC: ((cityData.dailyLowF ?? cityData.temperatureF) - 32) * 5 / 9,
+                probabilityOfPrecipitation: cityData.totalPrecipitationMm > 0 ? 80 : 20,
+            }],
+        };
     }
 
     /**
@@ -125,9 +156,6 @@ export class ForecastMonitor {
         const { cityId, reason } = event.payload;
         
         logger.debug(`Fetch mode entered for ${cityId}`, { reason });
-
-        // In webhook mode, we rely on the FetchModeController for active polling
-        // The IdlePollingService will automatically skip cities in FETCH_MODE
     }
 
     /**
@@ -137,8 +165,6 @@ export class ForecastMonitor {
         const { cityId, reason } = event.payload;
         
         logger.debug(`Fetch mode exited for ${cityId}`, { reason });
-
-        // The IdlePollingService will automatically resume polling for this city
     }
 
     /**
@@ -149,14 +175,10 @@ export class ForecastMonitor {
         this.isRunning = true;
         
         if (this.useWebhookMode) {
-            // In webhook mode, start the idle polling service
-            // The FetchModeController is event-driven and starts automatically
-            this.idlePollingService?.start();
-            
             // Still run regular polling as a fallback
             this.scheduleRegularPoll();
             
-            logger.info('ForecastMonitor started in webhook mode with idle polling');
+            logger.info('ForecastMonitor started in webhook mode');
         } else {
             // Legacy mode: Start regular polling
             this.scheduleRegularPoll();
@@ -176,8 +198,6 @@ export class ForecastMonitor {
         }
         
         // Stop webhook mode components
-        this.idlePollingService?.stop();
-        this.fetchModeController?.dispose();
         
         // Unsubscribe from event bus
         for (const unsubscribe of this.eventBusUnsubscribers) {
@@ -220,31 +240,13 @@ export class ForecastMonitor {
     }
 
     /**
-     * Poll all cities
+     * Poll all cities - No-op in file-based mode
+     * The monitor only reacts to FILE_CONFIRMED events
      */
     private async pollRegular(): Promise<void> {
         if (!this.isRunning) return;
 
-        try {
-            const markets = this.store.getAllMarkets();
-            const cities = this.getCitiesFromMarkets(markets);
-            
-            if (cities.size > 0) {
-                // In webhook mode, skip cities that are in FETCH_MODE
-                const citiesToPoll = this.useWebhookMode
-                    ? this.filterOutFetchModeCities(cities)
-                    : cities;
-                
-                if (citiesToPoll.size > 0) {
-                    logger.debug(`Polling ${citiesToPoll.size} cities`);
-                    await this.pollCities(citiesToPoll);
-                }
-            }
-        } catch (error) {
-            logger.error('Regular poll failed', { error: (error as Error).message });
-        }
-
-        // Schedule next poll
+        // File-based mode: no active polling, just reschedule
         this.scheduleRegularPoll();
     }
 
@@ -284,43 +286,6 @@ export class ForecastMonitor {
     }
 
     /**
-     * Poll a set of cities using batch fetching
-     */
-    private async pollCities(cityGroups: Map<string, ParsedWeatherMarket[]>): Promise<void> {
-        const cities = Array.from(cityGroups.keys());
-        if (cities.length === 0) return;
-
-        try {
-            // Use batch fetching for efficiency
-            const batchResults = await this.weatherService.getForecastBatch(
-                cities.map(city => ({ cityName: city }))
-            );
-
-            // Process each city's results
-            const updatePromises = Array.from(cityGroups.entries()).map(([city, cityMarkets]) => {
-                const weatherData = batchResults.get(city);
-                if (weatherData) {
-                    // Update cache
-                    this.cityCache.set(city, { data: weatherData, timestamp: new Date() });
-                    // Process markets for this city
-                    return this.processCityMarkets(city, cityMarkets, weatherData);
-                }
-                return Promise.resolve();
-            });
-            await Promise.all(updatePromises);
-        } catch (error) {
-            logger.error('Batch fetch failed, falling back to individual fetches', { error: (error as Error).message });
-            // Fallback to individual fetches
-            const updatePromises = Array.from(cityGroups.entries()).map(([city, cityMarkets]) =>
-                this.updateCityForecasts(city, cityMarkets).catch(error => {
-                    logger.error(`Failed to update forecasts for ${city}`, { error: (error as Error).message });
-                })
-            );
-            await Promise.all(updatePromises);
-        }
-    }
-
-    /**
      * Get webhook mode status
      */
     isWebhookModeEnabled(): boolean {
@@ -335,13 +300,6 @@ export class ForecastMonitor {
     }
 
     /**
-     * Get idle polling service stats (for monitoring)
-     */
-    getIdlePollingStats() {
-        return this.idlePollingService?.getStats();
-    }
-
-    /**
      * Manually enter FETCH_MODE for a city (for testing or manual override)
      */
     enterFetchMode(cityId: string): void {
@@ -353,25 +311,6 @@ export class ForecastMonitor {
      */
     exitFetchMode(cityId: string): void {
         this.stateMachine.exitFetchMode(cityId, 'manual');
-    }
-
-    private async updateCityForecasts(city: string, markets: ParsedWeatherMarket[]): Promise<void> {
-        try {
-            let weatherData: WeatherData;
-            const cached = this.cityCache.get(city);
-
-            if (cached && (Date.now() - cached.timestamp.getTime() < this.cacheTtlMs)) {
-                weatherData = cached.data;
-            } else {
-                weatherData = await this.weatherService.getForecastByCity(city);
-                this.cityCache.set(city, { data: weatherData, timestamp: new Date() });
-            }
-
-            // Q1: Delegate to shared processing method
-            await this.processCityMarkets(city, markets, weatherData);
-        } catch (error) {
-            throw error;
-        }
     }
 
     /**
@@ -397,7 +336,8 @@ export class ForecastMonitor {
             const significantChangeThreshold = 1;
 
             const sourceChanged = previousSource !== undefined && previousSource !== weatherData.source;
-            const valueChanged = !sourceChanged && changeAmount >= significantChangeThreshold;
+            // Value change is detected regardless of source change - the forecast value matters, not where it came from
+            const valueChanged = changeAmount >= significantChangeThreshold;
 
             const now = new Date();
             const changeTimestamp = valueChanged ? now : (previousChangeTimestamp || now);

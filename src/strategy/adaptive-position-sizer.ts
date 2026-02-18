@@ -79,15 +79,7 @@ export class AdaptivePositionSizer {
     // Cap at max position size
     const position = Math.min(maxPosition, kellyPosition);
 
-    // 7. Ensure minimum viable position
-    if (position < 5) {
-      return {
-        size: 0,
-        heatContribution: 0,
-        kellyFraction: 0,
-        confidence: signal.confidence,
-      };
-    }
+
 
     logger.debug(`[PositionSizer] Calculated position for ${signal.strategy}`, {
       baseKelly: baseKelly.toFixed(3),

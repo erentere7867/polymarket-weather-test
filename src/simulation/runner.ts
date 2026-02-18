@@ -16,9 +16,6 @@
  */
 
 import { ParsedWeatherMarket } from '../polymarket/types.js';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import { WeatherScanner } from '../polymarket/weather-scanner.js';
 import { GammaClient } from '../polymarket/gamma-client.js';
 import { PortfolioSimulator } from './portfolio.js';
@@ -36,7 +33,6 @@ import { EntryOptimizer } from '../strategy/entry-optimizer.js';
 import { MarketModel } from '../probability/market-model.js';
 import { MarketImpactModel, LiquidityProfile } from '../strategy/market-impact.js';
 import { CrossMarketArbitrage } from '../strategy/cross-market-arbitrage.js';
-import { SpeedArbitrageStrategy } from '../strategy/speed-arbitrage.js';
 import { normalCDF } from '../probability/normal-cdf.js';
 
 /**
@@ -145,36 +141,7 @@ export class SimulationRunner {
     private correlationSim: CorrelationSimulation;
     private correlatedMarketGroups: Map<string, string[]> = new Map();
 
-    // Speed Arbitrage - store state in data/ folder (outside git, in project root)
-    // Falls back to /tmp if data/ is not writable
-    private static readonly SPEED_ARB_STATE_FILE = (() => {
-        const primary = path.join(process.cwd(), 'data', '.speed-arb-state.json');
-        const fallback = '/tmp/.polymarket-speed-arb-state.json';
-        try {
-            // Test if data/ is writable
-            const dir = path.dirname(primary);
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
-            // Test write
-            const testFile = path.join(dir, '.write-test');
-            fs.writeFileSync(testFile, 'test');
-            fs.unlinkSync(testFile);
-            return primary;
-        } catch (e) {
-            logger.warn(`[SpeedArb] Cannot use data/ folder, falling back to ${fallback}: ${(e as Error).message}`);
-            return fallback;
-        }
-    })();
-    private speedArbEnabled: boolean = true;  // ENABLED by default for better PnL
-    private speedArbStrategy: SpeedArbitrageStrategy;
-    private speedArbStats = {
-        tradesExecuted: 0,
-        totalPnl: 0,
-        lastTradeTime: null as Date | null,
-        opportunitiesDetected: 0,
-        opportunitiesSkipped: 0,
-    };
+
 
     constructor(startingCapital: number = 10000, maxCycles: number = 20) {
         logger.info(`[SimulationRunner] Initializing v3 with startingCapital: $${startingCapital}`);
@@ -185,16 +152,10 @@ export class SimulationRunner {
         this.forecastMonitor = new ForecastMonitor(this.store);
         this.strategy = new ConfidenceCompressionStrategy(this.store);
         this.marketModel = new MarketModel(this.store);
-        this.exitOptimizer = new ExitOptimizer(this.marketModel);
+        this.exitOptimizer = new ExitOptimizer(this.marketModel, this.store);
         this.marketImpactModel = new MarketImpactModel();
         this.entryOptimizer = new EntryOptimizer(config.maxPositionSize);
         this.crossMarketArbitrage = new CrossMarketArbitrage();
-
-        // Initialize Speed Arbitrage Strategy
-        this.speedArbStrategy = new SpeedArbitrageStrategy(this.store);
-
-        // Load persisted speed arb state
-        this.loadSpeedArbState();
 
         // Initialize Simulator
         this.simulator = new PortfolioSimulator(startingCapital);
@@ -303,7 +264,7 @@ export class SimulationRunner {
     }
 
     async start(): Promise<void> {
-        logger.info('🚀 Starting Speed Arbitrage Simulation v3...');
+        logger.info('🚀 Starting Hybrid Trading Simulation...');
         this.isRunning = true;
 
         // 1. Initial Market Scan
@@ -449,7 +410,7 @@ export class SimulationRunner {
             await this.detectCrossMarketOpportunities();
         }
 
-        // 3. Detect Speed Arbitrage Opportunities
+        // 3. Detect Hybrid Trading Opportunities
         const startTime = Date.now();
         const signals = this.strategy.detectOpportunities();
         const executionTime = Date.now() - startTime;
@@ -541,6 +502,9 @@ export class SimulationRunner {
         confidence: number;
         reason: string;
         isGuaranteed?: boolean;
+        sigma?: number;
+        signalType?: 'forecast_change' | 'high_confidence' | 'standard';
+        entryForecastValue?: number;
     }): Promise<void> {
         logger.info(`Processing signal for ${signal.marketId} (Size: ${signal.size})`);
 
@@ -615,6 +579,11 @@ export class SimulationRunner {
 
         // Execute
         try {
+            const effectiveSigma = signal.sigma ?? 1.0;
+            const signalType: 'forecast_change' | 'high_confidence' | 'standard' = 
+                effectiveSigma >= 3.0 ? 'high_confidence' :
+                effectiveSigma >= 2.0 ? 'high_confidence' : 'standard';
+
             const position = this.simulator.openPosition({
                 market: state.market,
                 forecastProbability: 0,
@@ -628,6 +597,9 @@ export class SimulationRunner {
                 snapshotYesPrice: state.market.yesPrice * priceAdjustment,
                 snapshotNoPrice: state.market.noPrice * priceAdjustment,
                 snapshotTimestamp: new Date(),
+                sigma: effectiveSigma,
+                signalType: signal.signalType || signalType,
+                entryForecastValue: signal.entryForecastValue || state.lastForecast?.forecastValue,
             }, size);
 
             if (!position) {
@@ -685,37 +657,22 @@ export class SimulationRunner {
         const openPositions = this.simulator.getOpenPositions();
 
         for (const pos of openPositions) {
-            const state = this.store.getMarketState(pos.marketId);
-            const forecastProb = state?.lastForecast?.probability || 0.5;
+            const exitResult = this.exitOptimizer.checkExit(pos, pos.currentPrice);
 
-            const pnlPercent = (pos.currentPrice - pos.entryPrice) / pos.entryPrice;
-
-            const exitSignal = this.exitOptimizer.checkExit({
-                marketId: pos.marketId,
-                side: pos.side,
-                entryPrice: pos.entryPrice,
-                currentPrice: pos.currentPrice,
-                size: pos.shares,
-                entryTime: pos.entryTime,
-                pnl: pos.unrealizedPnL,
-                pnlPercent
-            }, forecastProb);
-
-            if (exitSignal.shouldExit) {
-                // Track exit performance
+            if (exitResult.shouldExit) {
                 this.componentPerformance.exitOptimizer.exitsTriggered++;
 
-                if (exitSignal.reason?.includes('Trailing Stop')) {
+                if (exitResult.reason?.includes('Trailing')) {
                     this.componentPerformance.exitOptimizer.trailingStopHits++;
-                } else if (exitSignal.reason?.includes('Take Profit')) {
+                } else if (exitResult.reason?.includes('Take profit')) {
                     this.componentPerformance.exitOptimizer.takeProfitHits++;
-                } else if (exitSignal.reason?.includes('Stop Loss')) {
+                } else if (exitResult.reason?.includes('Stop loss')) {
                     this.componentPerformance.exitOptimizer.stopLossHits++;
                 }
 
                 this.componentPerformance.exitOptimizer.totalPnl += pos.unrealizedPnL;
 
-                this.simulator.closePosition(pos.id, pos.currentPrice, exitSignal.reason || 'Unknown');
+                this.simulator.closePosition(pos.id, pos.currentPrice, exitResult.reason || 'Unknown');
             }
         }
     }
@@ -954,78 +911,15 @@ export class SimulationRunner {
         return this.optimizationParameters.map(p => ({ ...p }));
     }
 
-    updateSettings(settings: { takeProfit: number; stopLoss: number; skipPriceCheck?: boolean; speedArbEnabled?: boolean }): void {
+    updateSettings(settings: { takeProfit: number; stopLoss: number; skipPriceCheck?: boolean }): void {
         this.exitOptimizer.updateConfig(settings.takeProfit, settings.stopLoss);
-
-        if (typeof settings.speedArbEnabled === 'boolean') {
-            this.setSpeedArbEnabled(settings.speedArbEnabled);
-        }
-
         logger.info('Simulation settings updated');
     }
 
-    getSettings(): { takeProfit: number; stopLoss: number; skipPriceCheck: boolean; speedArbEnabled: boolean } {
+    getSettings(): { takeProfit: number; stopLoss: number; skipPriceCheck: boolean } {
         return {
             ...this.exitOptimizer.getConfig(),
-            skipPriceCheck: this.speedArbEnabled,
-            speedArbEnabled: this.speedArbEnabled,
-        };
-    }
-
-    /**
-     * Enable/disable speed arbitrage mode (persisted to disk)
-     */
-    setSpeedArbEnabled(enabled: boolean): void {
-        this.speedArbEnabled = enabled;
-        this.saveSpeedArbState();
-        logger.info(`⚡ Speed Arbitrage mode ${enabled ? 'ENABLED' : 'DISABLED'}`);
-    }
-
-    private saveSpeedArbState(): void {
-        try {
-            const dir = path.dirname(SimulationRunner.SPEED_ARB_STATE_FILE);
-            if (!fs.existsSync(dir)) {
-                logger.info(`[SpeedArb] Creating state directory: ${dir}`);
-                fs.mkdirSync(dir, { recursive: true });
-            }
-            fs.writeFileSync(SimulationRunner.SPEED_ARB_STATE_FILE, JSON.stringify({ enabled: this.speedArbEnabled }));
-            logger.info(`[SpeedArb] State saved: enabled=${this.speedArbEnabled} to ${SimulationRunner.SPEED_ARB_STATE_FILE}`);
-        } catch (e) {
-            logger.error(`[SpeedArb] Failed to save state: ${(e as Error).message}`);
-        }
-    }
-
-    private loadSpeedArbState(): void {
-        try {
-            logger.info(`[SpeedArb] Looking for state file at: ${SimulationRunner.SPEED_ARB_STATE_FILE}`);
-            if (fs.existsSync(SimulationRunner.SPEED_ARB_STATE_FILE)) {
-                const content = fs.readFileSync(SimulationRunner.SPEED_ARB_STATE_FILE, 'utf-8');
-                logger.info(`[SpeedArb] Raw state file content: ${content}`);
-                const data = JSON.parse(content);
-                logger.info(`[SpeedArb] Loaded state file: ${JSON.stringify(data)}`);
-                if (typeof data.enabled === 'boolean') {
-                    this.speedArbEnabled = data.enabled;
-                    logger.info(`⚡ Speed Arbitrage state loaded from disk: ${this.speedArbEnabled ? 'ENABLED' : 'DISABLED'}`);
-                }
-            } else {
-                logger.info(`[SpeedArb] No state file found, using default: ENABLED`);
-            }
-        } catch (e) {
-            logger.warn(`[SpeedArb] Could not load speed arb state: ${(e as Error).message}`);
-        }
-    }
-
-    /**
-     * Get speed arbitrage stats for dashboard
-     */
-    getSpeedArbStats(): { enabled: boolean; trades: number; pnl: number; opportunities: number; skipped: number; lastTradeTime: Date | null } {
-        return {
-            enabled: this.speedArbEnabled,
-            trades: this.speedArbStats.tradesExecuted,
-            pnl: this.speedArbStats.totalPnl,
-            opportunities: this.speedArbStats.opportunitiesDetected,
-            skipped: this.speedArbStats.opportunitiesSkipped,
-            lastTradeTime: this.speedArbStats.lastTradeTime,
+            skipPriceCheck: true,
         };
     }
 
@@ -1043,165 +937,103 @@ export class SimulationRunner {
 
     /**
      * Execute opportunity immediately when forecast changes (bypass cycle loop)
-     * When speedArbEnabled: uses SpeedArbitrageStrategy for instant execution
-     * When disabled: falls back to ConfidenceCompression strategy
      */
     private async executeImmediateOpportunity(marketId: string): Promise<void> {
         const executionStart = Date.now();
         const state = this.store.getMarketState(marketId);
         if (!state) return;
 
-        // Update prices first to get latest market data
         this.updatePortfolioPrices();
 
-        // =====================================================
-        // SPEED ARBITRAGE FAST PATH
-        // =====================================================
-        if (this.speedArbEnabled) {
-            this.speedArbStats.opportunitiesDetected++;
+        const forecast = state.lastForecast;
+        if (!forecast) return;
 
-            const forecast = state.lastForecast;
-            if (!forecast) {
-                this.speedArbStats.opportunitiesSkipped++;
-                return;
-            }
+        const market = state.market;
+        let threshold = market.threshold;
+        if (threshold === undefined) return;
+        if (market.thresholdUnit === 'C') {
+            threshold = (threshold * 9 / 5) + 32;
+        }
 
-            const market = state.market;
-            let threshold = market.threshold;
-            if (threshold === undefined) return;
-            if (market.thresholdUnit === 'C') {
-                threshold = (threshold * 9 / 5) + 32;
-            }
+        let uncertainty: number;
+        const daysToEvent = market.targetDate
+            ? Math.max(0, (new Date(market.targetDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+            : 3;
+        switch (market.metricType) {
+            case 'temperature_high':
+            case 'temperature_low':
+            case 'temperature_threshold':
+                uncertainty = 1.5 + 0.8 * daysToEvent;
+                break;
+            default:
+                uncertainty = 3 + 1.0 * daysToEvent;
+        }
 
-            // Dynamic uncertainty based on days to event
-            let uncertainty: number;
-            const daysToEvent = market.targetDate
-                ? Math.max(0, (new Date(market.targetDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
-                : 3;
-            switch (market.metricType) {
-                case 'temperature_high':
-                case 'temperature_low':
-                case 'temperature_threshold':
-                    uncertainty = 1.5 + 0.8 * daysToEvent;
-                    break;
-                default:
-                    uncertainty = 3 + 1.0 * daysToEvent;
-            }
+        const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
 
-            const sigma = Math.abs(forecast.forecastValue - threshold) / uncertainty;
-
-            // NO sigma gate — speed arb bypasses all entry checks
-
-            // Calculate probability using CDF
-            const z = (forecast.forecastValue - threshold) / uncertainty;
-            let forecastProb: number;
-            if (market.comparisonType === 'above') {
-                forecastProb = normalCDF(z);
-            } else if (market.comparisonType === 'below') {
-                forecastProb = 1 - normalCDF(z);
-            } else {
-                return;
-            }
-
-            // Get current market price (stale — that's the opportunity)
-            const priceYes = market.yesPrice;
-            const priceNo = market.noPrice;
-
-            // Calculate edge directly — no EdgeCalculator overhead
-            const edgeYes = forecastProb - priceYes;
-            const edgeNo = (1 - forecastProb) - priceNo;
-
-            let side: 'yes' | 'no';
-            let edge: number;
-            if (edgeYes > edgeNo) {
-                side = 'yes';
-                edge = edgeYes;
-            } else {
-                side = 'no';
-                edge = edgeNo;
-            }
-
-            // NO edge minimum — any positive edge is accepted, stale price IS the edge
-            if (edge <= 0) {
-                this.speedArbStats.opportunitiesSkipped++;
-                return;
-            }
-
-            // Only check: do we already hold this position?
-            const existingPos = this.simulator.getAllPositions().find(p => p.marketId === marketId && p.side === side);
-            if (existingPos) {
-                this.speedArbStats.opportunitiesSkipped++;
-                return;
-            }
-
-            // Full position size for speed arb — max conviction
-            const size = config.maxPositionSize;
-
-            try {
-                const position = this.simulator.openPosition({
-                    market: state.market,
-                    forecastProbability: forecastProb,
-                    marketProbability: priceYes,
-                    edge: edge,
-                    action: side === 'yes' ? 'buy_yes' : 'buy_no',
-                    confidence: Math.min(1, sigma / 3),
-                    reason: `⚡ SPEED ARB: ${sigma.toFixed(1)}σ, edge ${(edge * 100).toFixed(1)}%, forecast ${forecast.forecastValue.toFixed(1)} vs threshold ${threshold}`,
-                    weatherDataSource: 'noaa',
-                    isGuaranteed: sigma >= 3,
-                    snapshotYesPrice: priceYes,
-                    snapshotNoPrice: priceNo,
-                    snapshotTimestamp: new Date(),
-                }, size);
-
-                if (position) {
-                    const latencyMs = Date.now() - executionStart;
-                    this.speedArbStats.tradesExecuted++;
-                    this.speedArbStats.lastTradeTime = new Date();
-                    this.speedArbStrategy.markOpportunityCaptured(marketId, forecast.forecastValue);
-                    logger.info(`⚡ SPEED ARB EXECUTED in ${latencyMs}ms: ${position.id} | ${side.toUpperCase()} | edge ${(edge * 100).toFixed(1)}% | size $${size} | ${market.market.question.substring(0, 50)}`);
-                }
-            } catch (e) {
-                logger.error(`Exception in speed arb execution: ${(e as Error).message}`);
-            }
+        const z = (forecast.forecastValue - threshold) / uncertainty;
+        let forecastProb: number;
+        if (market.comparisonType === 'above') {
+            forecastProb = normalCDF(z);
+        } else if (market.comparisonType === 'below') {
+            forecastProb = 1 - normalCDF(z);
+        } else {
             return;
         }
 
-        // =====================================================
-        // CONFIDENCE COMPRESSION FALLBACK PATH
-        // =====================================================
-        const allSignals = this.strategy.detectOpportunities();
-        const marketSignals = allSignals.filter(s => s.marketId === marketId);
+        const priceYes = market.yesPrice;
+        const priceNo = market.noPrice;
 
-        for (const signal of marketSignals) {
-            const existingPos = this.simulator.getAllPositions().find(p => p.marketId === signal.marketId && p.side === signal.side);
-            if (existingPos) continue;
+        const edgeYes = forecastProb - priceYes;
+        const edgeNo = (1 - forecastProb) - priceNo;
 
-            const size = signal.size;
-            if (size < 5) continue;
+        let side: 'yes' | 'no';
+        let edge: number;
+        if (edgeYes > edgeNo) {
+            side = 'yes';
+            edge = edgeYes;
+        } else {
+            side = 'no';
+            edge = edgeNo;
+        }
 
-            try {
-                const position = this.simulator.openPosition({
-                    market: state.market,
-                    forecastProbability: 0,
-                    marketProbability: 0,
-                    edge: signal.estimatedEdge,
-                    action: signal.side === 'yes' ? 'buy_yes' : 'buy_no',
-                    confidence: signal.confidence,
-                    reason: signal.reason + ' (IMMEDIATE)',
-                    weatherDataSource: 'noaa',
-                    isGuaranteed: signal.isGuaranteed || false,
-                    snapshotYesPrice: state.market.yesPrice,
-                    snapshotNoPrice: state.market.noPrice,
-                    snapshotTimestamp: new Date(),
-                }, size);
+        if (edge <= 0) return;
 
-                if (position && state.lastForecast) {
-                    this.strategy.markOpportunityCaptured(signal.marketId, state.lastForecast.forecastValue);
-                    logger.info(`⚡ IMMEDIATE trade executed: ${position.id}`);
-                }
-            } catch (e) {
-                logger.error(`Exception in immediate execution: ${(e as Error).message}`);
+        const existingPos = this.simulator.getAllPositions().find(p => p.marketId === marketId && p.side === side);
+        if (existingPos) return;
+
+        const size = config.maxPositionSize;
+
+        const signalType: 'forecast_change' | 'high_confidence' | 'standard' = 
+            sigma >= 3.0 ? 'high_confidence' :
+            sigma >= 2.0 ? 'high_confidence' : 'standard';
+
+        try {
+            const position = this.simulator.openPosition({
+                market: state.market,
+                forecastProbability: forecastProb,
+                marketProbability: priceYes,
+                edge: edge,
+                action: side === 'yes' ? 'buy_yes' : 'buy_no',
+                confidence: Math.min(1, sigma / 3),
+                reason: `${sigma.toFixed(1)}σ, edge ${(edge * 100).toFixed(1)}%, forecast ${forecast.forecastValue.toFixed(1)} vs threshold ${threshold}`,
+                weatherDataSource: 'noaa',
+                isGuaranteed: sigma >= 3,
+                snapshotYesPrice: priceYes,
+                snapshotNoPrice: priceNo,
+                snapshotTimestamp: new Date(),
+                sigma: sigma,
+                signalType: signalType,
+                entryForecastValue: forecast.forecastValue,
+            }, size);
+
+            if (position) {
+                const latencyMs = Date.now() - executionStart;
+                this.strategy.markOpportunityCaptured(marketId, forecast.forecastValue);
+                logger.info(`IMMEDIATE EXECUTION in ${latencyMs}ms: ${position.id} | ${side.toUpperCase()} | edge ${(edge * 100).toFixed(1)}% | size $${size} | ${market.market.question.substring(0, 50)}`);
             }
+        } catch (e) {
+            logger.error(`Exception in immediate execution: ${(e as Error).message}`);
         }
     }
 
